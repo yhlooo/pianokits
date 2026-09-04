@@ -1,0 +1,62 @@
+:root {
+  color-scheme: light dark;
+  --bg: #fafafa;
+  --text: #1a1a1a;
+  --muted: #555;
+  --accent: #6d28d9;
+  font-family:
+    system-ui, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16161a;
+    --text: #f5f5f5;
+    --muted: #a1a1aa;
+    --accent: #a78bfa;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.hello {
+  min-height: 100svh;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  padding: 2rem;
+  box-sizing: border-box;
+}
+
+.hello__eyebrow {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.hello h1 {
+  margin: 0 0 0.75rem;
+  font-size: clamp(2.5rem, 8vw, 4.5rem);
+  line-height: 1.1;
+}
+
+.hello__hint {
+  margin: 0;
+  color: var(--muted);
+}
+
+.hello code {
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+  font-size: 0.9em;
+}

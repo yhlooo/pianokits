@@ -33,11 +33,13 @@
     "type=bind,source=${localEnv:HOME}/.gnupg,target=/root/.gnupg-host,readonly"
   ],
   // One-way sync host GPG keys into the container's own ~/.gnupg (host stays
-  // the source of truth; runs again on every container rebuild).
-  "postCreateCommand": ".devcontainer/post-create.sh",
+  // the source of truth), then install project dependencies so the workspace
+  // is ready to run. Both are idempotent and re-run on every container
+  // rebuild; pnpm install also refreshes after toolchain (Node/pnpm) updates.
+  "postCreateCommand": ".devcontainer/post-create.sh && pnpm install",
   // dsh web serves the DeepSeek Harness Web UI on 127.0.0.1:3080;
-  // 5173 is the Vite dev server default for the TypeScript web app.
-  "forwardPorts": [3080, 5173],
+  // 5173/4173 are the Vite dev server and build-preview ports for the web app.
+  "forwardPorts": [3080, 5173, 4173],
   "portsAttributes": {
     "3080": {
       "label": "DSH Web UI",
@@ -46,6 +48,10 @@
     "5173": {
       "label": "Web App (Vite dev)",
       "onAutoForward": "openBrowser"
+    },
+    "4173": {
+      "label": "Web App (Vite preview)",
+      "onAutoForward": "notify"
     }
   },
   "customizations": {

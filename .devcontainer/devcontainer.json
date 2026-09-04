@@ -1,0 +1,89 @@
+{
+  "name": "pianokits-dev",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "remoteUser": "root",
+  // Run the image CMD (dsh web autostart + keep-alive) as PID 1 instead of
+  // the devcontainer CLI's default keep-alive command. Processes spawned by
+  // lifecycle hooks get killed when their exec session ends, but PID 1's
+  // children survive, which is what keeps dsh running.
+  "overrideCommand": false,
+  "containerEnv": {
+    "SHELL": "/usr/bin/zsh"
+  },
+  // Persist the dsh user-data root (~/.dsh: profiles, storages, model config,
+  // sessions, workspaces) in a named volume so it survives container rebuilds.
+  "mounts": [
+    {
+      "source": "pianokits-dsh-home",
+      "target": "/root/.dsh",
+      "type": "volume"
+    },
+    // Share the host's SSH keys so git over SSH works inside the container.
+    {
+      "source": "${localEnv:HOME}/.ssh",
+      "target": "/root/.ssh",
+      "type": "bind"
+    },
+    // Stage the host's GPG home read-only. GPG daemons (agent/keyboxd) must
+    // not run against the live host dir: POSIX locks pass through the bind
+    // mount and the host's GPG Suite holds them. postCreateCommand copies
+    // the staged files into the container-local ~/.gnupg instead.
+    "type=bind,source=${localEnv:HOME}/.gnupg,target=/root/.gnupg-host,readonly"
+  ],
+  // One-way sync host GPG keys into the container's own ~/.gnupg (host stays
+  // the source of truth; runs again on every container rebuild).
+  "postCreateCommand": ".devcontainer/post-create.sh",
+  // dsh web serves the DeepSeek Harness Web UI on 127.0.0.1:3080;
+  // 5173 is the Vite dev server default for the TypeScript web app.
+  "forwardPorts": [3080, 5173],
+  "portsAttributes": {
+    "3080": {
+      "label": "DSH Web UI",
+      "onAutoForward": "notify"
+    },
+    "5173": {
+      "label": "Web App (Vite dev)",
+      "onAutoForward": "openBrowser"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "terminal.integrated.profiles.linux": {
+          "zsh": {
+            "path": "/usr/bin/zsh"
+          }
+        },
+        // TypeScript / Web development settings
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+          "source.fixAll.eslint": "explicit"
+        },
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "[typescript]": {
+          "editor.defaultFormatter": "esbenp.prettier-vscode"
+        },
+        "[typescriptreact]": {
+          "editor.defaultFormatter": "esbenp.prettier-vscode"
+        },
+        "[json]": {
+          "editor.defaultFormatter": "esbenp.prettier-vscode"
+        },
+        "[jsonc]": {
+          "editor.defaultFormatter": "esbenp.prettier-vscode"
+        },
+        "typescript.tsdk": "node_modules/typescript/lib",
+        "npm.packageManager": "pnpm",
+        "eslint.format.enable": true
+      },
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "EditorConfig.EditorConfig"
+      ]
+    }
+  }
+}

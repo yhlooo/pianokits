@@ -921,7 +921,8 @@ input[type='range']::-moz-range-thumb {
 }
 
 .midi-debug__inner {
-  margin: auto 0;
+  /* auto 四边：横向按自由空间居中，纵向在内容不足一屏时居中、超出时退化为 0（可滚动） */
+  margin: auto;
   width: 100%;
   max-width: 1024px;
   display: flex;
@@ -1078,9 +1079,16 @@ input[type='range']::-moz-range-thumb {
   height: auto;
 }
 
+/* 线宽随线间距等比（S=12，见 midi-keyboard.ts）：保持与放大前一致的视觉粗细 */
 .midi-debug__staff-lines line {
   stroke: var(--paper-text);
-  stroke-width: 1;
+  stroke-width: 2;
+}
+
+/* 乐谱起始竖线：最左端一根竖线，纵向贯穿、连接两根谱表 */
+.midi-debug__startbar {
+  stroke: var(--paper-text);
+  stroke-width: 2;
 }
 
 .midi-debug__clef {
@@ -1090,13 +1098,26 @@ input[type='range']::-moz-range-thumb {
 
 .midi-debug__snote line {
   stroke: var(--paper-text);
-  stroke-width: 1;
+  stroke-width: 2;
 }
 
+/* 不描边：让符头的实际墨迹等于几何尺寸，符头间距计算（三度相切）才准确 */
 .midi-debug__shead {
   fill: var(--paper-text);
+}
+
+/* ---------- 八度记号（8va / 15ma / 8vb / 15mb） ---------- */
+/* 记谱惯例：斜体文本 + 横线，横线末端带一个朝向音符的小竖钩 */
+.midi-debug__ottava {
+  fill: var(--paper-text);
+  font-family: 'EB Garamond', Georgia, serif;
+  font-style: italic;
+}
+
+.midi-debug__ottava-bar {
   stroke: var(--paper-text);
   stroke-width: 1;
+  stroke-linecap: round;
 }
 
 /* ---------- 降低动效偏好 ---------- */

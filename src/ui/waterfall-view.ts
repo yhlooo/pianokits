@@ -14,6 +14,10 @@ const KEYBOARD_MAX_H = 140
 const DEFAULT_PX_PER_SEC = 140
 /** 点亮键释放后的渐隐时长（ms） */
 const KEY_FADE_MS = 80
+/** 黑键几何（相对白键列宽）：左偏移、键宽、键长占键盘高比例 */
+const BLACK_KEY_INSET = 0.18
+const BLACK_KEY_WIDTH = 0.72
+const BLACK_KEY_HEIGHT = 0.62
 
 export interface WaterfallViewCallbacks {
   onSeek(seconds: number): void
@@ -34,7 +38,7 @@ function rgba(c: readonly [number, number, number] | readonly number[], a: numbe
  * 底部为 88 键钢琴键盘（判定线即键盘上沿，无中间判定线）；音符条自上而下坠落，
  * 落到琴键的瞬间即发声时刻（与音频调度共用同一时钟，天然对齐），发声期间琴键点亮。
  * 视觉（视觉风格指南 §6.4）：按轨五色循环（一轨一色，第 6 轨复用第 1 色）+ 力度→明度映射 + 音区参考线。
- * 交互：点击跳转、拖拽平移（脱离跟随）、双击恢复跟随、滚轮缩放。
+ * 交互：点击跳转、拖拽平移（联动进度条，松手后恢复跟随）、双击恢复跟随。
  */
 export class WaterfallView implements View {
   readonly el: HTMLElement
@@ -86,8 +90,11 @@ export class WaterfallView implements View {
       if (Math.abs(dy) > 3) {
         this.dragStart.moved = true
         this.follow = false
-        // 拖拽向下 = 内容下移 = 视窗向更早时间平移
-        this.viewTopSec = this.dragStart.viewTopSec - dy / this.pxPerSecond
+        // 拖拽向下 = 内容下移 = 视窗向更早时间平移（与手势同向）
+        this.viewTopSec = this.dragStart.viewTopSec + dy / this.pxPerSecond
+        // 拖动联动进度条：判定线（键盘上沿）时间即当前播放位置
+        const tKey = this.viewTopSec - this.noteAreaHeight() / this.pxPerSecond
+        this.cbs.onSeek(tKey)
       }
     })
     this.canvas.addEventListener('pointerup', (e) => {
@@ -100,24 +107,13 @@ export class WaterfallView implements View {
           // 点击处的时间：t = viewTopSec - y / pxPerSecond
           const t = this.viewTopSec - e.offsetY / this.pxPerSecond
           if (t >= 0) {
-            this.follow = true
             this.cbs.onSeek(t)
           }
         }
       }
+      // 拖拽/点击结束后恢复跟随播放（拖拽期间的脱离跟随仅用于手势平移期间）
+      this.follow = true
     })
-    this.canvas.addEventListener(
-      'wheel',
-      (e) => {
-        e.preventDefault()
-        const anchorT = this.viewTopSec - e.offsetY / this.pxPerSecond
-        const factor = Math.exp(-e.deltaY * 0.001)
-        this.pxPerSecond = Math.max(10, Math.min(600, this.pxPerSecond * factor))
-        this.viewTopSec = anchorT + e.offsetY / this.pxPerSecond
-        this.render()
-      },
-      { passive: false },
-    )
     this.canvas.addEventListener('dblclick', () => {
       this.follow = true
     })
@@ -257,20 +253,12 @@ export class WaterfallView implements View {
         ivory.addColorStop(0, '#f4f1eb')
         ivory.addColorStop(1, '#e3dfd7')
         for (let i = 0; i < PITCH_COUNT; i++) {
-          const pc = (MIN_PITCH + i) % 12
           const x = i * keyW
           octx.fillStyle = ivory
           octx.fillRect(x, 0, keyW, this.keyboardH)
           octx.strokeStyle = 'rgba(0,0,0,0.25)'
           octx.lineWidth = 0.5
           octx.strokeRect(x + 0.5, 0.5, keyW - 1, this.keyboardH - 1)
-          if (pc === 0) {
-            const octave = Math.floor((MIN_PITCH + i) / 12) - 1
-            octx.fillStyle = 'rgba(0,0,0,0.45)'
-            octx.font = '10px system-ui, sans-serif'
-            octx.textAlign = 'left'
-            octx.fillText(`C${octave}`, x + 3, this.keyboardH - 6)
-          }
         }
         // 白键键底阴影线
         octx.fillStyle = 'rgba(0,0,0,0.16)'
@@ -283,9 +271,9 @@ export class WaterfallView implements View {
           const pc = (MIN_PITCH + i) % 12
           if (!BLACK_PCS.has(pc)) continue
           const x = i * keyW
-          const bx = x - keyW * 0.18
-          const bw = keyW * 0.72
-          const bh = this.keyboardH * 0.62
+          const bx = x - keyW * BLACK_KEY_INSET
+          const bw = keyW * BLACK_KEY_WIDTH
+          const bh = this.keyboardH * BLACK_KEY_HEIGHT
           octx.fillStyle = ebony
           octx.fillRect(bx, 0, bw, bh)
           octx.strokeStyle = 'rgba(0,0,0,0.6)'
@@ -387,9 +375,16 @@ export class WaterfallView implements View {
       const black = BLACK_PCS.has(pitch % 12)
       ctx.globalAlpha = alpha
       if (black) {
-        ctx.fillRect(col * keyW + keyW * 0.1, keyboardTop + 1, keyW * 0.8, this.keyboardH * 0.62)
+        // 与离屏键盘黑键几何一致，完整覆盖
+        ctx.fillRect(
+          col * keyW - keyW * BLACK_KEY_INSET,
+          keyboardTop,
+          keyW * BLACK_KEY_WIDTH,
+          this.keyboardH * BLACK_KEY_HEIGHT,
+        )
       } else {
-        ctx.fillRect(col * keyW + 1, keyboardTop + 1, keyW - 2, this.keyboardH - 2)
+        // 完整覆盖白键（含描边），不留缝隙
+        ctx.fillRect(col * keyW, keyboardTop, keyW, this.keyboardH)
       }
       ctx.globalAlpha = 1
     }
@@ -404,9 +399,9 @@ export class WaterfallView implements View {
       }
       list.push(entry)
     }
-    for (const [p, track] of active) addEntry(track % TRACK_COLORS.length, [p, 0.95])
+    for (const [p, track] of active) addEntry(track % TRACK_COLORS.length, [p, 1])
     for (const [p, v] of this.releasedAt) {
-      const alpha = 0.95 * (1 - (now - v.at) / KEY_FADE_MS)
+      const alpha = 1 - (now - v.at) / KEY_FADE_MS
       addEntry(v.track % TRACK_COLORS.length, [p, alpha])
     }
     const paint = (entries: [number, number][], color: TrackColor): void => {

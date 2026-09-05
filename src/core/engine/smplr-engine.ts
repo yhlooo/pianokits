@@ -1,10 +1,16 @@
 import { CacheStorage, Sampler, pianoToPreset } from 'smplr'
 import type { Smplr } from 'smplr'
 
+import { appBasePath } from '../../router'
+
 import type { AudioEngine, EngineInitOptions, ScheduledNote } from './types'
 
-/** 自托管采样路径（public/samples/ 镜像，见 scripts/mirror-samples.mjs） */
-const SAMPLES_BASE_URL = '/samples/sfzinstruments-splendid-grand-piano/samples'
+/**
+ * 自托管采样路径（public/samples/ 镜像，见 scripts/mirror-samples.mjs）。
+ * 相对应用基路径拼接（而非写死 `/samples/...`），保证部署到 GitHub Pages 子路径
+ * （如 `/pianokits/`）时采样仍能命中正确地址，不会因根路径假设而 404。
+ */
+const SAMPLES_BASE_URL = `${appBasePath()}samples/sfzinstruments-splendid-grand-piano/samples`
 
 /**
  * smplr SplendidGrandPiano 引擎（首选）。

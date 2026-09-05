@@ -479,6 +479,66 @@ alphaSynth 只做播放输出）。
 | Soundslice                                        | 在线乐谱平台，提供 embed miniplayer 与 Data API（soundslice.com）                                                         | 商业服务     | 依赖其平台与付费计划，非本地渲染库                       |
 | SmartScore（Musitek）                             | 商业乐谱识别/编辑软件                                                                                                     | 商业软件     | 桌面产品，与浏览器内渲染场景关系弱                       |
 
+### 2.9 MIDI → MusicXML 转换器候选（2026-09-05 复核）
+
+本节为对 `20260905-waterfall-and-notation.md` §3.3 结论的补充复核，收录该文档未列出的
+"MIDI→乐谱转换器"候选，全部经实测确认不可用或方向不符。
+
+#### 2.9.1 midi2musicxml（kaibadash/midi2musicxml）
+
+- GitHub：`kaibadash/midi2musicxml`，许可证 MIT（README 声明 "MIT License. Copyright 2020 kaiba"）。
+- 语言/运行要求：Java 11+（Gradle 构建，GUI/CUI），**不是 JS/TS 库**，npm 无同名包。
+- 定位：为 NEUTRINO（歌声合成器）服务的 "MIDI + 歌词文本 → MusicXML" 转换器。
+- README 开头（获取日期 2026-09-05）原文：
+
+  > midi2musicxml is no longer maintained, please use tyouseisientool.
+  > https://github.com/sigprogramming/tyouseisientool
+
+- 其继任者 `tyouseisientool`（sigprogramming）同样为桌面 Java 工具（歌声调声用途），
+  面向"单旋律 + 歌词"的歌声合成工作流，与钢琴双谱表记谱诉求不符。
+
+#### 2.9.2 concertmaster（MegaArman/concertmaster）
+
+- npm 包：`concertmaster`，最新版 `0.2.2`，最后发布 **2018-05-29**，`flags.unstable = true`。
+- 描述（npms.io 检索）："A simple module to help convert musically relevant information"。
+- npms.io 质量分 0.53、流行度 0.036。2018 年停发，属弃更个人项目，无实际转换能力证据。
+
+#### 2.9.3 musicvis-lib（fheyen/musicvis-lib）
+
+- npm 包：`musicvis-lib`，最新版 `0.55.0`，最后发布 **2022-03-10**，`flags.unstable = true`。
+- 描述（npms.io 检索）："Music analysis and visualization library"，关键词含 MIDI/MusicXML，
+  但定位是音乐分析与可视化（配合其可视化论文/站点），不是 MIDI→乐谱转换器。
+
+#### 2.9.4 muse-js 撞名说明（重要）
+
+- npm 上名为 `muse-js` 的包是 `urish/muse-js`：**"Muse 2016 EEG Headset JavaScript
+  Library (using Web Bluetooth)"**，是 2016 年的脑电头环蓝牙库，与 MuseScore / 音乐完全无关。
+- 因此"用 MuseScore 的 wasm 版本（muse-js）做 MIDI 转谱"不成立：该 npm 名已被占用，
+  MuseScore 官方的浏览器 wasm 能力目前仍只有 `webmscore`（见 §2.5，且只收 mscz、GPL、弃更）。
+
+#### 2.9.5 @magenta/music 的序列量化工具（`core/sequences`）
+
+`@magenta/music@1.23.1`（§1.1，npm 自 2021-11 停发）的 `core/sequences` 模块提供与
+"MIDI→谱"量化环节直接相关的纯函数（官方 TypeDoc，获取日期 2026-09-05）：
+
+| 函数                         | 作用（原文摘要）                                                                                                                          |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `quantizeNoteSequence`       | "Quantize a NoteSequence proto relative to tempo ... snapped to a nearby quantized step"，要求单一 tempo、单一拍号，抛多 tempo/拍号异常 |
+| `quantizeToStep`             | "Quantizes seconds to the nearest step, given steps_per_second"                                                                          |
+| `mergeConsecutiveNotes`      | "Any consecutive notes of the same pitch are merged into a sustained note ... grouped by instrument"                                     |
+| `applySustainControlChanges` | "Create a new NoteSequence with sustain pedal control changes applied ... Extends each note within a sustain"                            |
+
+这些是**量化/延音处理工具函数**，输出仍是 Magenta 的 `NoteSequence`（量化步进），
+**不产出五线谱/MusicXML**；但作为自研量化算法的参考实现有价值（尤其是
+`applySustainControlChanges` 对踏板延音的处理）。因 npm 已弃更 4 年+、依赖 11 MB，
+不建议作为运行时依赖，仅作算法参考。
+
+#### 2.9.6 npms.io 全量检索（2026-09-05）
+
+- `api.npms.io/v2/search?q=midi musicxml` 仅返回 3 个包：`musicvis-lib`、`concertmaster`、
+  `webmscore`，均为 unstable / 弃更，且无一提供可用的 MIDI→MusicXML 转换。
+- `api.npms.io/v2/search?q=midi to sheet music` 返回 **0 结果**。
+
 ## 3. 数据汇总表（2026-09-05 实测）
 
 | 包 / 仓库                  | npm 最新版 | npm 最后发布 | 周下载量 | 许可证       | unpacked | GitHub stars                      | 最后 push  |

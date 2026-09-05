@@ -1,0 +1,230 @@
+# 调研：钢琴瀑布流渲染与 MIDI 转五线谱技术方案
+
+- 日期：2026-09-05
+- 关联参考文档：`docs/development/reference/midi/rendering-libraries.md`（本文所有库的
+  现状数据与原文摘录均出自该文档，下文引用处标注 `[ref-*]` 编号，对应其小节）
+- 范围：为 pianokits 的 MIDI 播放功能调查两项可视化技术路线——① 88 键钢琴瀑布流
+  （下落音符 + 当前时间线 + 按键高亮 + 滚动/缩放/点击跳转）；② 从 MIDI 生成双谱表
+  钢琴五线谱并跟随播放高亮。
+
+## 1. 结论摘要
+
+| 问题 | 结论 |
+| --- | --- |
+| 瀑布流用库还是自绘 | **自绘 Canvas 2D**。现成的下落瀑布流库要么弃更（`@magenta/music` 2021 年停发 npm、`react-piano-roll` 2019 年停发），要么是 AGPL 的整体 DAW（gridsound），要么是生态为零的微型包；自绘的技术难度低、可控性最好。 |
+| 五线谱走哪条路线 | **VexFlow 直雕 + 自研 MIDI 量化**。VexFlow（MIT、活跃）是最适合"程序生成 + 播放高亮"的雕刻引擎。截至 2026-09-05，**浏览器内不存在成熟的 MIDI→乐谱开源转换器**（music21j 不支持 MIDI 解析、webmscore 只收 mscz 且 GPL 弃更、abcMIDI 的 midi2abc 无 JS/WASM 移植），所以量化与拼写只能自己做。 |
+| MVP 范围 | 瀑布流（自绘）+ 简化量化出的"够用"乐谱（VexFlow 渲染单/双谱表）；五线谱质量上限明确，后续迭代改进量化。 |
+| 未来升级路径 | 自研转换器输出 MusicXML（可用 `musicxml-io` 做序列化），即可在需要更专业排版时切换 OSMD / alphaTab 渲染，或对接未来出现的成熟转换器。 |
+
+## 2. 瀑布流：库 vs 自绘
+
+### 2.1 候选库对比（数据见 [ref-1]、[ref-3]）
+
+| 候选 | 最后发布 | 周下载 | 许可证 | 下落模式 + 播放高亮 | 滚动/缩放/点击跳转 | 评估 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `@magenta/music` Visualizer | 2021-11-01（npm 1.23.1） | 3,068 | Apache-2.0 | ✅ 原生支持（`redraw(note, scrollIntoView)` + `activeNoteRGB`）[ref-1.1] | ❌ 无缩放/点击跳转 API；时间线需自己画 | 功能上最接近，但 npm 弃更 4 年+、依赖 NoteSequence 数据格式、需配合其 SoundFontPlayer 才有"当前音符"事件，定制受限 |
+| `react-piano-roll` / `pixi-piano-roll` | 2019-07-02 / 2015-12-17 | 30 / 11 | MIT | 有播放 seek/toggle API，但基于 2015 年的 PixiJS，无法确认其高亮与下落观感 | ❌ | 双重弃更（npm 停发 7 年），React 组件与本项目纯 TS 栈也不契合 |
+| gridsound/daw PianoRoll | 无独立 npm 包 | — | AGPL-3.0 | ✅（DAW 内置） | ✅（DAW 交互完整） | **AGPL + 无独立分发**，抽取成本高且许可证传染，不采纳 [ref-1.3] |
+| `wave-roll` | 2025-12-06 | 66 | MIT | ✅ 同步播放 | ❌ 定位是多轨对比可视化 | 生态最弱（27 stars / 周下载 66），定制与长期维护风险高 [ref-1.4] |
+| 其他（`piano-visualizer`、`vue-piano-roll`、`@minagishl/react-piano-roll` 等） | 2025~2026 | 0~17 | MIT | 部分有 | ❌ | 全部是个人新项目（1~6 stars），不可作为依赖基础 [ref-1.4] |
+
+### 2.2 结论：自绘 Canvas 2D
+
+理由：
+
+1. **需求本质简单**：瀑布流 = 按 pitch 分行的横条 + 随时间平移的 x 轴。这是几百行
+   内的渲染问题，不是乐谱雕刻问题，现成库带来的"便利"远小于定制限制。
+2. **没有健康的选择**：唯一功能匹配的 magenta Visualizer 已 4 年不发 npm；其余
+   候选要么许可证不兼容（gridsound AGPL），要么是 0~66 周下载的微型包，引入即承担
+   断更风险。
+3. **完全控制交互**：本项目要求"当前时间线 + 按键高亮 + 滚动/缩放/点击跳转"组合，
+   自绘时这些都是同一渲染循环里的参数（viewport 起点、scale、playhead 时间、活动
+   音符集合），不需要与第三方组件的行为模型磨合。
+4. **零依赖风险**：不引入 11 MB（magenta）/ AGPL（gridsound）级别的包袱；性能上限
+   完全由自己控制（见下节）。
+
+magenta Visualizer 的接口设计（`redraw(activeNote, scrollIntoView)`、
+`pixelsPerTimeStep`、`activeNoteRGB`）是很好的参考，可借鉴其"播放器回调驱动重绘"
+的解耦方式 [ref-1.1]。
+
+### 2.3 自绘方案技术要点（工程常识，简要）
+
+- **数据模型**：解析后的 MIDI 事件（本项目已有播放器管线）整理为
+  `Note { pitch, startSec, endSec }` 数组，按 pitch 分桶或排序后二分查找可见区间。
+- **渲染循环**：`requestAnimationFrame` 驱动；每帧只绘制视口内的音符——
+  `visible = notes.filter(n => n.end >= t0 && n.start <= t1)`，配合按 start 排序 +
+  二分 + 每帧缓存（音符数组不变时仅视口滑动，无需重建）。
+- **视口与缩放**：状态只有 `{ pxPerSecond, viewStartSec, playheadSec }`；缩放改
+  `pxPerSecond`（以鼠标/触摸锚点为不动点），滚动改 `viewStartSec`，点击跳转即设置
+  playhead 并通知播放器 seek。整个瀑布流宽度 = 时长 × pxPerSecond，上万个音符也
+  只是一维区间查询，无性能问题。
+- **分辨率**：`canvas.width = cssWidth × devicePixelRatio`，`ctx.setTransform(dpr, ...)`
+  避免 HiDPI 模糊；滚动/缩放时优先用 `setTransform` 平移而不是整帧重算路径。
+- **时间线**：当前时间画竖线；活动音符（`start <= now < end`）用高亮色；88 键左侧
+  键盘只画一次（离屏 canvas 缓存），黑键分组着色。
+- **性能**：每帧视口内音符数通常只有几十个，`fillRect` 足够；若要做圆角/阴影等
+  再考虑离屏预渲染每条音符为静态 canvas/ImageBitmap。
+
+## 3. MIDI → 五线谱
+
+### 3.1 问题本质：这不是格式转换，而是转录（transcription）
+
+MIDI 是"何时按下/松开哪个键"的演奏事件流；记谱则需要把它还原成"作曲家写下的
+音乐"。核心难点：
+
+1. **量化（quantization）**：演奏时刻是浮点秒，谱面只有离散时值（全/半/四分/八分/
+   附点/连音）。需要估计拍速（tempo 检测）、小节划分，再把每个起止时间吸附到最近
+   的合法时值网格，否则谱面会充满三十二分音符和休止符碎片。
+2. **音高拼写（pitch spelling）**：MIDI 只有 pitch class（比如 61 号），谱面必须选
+   C♯4 还是 D♭4——由调号、和声上下文、旋律走向共同决定。选错拼写会导致谱面
+   "读着别扭"（例如升号调里出现降号音）。
+3. **声部分离（voice separation）**：双谱表钢琴记谱要把事件流分成左右手（通常以
+   C4 为界的启发式 + 时间重叠检测），每只手内部还要处理同时发声的和弦与多条旋律线；
+   跨越边界的音符（左手弹到右手区）需要启发式修正。
+4. **休止符与延音**：note-off 与下一个 note-on 之间的空隙要折叠成休止符；跨拍长音
+   要拆成"延音线连接"的合法时值组合（例如 5/8 拍的长音不能写一个五八分音符）。
+5. **连音（tuplet）与复杂节奏**：三连音/六连音等无法从时间戳可靠反推；演奏数据
+   里的微小偏差会让检测雪上加霜。这是学术上仍未完全解决的问题（AMT 领域仍在研究）。
+6. **演奏数据本身的信息缺失**：MIDI 可能缺小节/拍号信息（依赖 tempo meta 事件，
+   很多 MIDI 文件没有或不准确）、踏板的延音效果、装饰音与主音难以区分。
+
+**结论：把"MIDI 转成五线谱"当纯格式转换是错误预期**。成熟商业软件（MuseScore、
+Sibelius 的 MIDI 导入）也只是"够用"水平，且其质量上限取决于量化启发式。
+
+### 3.2 候选路线评估
+
+数据依据见 [ref-2]，此处给结论性评估。
+
+#### 路线 a：abcjs（渲染 ABC）+ midi2abc 类转换器
+
+- **abcjs 本身**：健康度极好——MIT、6.7.0 活跃维护（2026-08 发布）、周下载 55k、
+  渲染质量是标准五线谱；播放配合有官方的 `TimingCallbacks`
+  （`eventCallback` 按音符回调可高亮、`beatCallback` 提供光标坐标）[ref-2.1]。
+- **但 MIDI→ABC 环节断裂**：
+  - abcjs 只做 ABC→MIDI 合成输出，无反向转换 [ref-2.1]；
+  - abcMIDI 的 C 工具 `midi2abc` 官方页面自述输出"**not particularly easy to read**
+    in some circumstances" [ref-2.2]——连官方工具都承认质量有限；
+  - npm 上**不存在** abcMIDI 的 JS/WASM 移植（2026-09-05 实测三个关键词搜索均空）；
+  - 仅有的开源 JS 实现 `marmooo/midi2abc` 是"Magenta.js 量化 + Tone.js 时序"的单作者
+    实验项目（29 stars、无 npm 发布）[ref-2.2]。
+- **评估**：可实现性：低（除非自己写量化 + 拼写 + ABC 输出，那等于把难点全包了，
+  ABC 文本格式本身作为中间层还增加一层复杂度）；记谱质量：取决于自研量化；维护
+  风险：低（若只用 abcjs）；播放高亮契合度：高。
+
+#### 路线 b：opensheetmusicdisplay（渲染 MusicXML）+ music21j / webmscore 做转换
+
+- **OSMD 本身**：健康——BSD-3-Clause、2.1.2 活跃（2026-08）、周下载 25k、基于
+  VexFlow；数据模型可改（官方 README 明确可改音符颜色/隐藏声部）、有 `Cursor` 类。
+  但官方 README 原话 "**OSMD on its own does not support playback**"，播放需自己
+  驱动（官方 `osmd-audio-player` 2021 年后停更，社区 `osmd-extended` 是 UNLICENSED）
+  [ref-2.3]。
+- **转换器环节断裂（关键事实）**：
+  - `music21j`（music21 的 JS 移植）**不支持 MIDI 文件解析**——其 converter 源码中
+    无任何 midi 支持，MIDI 相关代码只有实时事件播放器 [ref-2.4]；
+  - `webmscore`（MuseScore libmscore 的 wasm）**只接受 mscz 输入**（README 特性列表
+    只有 "Parse mscz file data"，JS 封装中 load 仅出现 'mscz'），且 GPL、23.5 MB、
+    2023-01 后停更 [ref-2.5]；MuseScore 官方未发布公开的 wasm npm 包（截至调查日）。
+- **评估**：可实现性：**当前不可行**（转换器缺失是硬伤，不是质量问题）；这条路只有
+  在"上游成熟转换器出现"或"自己写出 MIDI→MusicXML"后才现实。
+
+#### 路线 c：VexFlow 直雕（自己实现量化与映射）
+
+- **VexFlow 本身**：MIT、5.0.0（2025-03 发布，迁入新 org 后持续开发至 2026-08）、
+  周下载 43.8k；README 明确 TypeScript 编写、Canvas/SVG 输出、`Factory/EasyScore`
+  高层 API 可用一行 DSL 建谱 [ref-2.6]。它是纯雕刻引擎——排版质量好（是 OSMD 的
+  底层渲染器），但对输入数据不做任何音乐判断。
+- **难点转移**：3.1 节的全部难点（量化、拼写、分声部、休止/延音）都要自己实现，
+  但 VexFlow 把这些算法的**输出**（音符/时值/谱表/声部）干净地接住。
+- **动态高亮**：VexFlow 音符对象支持 `setStyle({ fillStyle, strokeStyle })` 后重绘；
+  也可用 SVG 后端直接改 DOM。重绘整个 stave 成本低（一个谱表几十个元素），适合
+  播放高亮。
+- **评估**：可实现性：高（渲染端零障碍，算法端是本项目自己掌控的纯逻辑）；记谱
+  质量：取决于自研量化，MVP 期有上限但无上限的天花板在自己；依赖体积：~20 MB
+  unpacked（构建后 tree-shake 更小）；维护风险：低（健康度最好的雕刻引擎）；播放
+  高亮契合度：高。
+
+#### 路线 d：其他候选
+
+| 候选 | 一句话评估 |
+| --- | --- |
+| alphaTab（`@coderline/alphatab`） | 健康（MPL-2.0、1.8.4、周下载 10.8k、1.8k stars），渲染 MusicXML + 内置播放/光标，双谱表支持好 [ref-2.7]；但同样**不能导入 MIDI**（输入是 GuitarPro/AlphaTex/MusicXML），与 OSMD 一样卡在转换器。可作路线 c 成熟后的备选渲染层。 |
+| `musicxml-io` | MIT、活跃（2026-09 发布）。可作自研转换器的 MusicXML 序列化器，避免手写 XML [ref-2.8]。 |
+| `@sudobility/music_codecs` | 描述诱人（MIDI/MusicXML codec）但 **BUSL-1.1 非开放许可证**，排除 [ref-2.8]。 |
+| Soundslice / SmartScore | 商业服务/商业软件，前者依赖其平台（embed + Data API），后者是桌面 OCR 产品；均不符合"本地开源库"诉求 [ref-2.8]。 |
+
+### 3.3 关键事实：浏览器内没有成熟的 MIDI→乐谱转换器（截至 2026-09-05）
+
+证据链：
+
+- music21j 不支持 MIDI 文件解析（源码检索）[ref-2.4]；
+- webmscore 只接受 mscz、GPL、2023 停更，MuseScore 官方无公开 wasm npm 包 [ref-2.5]；
+- abcMIDI 的 midi2abc 仅 C 命令行工具、无 JS/WASM 移植、官方自述输出质量有限；
+  仅有的 JS 实现是原型级个人项目 [ref-2.2]；
+- 所有"MIDI→MusicXML"类 npm 包要么许可证不兼容（BUSL-1.1），要么实际不含 MIDI
+  输入 [ref-2.8]。
+
+因此：**"调一个库完成 MIDI→谱"在 2026-09 的浏览器生态中不成立**，量化/拼写/分声部
+必须自研或降级预期。
+
+## 4. 推荐方案
+
+### 4.1 瀑布流：自绘 Canvas 2D（直接采用）
+
+MVP 范围：88 键纵向键盘（离屏缓存绘制）+ 下落音符 + 当前时间竖线 + 活动音符高亮 +
+随播放自动滚动 + 点击跳转。缩放（时间轴 zoom）作为紧随其后的增强项。
+接口设计参考 magenta 的 `redraw(activeNote, scrollIntoView)` 模式：播放器回调通知
+渲染器"当前活动音符集合"，渲染循环内部负责平滑。
+
+### 4.2 五线谱：VexFlow 直雕 + 自研转换管线，分阶段
+
+**阶段 1（MVP，"够用的谱"）**：
+
+1. 基础量化：假设 4/4 或从 MIDI tempo/拍号 meta 读取；起止时间吸附到 1/8（或 1/16）
+   网格；长度圆整 + 跨拍拆分（简单规则：按拍切成合法时值 + 延音线）。
+2. 分声部：以 C4 为界分左右手（启发式：单音按 pitch 归谱表，重叠时段用
+   "哪只手更近"修正）；每只手单声部（和弦可合并在同一 voice）。
+3. 拼写：MVP 用固定策略（C 大调/a 小调记谱，全部升/降号显式标注；或按音符出现
+   频率粗估调号），明确接受"非黑键音带临时记号"的观感。
+4. 渲染：VexFlow `Factory/EasyScore` 双谱表（GrandStaff），活动音符
+   `setStyle` 高亮 + 播放中重绘。
+5. 明确边界：不支持连音自动检测（网格量化会把三连音近似成普通时值）、复杂休止符
+   折叠从简；在文档与 UI 中标注"自动记谱，仅供跟随参考"。
+
+**阶段 2（质量改进）**：tempo 估计与拍号检测（从 note-on 密度/能量推断）、更好的
+量化（动态网格 + 最小编辑距离）、拼写改进（调号估计 + 和声上下文，可用
+`@tonaljs` 之类的音高工具库做候选枚举）、休止符折叠、连音检测（3:2 网格试探）、
+多声部（双手各自内部再分 voice）。
+
+**阶段 3（可选，解耦升级）**：把转换管线输出抽象为 MusicXML 中间表示
+（序列化用 `musicxml-io`），渲染层即可按需切换 OSMD（专业排版）/alphaTab（自带
+播放光标）或继续 VexFlow；同时未来若有成熟的开源 MIDI→MusicXML 转换器出现，可
+直接替换自研管线前半段。
+
+### 4.3 明确不建议的路线
+
+- 不引入 `@magenta/music` 只为瀑布流（2021 年后无 npm 发布，换来的是 11 MB 和受限
+  定制）[ref-1.1]；
+- 不抽取 gridsound PianoRoll（AGPL）[ref-1.3]；
+- 不采用 webmscore（GPL + mscz-only + 弃更）[ref-2.5]；
+- 不采用 BUSL/UNLICENSED 的包 [ref-2.8]。
+
+## 5. 主要风险
+
+1. **记谱质量风险（最大）**：自研量化/拼写的输出质量存在天然上限，三连音、复杂
+   节奏、自由速度（rubato）的 MIDI 会出"看着不对劲"的谱。缓解：MVP 定位为"跟随
+   参考谱"而非"出版级乐谱"；量化参数可调；预留 MusicXML 出口。
+2. **依赖健康风险**：VexFlow 5 迁入新 org 后 stars 只有旧仓的零头（234 vs 4,366），
+   需留意其后续发布节奏（目前 2025-03 → 2026-08 期间仍有提交，风险暂低）。
+3. **范围蔓延风险**：转录问题的学术难度可能诱使投入失控。缓解：严格按阶段边界，
+   每个阶段有可验收的输出。
+4. **数据源质量风险**：用户提供的 MIDI 可能缺失拍号/tempo 元数据，量化质量受输入
+   影响大；需要容错与兜底假设（默认拍号 + 检测）。
+
+## 6. 结论与事实依据索引
+
+| # | 结论/事实 | 依据 |
+| --- | --- | --- |
+| 1 | 瀑布流自绘 Canvas 2D | 候选库对比见 [ref-1.1 ~ 1.4]；自绘要点见本文 2.3 |
+| 2 | 五线谱用 VexFlow 直雕 | [ref-2.6]（健康度数据 + 高层 API）；OSMD 官方自述不自带播放 [ref-2.3] |
+| 3 | 浏览器内无成熟 MIDI→乐谱转换器 | music21j 无 MIDI 解析 [ref-2.4]；webmscore 只收 mscz 且弃更 [ref-2.5]；midi2abc 无 JS/WASM 移植且官方自述输出难读 [ref-2.2] |
+| 4 | 分阶段：MVP 简化量化 → 迭代改进 → MusicXML 出口 | 本文 4.2；`musicxml-io` 可用作序列化器 [ref-2.8] |

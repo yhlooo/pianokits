@@ -1,6 +1,7 @@
 import type { Note } from '../core/model'
 import { el } from './dom'
 import type { View } from './store'
+import { TRACK_COLORS, trackColor, type TrackColor } from './track-colors'
 
 const MIN_PITCH = 21 // A0
 const MAX_PITCH = 108 // C8
@@ -11,16 +12,8 @@ const WHITE_KEY_ASPECT = 6.3
 const KEYBOARD_MIN_H = 44
 const KEYBOARD_MAX_H = 140
 const DEFAULT_PX_PER_SEC = 140
-/** 左右手分界：与记谱一致的 C4（设计文档：以 C4 为界分左右手） */
-const HAND_SPLIT_PITCH = 60
 /** 点亮键释放后的渐隐时长（ms） */
 const KEY_FADE_MS = 80
-
-/** 琥珀（右手）/ 钢蓝（左手）音符渐变端色 */
-const RH_TOP = [228, 184, 113] as const
-const RH_BOTTOM = [194, 145, 74] as const
-const LH_TOP = [143, 168, 196] as const
-const LH_BOTTOM = [95, 118, 148] as const
 
 export interface WaterfallViewCallbacks {
   onSeek(seconds: number): void
@@ -31,11 +24,16 @@ function shade(c: readonly [number, number, number] | readonly number[], f: numb
   return `rgb(${Math.round(c[0] * f)},${Math.round(c[1] * f)},${Math.round(c[2] * f)})`
 }
 
+/** RGB 三元组 + alpha → rgba() 字符串（发光色用） */
+function rgba(c: readonly [number, number, number] | readonly number[], a: number): string {
+  return `rgba(${c[0]},${c[1]},${c[2]},${a})`
+}
+
 /**
  * 钢琴瀑布流（自绘 Canvas 2D，设计文档 §6.4）：
  * 底部为 88 键钢琴键盘（判定线即键盘上沿，无中间判定线）；音符条自上而下坠落，
  * 落到琴键的瞬间即发声时刻（与音频调度共用同一时钟，天然对齐），发声期间琴键点亮。
- * 视觉（视觉风格指南 §6.4）：右手琥珀 / 左手钢蓝双色 + 力度→明度映射 + 音区参考线。
+ * 视觉（视觉风格指南 §6.4）：按轨五色循环（一轨一色，第 6 轨复用第 1 色）+ 力度→明度映射 + 音区参考线。
  * 交互：点击跳转、拖拽平移（脱离跟随）、双击恢复跟随、滚轮缩放。
  */
 export class WaterfallView implements View {
@@ -57,8 +55,10 @@ export class WaterfallView implements View {
   /** 键盘高度：随容器宽度按键宽比例换算（resize 时更新） */
   private keyboardH = KEYBOARD_MIN_H
   private bgGradient: CanvasGradient | null = null
-  private prevActive = new Set<number>()
-  private readonly releasedAt = new Map<number, number>()
+  /** 上一帧发声中的键：pitch → 轨号（渐隐时用于找回轨色） */
+  private prevActive = new Map<number, number>()
+  /** 释放中的键：pitch → { 轨号, 释放时刻 } */
+  private readonly releasedAt = new Map<number, { track: number; at: number }>()
   private readonly resizeObserver: ResizeObserver
 
   constructor(cbs: WaterfallViewCallbacks) {
@@ -300,7 +300,7 @@ export class WaterfallView implements View {
     this.ctx.drawImage(this.keysOffscreen, 0, noteAreaH, w, this.keyboardH)
   }
 
-  /** 音符条：右手琥珀 / 左手钢蓝，力度调制明度与透明度，顶部 1px 高光 */
+  /** 音符条：按轨五色循环（一轨一色），力度调制明度与透明度，顶部 1px 高光 */
   private drawNotes(w: number, noteAreaH: number, yAt: (t: number) => number): void {
     if (this.notes.length === 0) return
     const keyW = w / PITCH_COUNT
@@ -328,8 +328,7 @@ export class WaterfallView implements View {
       const y1 = Math.min(noteAreaH, bottomEdge)
       if (y1 - y0 < 1) continue
 
-      const right = n.pitch >= HAND_SPLIT_PITCH
-      const [top, bottom] = right ? [RH_TOP, RH_BOTTOM] : [LH_TOP, LH_BOTTOM]
+      const [top, bottom] = trackColor(n.trackIndex)
       // 力度映射：弱音更暗更淡，强音更亮更实
       const v = Math.max(0, Math.min(1, n.velocity / 127))
       const vf = 0.55 + 0.5 * v
@@ -344,7 +343,7 @@ export class WaterfallView implements View {
       g.addColorStop(0, shade(top, Math.min(1.05, vf)))
       g.addColorStop(1, shade(bottom, vf))
       ctx.globalAlpha = alpha
-      ctx.shadowColor = right ? 'rgba(217,164,91,0.45)' : 'rgba(143,168,196,0.4)'
+      ctx.shadowColor = rgba(top, 0.45)
       ctx.shadowBlur = 6
       ctx.fillStyle = g
       const radius = Math.min(3, keyW / 4, (y1 - y0) / 2)
@@ -361,24 +360,25 @@ export class WaterfallView implements View {
     }
   }
 
-  /** 发声中的琴键点亮（颜色跟随音符手色：右手琥珀 / 左手钢蓝，释放后 80ms 渐隐） */
+  /** 发声中的琴键点亮（颜色跟随音符轨色，同键多音符取最近 onset；释放后 80ms 渐隐） */
   private drawActiveKeys(w: number, keyboardTop: number): void {
     const ctx = this.ctx
     const keyW = w / PITCH_COUNT
-    const active = new Set<number>()
+    // 当前发声中的键：pitch → 轨号（notes 按 start 排序，同键后写的覆盖 → 最近 onset 胜出）
+    const active = new Map<number, number>()
     for (const n of this.notes) {
       if (n.start > this.playhead) break
-      if (this.playhead < n.end) active.add(n.pitch)
+      if (this.playhead < n.end) active.set(n.pitch, n.trackIndex)
     }
-    // 记录释放时刻（用于渐隐）
+    // 记录释放时刻（用于渐隐，连同轨号以便渐隐时沿用轨色）
     const now = performance.now()
-    for (const p of this.prevActive) {
-      if (!active.has(p)) this.releasedAt.set(p, now)
+    for (const [p, track] of this.prevActive) {
+      if (!active.has(p)) this.releasedAt.set(p, { track, at: now })
     }
-    for (const p of active) this.releasedAt.delete(p)
-    this.prevActive = active
-    for (const [p, t] of this.releasedAt) {
-      if (now - t > KEY_FADE_MS) this.releasedAt.delete(p)
+    for (const p of active.keys()) this.releasedAt.delete(p)
+    this.prevActive = new Map(active)
+    for (const [p, v] of this.releasedAt) {
+      if (now - v.at > KEY_FADE_MS) this.releasedAt.delete(p)
     }
 
     const drawKey = (pitch: number, alpha: number): void => {
@@ -394,31 +394,29 @@ export class WaterfallView implements View {
       ctx.globalAlpha = 1
     }
 
-    // 按手色分两批绘制（每批一次 fillStyle/shadow 设置）
-    const activeR: [number, number][] = []
-    const activeL: [number, number][] = []
-    for (const p of active) {
-      if (p >= HAND_SPLIT_PITCH) activeR.push([p, 0.95])
-      else activeL.push([p, 0.95])
+    // 按轨色分批绘制（批次数 ≤ 色板大小 5，每批一次 fillStyle/shadow 设置）
+    const byColor = new Map<number, [number, number][]>()
+    const addEntry = (colorIndex: number, entry: [number, number]): void => {
+      let list = byColor.get(colorIndex)
+      if (list === undefined) {
+        list = []
+        byColor.set(colorIndex, list)
+      }
+      list.push(entry)
     }
-    const fadingR: [number, number][] = []
-    const fadingL: [number, number][] = []
-    for (const [p, t] of this.releasedAt) {
-      const alpha = 0.95 * (1 - (now - t) / KEY_FADE_MS)
-      if (p >= HAND_SPLIT_PITCH) fadingR.push([p, alpha])
-      else fadingL.push([p, alpha])
+    for (const [p, track] of active) addEntry(track % TRACK_COLORS.length, [p, 0.95])
+    for (const [p, v] of this.releasedAt) {
+      const alpha = 0.95 * (1 - (now - v.at) / KEY_FADE_MS)
+      addEntry(v.track % TRACK_COLORS.length, [p, alpha])
     }
-    const paint = (entries: [number, number][], right: boolean): void => {
-      ctx.shadowColor = right ? 'rgba(217,164,91,0.85)' : 'rgba(143,168,196,0.8)'
+    const paint = (entries: [number, number][], color: TrackColor): void => {
+      ctx.shadowColor = rgba(color[0], 0.85)
       ctx.shadowBlur = 10
-      ctx.fillStyle = right ? 'rgb(217,164,91)' : 'rgb(143,168,196)'
+      ctx.fillStyle = shade(color[0], 1)
       for (const [p, alpha] of entries) drawKey(p, alpha)
       ctx.shadowBlur = 0
     }
-    paint(activeR, true)
-    paint(activeL, false)
-    paint(fadingR, true)
-    paint(fadingL, false)
+    for (const [colorIndex, entries] of byColor) paint(entries, TRACK_COLORS[colorIndex])
   }
 
   private roundRect(x: number, y: number, w: number, h: number, r: number): void {

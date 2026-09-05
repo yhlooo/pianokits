@@ -55,16 +55,16 @@
 
 同一页面给出的 meta event 类型清单：
 
-> | Type | Event                      | Type | Event                        |
-> | ---- | -------------------------- | ---- | ---------------------------- |
-> | 0x00 | Sequence number            | 0x20 | MIDI channel prefix assignment |
-> | 0x01 | Text event                 | 0x2F | End of track                 |
-> | 0x02 | Copyright notice           | 0x51 | Tempo setting                |
-> | 0x03 | Sequence or track name     | 0x54 | SMPTE offset                 |
-> | 0x04 | Instrument name            | 0x58 | Time signature               |
-> | 0x05 | Lyric text                 | 0x59 | Key signature                |
-> | 0x06 | Marker text                | 0x7F | Sequencer specific event     |
-> | 0x07 | Cue point                  |      |                              |
+> | Type | Event                  | Type | Event                          |
+> | ---- | ---------------------- | ---- | ------------------------------ |
+> | 0x00 | Sequence number        | 0x20 | MIDI channel prefix assignment |
+> | 0x01 | Text event             | 0x2F | End of track                   |
+> | 0x02 | Copyright notice       | 0x51 | Tempo setting                  |
+> | 0x03 | Sequence or track name | 0x54 | SMPTE offset                   |
+> | 0x04 | Instrument name        | 0x58 | Time signature                 |
+> | 0x05 | Lyric text             | 0x59 | Key signature                  |
+> | 0x06 | Marker text            | 0x7F | Sequencer specific event       |
+> | 0x07 | Cue point              |      |                                |
 
 （MIDI channel message 本身只携带 通道/音符号/力度 等信息，即 MIDI 1.0 的 Note On/Off 等 7 类通道消息，不含手或声部字段。）
 
@@ -74,16 +74,19 @@
   PDF（Google Drive 公开链接，2026-09-05 获取）。全文检索 “hand”：仅出现一次，为打击乐音色名 “Hand Clap”（拍手声）。
 
 > MIDI Channels Supported:
+>
 > - All 16 MIDI channels.
 > - Each channel can play a variable number of voices (polyphony).
 > - Each channel can play a different instrument (timbre).
 > - Key-based Percussion is always on channel 10.
 
 > Note on/Note off:
+>
 > - Octave Registration: Middle C = MIDI Key 60 (3CH)
 > - All voices, including percussion, respond to velocity
 
 > 1.
+>
 > Acoustic Grand Piano &nbsp; 33. Acoustic Bass
 
 （以上为 PDF 文本提取对 GM Sound Set 双列表格的拼接结果：program 1 = Acoustic Grand Piano。）
@@ -180,6 +183,7 @@
 Guide 功能详细设置中的 **Right Ch / Left Ch** 参数：
 
 > Legt fest, welcher MIDI-Kanal in den MIDI-Song-Daten für den rechten und den linken Part benutzt wird. Diese Einstellung schaltet zurück auf „Auto“, wenn ein anderer Song ausgewählt wird.
+>
 > - **Auto**: Die MIDI-Kanäle der MIDI-Song-Daten für die Parts der linken und rechten Hand werden automatisch zugewiesen. Die Parts werden jeweils auf den Kanal festgelegt, der bei Part Ch im Song-Setting-Display (Seite 80) eingestellt wurde.
 > - **1–16**: Weist einen angegebenen MIDI-Kanal (1–16) den Parts für die rechte und für die linke Hand zu.
 > - **Off (nur Left Ch)**: Keine Kanalzuweisung. Dies schaltet die Notendarstellung für die linke Hand ein und aus.
@@ -222,6 +226,7 @@ Guide 灯说明中的提示（同手册）：
 > The default track and measure (when left unspecified) are 0 and 1 respectively. ... **All notes default to `B` or "Background" notes.**
 
 > Here is the `Parts` field for _Sevivon, Sov, Sov, Sov_, from G Major Music Theory:
+>
 > ```
 > t1:RA t2:LA
 > ```

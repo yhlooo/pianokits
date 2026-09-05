@@ -159,7 +159,7 @@ interface Note {
   start: number
   end: number // 秒
   velocity: number // 0~127
-  trackIndex: number // 便于 M2 轨道勾选/着色
+  trackIndex: number // 瀑布流按轨着色依据（见 20260905-waterfall-track-colors.md）
 }
 ```
 

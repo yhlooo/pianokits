@@ -42,11 +42,7 @@
   --paper: #faf7f1;
   --paper-text: #1c1a17;
 
-  /* 瀑布流左右手双色 */
-  --note-rh-top: #e4b871;
-  --note-rh-bottom: #c2914a;
-  --note-lh-top: #8fa8c4;
-  --note-lh-bottom: #5f7694;
+  /* 瀑布流音符色由 src/ui/track-colors.ts 统一管理（Canvas 绘制，不走 CSS 变量） */
 
   /* 圆角 */
   --r-sm: 6px;

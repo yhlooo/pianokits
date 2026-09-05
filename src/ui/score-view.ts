@@ -1,16 +1,20 @@
 import {
   Accidental,
   Beam,
+  Dot,
   Formatter,
   Renderer,
   Stave,
   StaveConnector,
   StaveNote,
   StaveTie,
+  Stem,
   Voice,
 } from 'vexflow/bravura'
+import type { RenderContext } from 'vexflow/bravura'
 
 import type { Measure, NotatedEvent, ScoreModel } from '../core/midi/quantize'
+import { beatBounds } from '../core/midi/quantize'
 import { el } from './dom'
 import type { View } from './store'
 
@@ -45,10 +49,14 @@ const SF_TO_KEYSPEC: Record<number, string> = {
   [-7]: 'Cb',
 }
 
+/** 时值（拍）→ VexFlow duration 字符串（含附点） */
 function pieceToDuration(beats: number): string {
   if (beats >= 4 - 1e-6) return '1'
+  if (beats >= 3 - 1e-6) return '2d'
   if (beats >= 2 - 1e-6) return '2'
+  if (beats >= 1.5 - 1e-6) return '4d'
   if (beats >= 1 - 1e-6) return '4'
+  if (beats >= 0.75 - 1e-6) return '8d'
   if (beats >= 0.5 - 1e-6) return '8'
   return '16'
 }
@@ -106,6 +114,12 @@ export class ScoreView implements View {
   private observer: IntersectionObserver | null = null
   private resizeObserver: ResizeObserver
   private lastRenderAt = 0
+  /** 当前系统渲染中：事件 id → 其各时值片段的 StaveNote（跨小节延音线用） */
+  private pieceNotesByEvent = new Map<number, StaveNote[]>()
+  /** 当前系统渲染中：`小节|谱表` → Stave（半边弧定位用） */
+  private staveByMeasureStaff = new Map<string, Stave>()
+  /** 额外符号（谱号/调号/拍号）宽度探针缓存 */
+  private prefixDeltaCache = new Map<string, number>()
 
   constructor() {
     this.systemsEl = el('div', { class: 'score__systems' })
@@ -271,6 +285,8 @@ export class ScoreView implements View {
     sys.div.replaceChildren()
     sys.rendered = true
     sys.dirty = false
+    this.pieceNotesByEvent.clear()
+    this.staveByMeasureStaff.clear()
 
     const startMeasure = sysIdx * this.measuresPerSystem
     const endMeasure = Math.min(score.measures.length, startMeasure + this.measuresPerSystem)
@@ -285,21 +301,66 @@ export class ScoreView implements View {
     ctx.fillStyle = INK
     ctx.strokeStyle = INK
 
-    const measureWidth = (width - 30) / (endMeasure - startMeasure)
-
-    let systemTop: Stave | null = null
-    let systemBottom: Stave | null = null
-
+    // 布局：全曲所有小节的「音符区宽度」一致；谱号/调号/拍号等额外符号按 VexFlow
+    // 实测宽度单独预留空间，避免行首小节因挤进记谱符号而显得更拥挤
+    const columnExtras: number[] = []
+    const columnTimeSig: (string | null)[] = []
+    const columnKeySig: boolean[] = []
+    const columnClef: boolean[] = []
     for (let m = startMeasure; m < endMeasure; m++) {
       const measure = score.measures[m]
-      const x = 10 + (m - startMeasure) * measureWidth
-      const staveW = measureWidth - 4
-      // 谱号/调号只在行首（系统第一小节）显示；调号行内变化时重显
       const isSystemStart = m === startMeasure
       const prev = m > 0 ? score.measures[m - 1] : null
       const keyChanged =
         prev !== null &&
         (prev.keysig.sf !== measure.keysig.sf || prev.keysig.mi !== measure.keysig.mi)
+      const tsChanged =
+        prev !== null &&
+        (prev.numerator !== measure.numerator || prev.denominator !== measure.denominator)
+      const timeSig = m === 0 || tsChanged ? `${measure.numerator}/${measure.denominator}` : null
+      const showKeySig = isSystemStart || keyChanged
+      columnClef.push(isSystemStart)
+      columnKeySig.push(showKeySig)
+      columnTimeSig.push(timeSig)
+      let extra = 0
+      if (isSystemStart || showKeySig || timeSig !== null) {
+        extra = Math.max(
+          0,
+          ...score.staffs.map((s) =>
+            this.probePrefixDelta(
+              s.clef,
+              showKeySig ? this.keySpec(measure.keysig) : null,
+              isSystemStart,
+              timeSig,
+            ),
+          ),
+        )
+      }
+      columnExtras.push(extra)
+    }
+    const totalExtra = columnExtras.reduce((a, b) => a + b, 0)
+    // 小节音距：各小节音符区一致的长度
+    const measurePitch = Math.max(120, (width - 30 - totalExtra) / (endMeasure - startMeasure))
+    const columns: { x: number; w: number }[] = []
+    let accX = 10
+    for (let i = 0; i < columnExtras.length; i++) {
+      const w = measurePitch + columnExtras[i]
+      columns.push({ x: accX, w })
+      accX += w
+    }
+
+    let systemTop: Stave | null = null
+    let systemBottom: Stave | null = null
+    const allBeams: Beam[] = []
+
+    for (let m = startMeasure; m < endMeasure; m++) {
+      const measure = score.measures[m]
+      const col = columns[m - startMeasure]
+      const x = col.x
+      const staveW = col.w - 4
+      const isSystemStart = columnClef[m - startMeasure]
+      const showKeySig = columnKeySig[m - startMeasure]
+      const timeSig = columnTimeSig[m - startMeasure]
 
       const rows: StaffRow[] = []
 
@@ -309,20 +370,22 @@ export class ScoreView implements View {
         if (isSystemStart) {
           stave.addClef(score.staffs[si].clef)
         }
-        if (isSystemStart || keyChanged) {
+        if (showKeySig) {
           stave.addKeySignature(this.keySpec(measure.keysig))
         }
-        if (m === 0) {
-          stave.addTimeSignature(`${measure.numerator}/${measure.denominator}`)
+        if (timeSig !== null) {
+          stave.addTimeSignature(timeSig)
         }
 
         const voices: Voice[] = []
         const ties: StaveTie[] = []
+        const beams: Beam[] = []
         const maxVoice = this.maxVoiceIndex(measure, si)
         for (let vi = 0; vi <= maxVoice; vi++) {
-          const r = this.buildVoice(measure, si, vi, this.activeIds)
+          const r = this.buildVoice(measure, si, vi, this.activeIds, maxVoice > 0)
           if (r.voice !== null) voices.push(r.voice)
           ties.push(...r.ties)
+          beams.push(...r.beams)
         }
         if (voices.length > 0) {
           const formatter = new Formatter()
@@ -332,6 +395,8 @@ export class ScoreView implements View {
           formatter.format(voices, noteWidth)
         }
         rows.push({ stave, voices, ties })
+        allBeams.push(...beams)
+        this.staveByMeasureStaff.set(`${measure.index}|${si}`, stave)
       }
 
       // 首个小节记录系统顶/底谱表，供系统左端竖线连接符使用
@@ -347,12 +412,108 @@ export class ScoreView implements View {
       }
     }
 
+    // 符杠：VexFlow 把成组音符的符干接管到 Beam 上，必须在 voice 之后显式绘制
+    for (const beam of allBeams) beam.setContext(ctx).draw()
+
+    // 跨小节延音线：同系统画完整延音线，跨系统画半边弧
+    this.drawCrossMeasureTies(ctx, score, startMeasure, endMeasure)
+
     // 系统左端一条竖线连接所有谱表（每系统一次，而非每小节画连接符）
     if (systemTop !== null && systemBottom !== null) {
       const connector = new StaveConnector(systemTop, systemBottom)
       connector.setType('singleLeft')
       connector.setContext(ctx).draw()
     }
+  }
+
+  /**
+   * 绘制跨小节延音线。对齐目标在同一系统时用完整 StaveTie；
+   * 目标在其它系统（可能尚未渲染）时，出向/入向各画一段到小节线附近的半边弧。
+   */
+  private drawCrossMeasureTies(
+    ctx: RenderContext,
+    score: ScoreModel,
+    startMeasure: number,
+    endMeasure: number,
+  ): void {
+    const byId = new Map(score.events.map((e) => [e.id, e]))
+    const inSystem = (m: number): boolean => m >= startMeasure && m < endMeasure
+
+    for (const ev of score.events) {
+      if (ev.tieNext === undefined || !inSystem(ev.measureIndex)) continue
+      const srcPieces = this.pieceNotesByEvent.get(ev.id)
+      if (srcPieces === undefined || srcPieces.length === 0) continue
+      const lastNote = srcPieces[srcPieces.length - 1]
+      const stave = this.staveByMeasureStaff.get(`${ev.measureIndex}|${ev.staffIndex}`)
+      for (const link of ev.tieNext) {
+        const target = byId.get(link.targetId)
+        const dstPieces =
+          target !== undefined && inSystem(target.measureIndex)
+            ? this.pieceNotesByEvent.get(target.id)
+            : undefined
+        for (let i = 0; i < link.fromKeys.length; i++) {
+          if (dstPieces !== undefined && dstPieces.length > 0) {
+            const tie = new StaveTie({
+              firstNote: lastNote,
+              lastNote: dstPieces[0],
+              firstIndexes: [link.fromKeys[i]],
+              lastIndexes: [link.toKeys[i]],
+            })
+            tie.setContext(ctx).draw()
+          } else if (stave !== undefined) {
+            this.drawTieArc(ctx, lastNote, link.fromKeys[i], 'out', stave)
+          }
+        }
+      }
+    }
+
+    // 入向半边弧：本系统内带 tiePrev 的起始事件，若来源不在本系统则补画
+    for (const ev of score.events) {
+      if (ev.tiePrev === undefined || !inSystem(ev.measureIndex)) continue
+      const srcPieces = this.pieceNotesByEvent.get(ev.id)
+      if (srcPieces === undefined || srcPieces.length === 0) continue
+      const stave = this.staveByMeasureStaff.get(`${ev.measureIndex}|${ev.staffIndex}`)
+      if (stave === undefined) continue
+      for (const srcId of ev.tiePrev) {
+        const src = byId.get(srcId)
+        if (src === undefined || inSystem(src.measureIndex)) continue
+        const link = src.tieNext?.find((l) => l.targetId === ev.id)
+        if (link === undefined) continue
+        for (const toKey of link.toKeys) {
+          this.drawTieArc(ctx, srcPieces[0], toKey, 'in', stave)
+        }
+      }
+    }
+  }
+
+  /** 半边延音线弧：从符头到小节线方向画一小段（跨系统时用） */
+  private drawTieArc(
+    ctx: RenderContext,
+    note: StaveNote,
+    keyIndex: number,
+    side: 'in' | 'out',
+    stave: Stave,
+  ): void {
+    const ys = note.getYs()
+    const y = ys[Math.min(keyIndex, ys.length - 1)]
+    const stemDir = note.getStemDirection()
+    const bend = stemDir === Stem.UP ? 7 : -7 // 符干方向反向弯曲
+    const headLeft = note.getNoteHeadBeginX()
+    const headRight = headLeft + note.getGlyphWidth()
+    let x0: number
+    let x1: number
+    if (side === 'out') {
+      x0 = headRight + 2
+      x1 = Math.min(x0 + 26, stave.getX() + stave.getWidth() - 2)
+    } else {
+      x1 = headLeft - 2
+      x0 = Math.max(x1 - 26, stave.getX() + 2)
+    }
+    const cx = (x0 + x1) / 2
+    ctx.beginPath()
+    ctx.moveTo(x0, y)
+    ctx.quadraticCurveTo(cx, y + bend, x1, y)
+    ctx.stroke()
   }
 
   private maxVoiceIndex(measure: Measure, staffIndex: number): number {
@@ -367,8 +528,32 @@ export class ScoreView implements View {
   }
 
   private keySpec(keysig: { sf: number; mi: 0 | 1 }): string {
-    const base = SF_TO_KEYSPEC[keysig.sf] ?? 'C'
-    return keysig.mi === 1 ? `${base}m` : base
+    // 一律用关系大调名输出：VexFlow 的小调名按其自身调号定义（'Bbm' = 5 降），
+    // 与本项目「sf = 关系大调升降号数量」的语义不同，拼上 'm' 会画错调号
+    return SF_TO_KEYSPEC[keysig.sf] ?? 'C'
+  }
+
+  /**
+   * 实测谱号/调号/拍号在音符区左侧占用的宽度（相对无修饰谱表的增量）。
+   * 用同名修饰符构造探针 Stave，比对 getNoteStartX 的偏移量；结果缓存。
+   */
+  private probePrefixDelta(
+    clef: string,
+    keySig: string | null,
+    withClef: boolean,
+    timeSig: string | null,
+  ): number {
+    const cacheKey = `${clef}|${keySig ?? ''}|${withClef ? 1 : 0}|${timeSig ?? ''}`
+    const cached = this.prefixDeltaCache.get(cacheKey)
+    if (cached !== undefined) return cached
+    const base = new Stave(0, 0, 10).getNoteStartX()
+    const stave = new Stave(0, 0, 10)
+    if (withClef) stave.addClef(clef)
+    if (keySig !== null) stave.addKeySignature(keySig)
+    if (timeSig !== null) stave.addTimeSignature(timeSig)
+    const delta = stave.getNoteStartX() - base
+    this.prefixDeltaCache.set(cacheKey, delta)
+    return delta
   }
 
   private buildVoice(
@@ -376,21 +561,23 @@ export class ScoreView implements View {
     staffIndex: number,
     voiceIndex: number,
     activeIds: Set<number>,
-  ): { voice: Voice | null; ties: StaveTie[] } {
+    multiVoice: boolean,
+  ): { voice: Voice | null; ties: StaveTie[]; beams: Beam[] } {
     const score = this.score
-    if (score === null) return { voice: null, ties: [] }
+    if (score === null) return { voice: null, ties: [], beams: [] }
     const events = score.events.filter(
       (e) =>
         e.measureIndex === measure.index &&
         e.staffIndex === staffIndex &&
         e.voiceIndex === voiceIndex,
     )
-    if (events.length === 0) return { voice: null, ties: [] }
+    if (events.length === 0) return { voice: null, ties: [], beams: [] }
 
     const clef = score.staffs[staffIndex].clef
-    const notes: StaveNote[] = []
     const tickables: StaveNote[] = []
     const ties: StaveTie[] = []
+    /** 参与符杠分组的音符片段元数据（休止符不参与） */
+    const piecesMeta: { note: StaveNote; beatOffset: number; continuation: boolean }[] = []
 
     for (const ev of events) {
       if (ev.rest) {
@@ -404,12 +591,15 @@ export class ScoreView implements View {
       const pieceNotes: StaveNote[] = []
       for (let i = 0; i < ev.pieces.length; i++) {
         const piece = ev.pieces[i]
+        const duration = pieceToDuration(piece.durationBeats)
         const note = new StaveNote({
           keys: ev.keys.map((k) => `${k.letter.toLowerCase()}/${k.octave}`),
-          duration: pieceToDuration(piece.durationBeats),
+          duration,
           clef,
           autoStem: true,
         })
+        // VexFlow 只解析 'd' 后缀的时值，附点记号需要显式挂上
+        if (duration.endsWith('d')) Dot.buildAndAttach([note], { all: true })
         if (activeIds.has(ev.id)) {
           note.setStyle({ fillStyle: ACTIVE_FILL, strokeStyle: ACTIVE_STROKE })
         }
@@ -422,8 +612,14 @@ export class ScoreView implements View {
         }
         pieceNotes.push(note)
         tickables.push(note)
-        notes.push(note)
+        piecesMeta.push({
+          note,
+          beatOffset: piece.beatOffset,
+          continuation: i > 0, // 延音线连接的片段不再参与符杠分组
+        })
       }
+      // 跨小节延音线/符杠分组要用到片段的 StaveNote 引用
+      this.pieceNotesByEvent.set(ev.id, pieceNotes)
       // 延音线连接同一事件的片段
       for (let i = 1; i < pieceNotes.length; i++) {
         const prev = pieceNotes[i - 1]
@@ -441,15 +637,59 @@ export class ScoreView implements View {
       }
     }
 
-    // 符杠：小节内相邻八分/十六分音符自动组合
-    if (notes.length > 0) {
-      Beam.generateBeams(notes)
+    // 符杠：按拍分组，同拍内连续的八分/十六分成组；多声部时按声部定符干方向
+    const bounds = beatBounds(measure.numerator, measure.denominator)
+    const beatIndex = (offset: number): number => {
+      let idx = 0
+      for (let i = 0; i < bounds.length; i++) {
+        if (bounds[i] <= offset + 1e-6) idx = i
+      }
+      return idx
+    }
+    const beams: Beam[] = []
+    let group: StaveNote[] = []
+    let groupBeat = -1
+    const flush = (): void => {
+      if (group.length >= 2) {
+        if (multiVoice) {
+          // 多声部惯例：主声部符干朝上，其余朝下
+          const dir = voiceIndex === 0 ? Stem.UP : Stem.DOWN
+          for (const n of group) n.setStemDirection(dir)
+          beams.push(new Beam(group, false))
+        } else {
+          beams.push(new Beam(group, true))
+        }
+      }
+      group = []
+      groupBeat = -1
+    }
+    for (const pm of piecesMeta) {
+      if (!this.isBeamable(pm.note) || pm.continuation) {
+        flush()
+        continue
+      }
+      const bi = beatIndex(pm.beatOffset)
+      if (group.length > 0 && bi !== groupBeat) flush()
+      group.push(pm.note)
+      groupBeat = bi
+    }
+    flush()
+
+    // 多声部：把整声部的符干方向统一（含未成组的八分/四分）
+    if (multiVoice) {
+      const dir = voiceIndex === 0 ? Stem.UP : Stem.DOWN
+      for (const pm of piecesMeta) pm.note.setStemDirection(dir)
     }
 
     const voice = new Voice({ numBeats: measure.beatCount, beatValue: 4 })
     voice.setMode(Voice.Mode.SOFT)
     voice.addTickables(tickables)
-    return { voice, ties }
+    return { voice, ties, beams }
+  }
+
+  /** 是否为可上符杠的时值（八分/十六分，含附点） */
+  private isBeamable(note: StaveNote): boolean {
+    return note.getBeamCount() >= 1 || /^(8|16)d?$/.test(note.getDuration())
   }
 }
 

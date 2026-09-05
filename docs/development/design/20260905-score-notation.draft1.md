@@ -310,3 +310,14 @@ clef = weightedMedian >= 60 ? 'treble' : 'bass'
   - ⏳ 未实现（待后续）：三连音检测（步骤 5）、`@tonaljs` 和声上下文拼写（步骤 6，
     现仍用手写调号拼写 `spellPitch`，已覆盖调号内升降/还原）、按拍分组符杠（步骤 7，
     现仍用 `Beam.generateBeams` 全量组合）。
+- 2026-09-05 调号拟合与时值/符杠专项（见 `20260905-score-key-estimate-and-beaming.draft1.md`）：
+  - ✅ 全局调号改为音符内容拟合（`key-detect.ts`，meta 兜底），替代「直接使用 MIDI
+    keysig 元数据」的 M1 行为；`parse.ts` 修复小调 meta 关系大调折算；
+  - ✅ 附点时值分解（`decomposeBeats` 支持 2d/4d/8d）+ `beatBounds` 拍边界表；
+  - ✅ 符杠按拍分组并显式绘制（修复 `Beam.generateBeams` 未绘制导致符干/时值信息
+    全部缺失的渲染 bug）；
+  - ✅ 跨小节延音线（`NotatedEvent.tieNext/tiePrev`，同系统完整连线、跨系统半边弧）；
+  - ✅ 小节布局：音符区全曲等宽，谱号/调号/拍号等额外符号实测预留宽度；拍号变化
+    处重显拍号；
+  - 变更：§5.2 的「自适应量化代价吸附」、§5.5 的 `@tonaljs` 拼写打分仍列为后续，
+    本次以调号拟合 + 手写拼写获得主要收益。

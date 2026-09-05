@@ -1,11 +1,5 @@
-import type {
-  Note,
-  Song,
-  TempoEvent,
-  TimeSignatureEvent,
-  KeySignatureEvent,
-  SustainEvent,
-} from '../model'
+import type { Note, Song, TempoEvent, TimeSignatureEvent, SustainEvent } from '../model'
+import { estimateKey, ESTIMATE_OVERRIDE_CONFIDENCE, type KeyEstimate } from './key-detect'
 
 /**
  * MIDI（演奏数据）→ ScoreModel（记谱中间表示）。
@@ -56,6 +50,16 @@ export interface ScoreStaff {
   clef: Clef
 }
 
+/** 跨小节延音线：从本事件最后一个片段跨到目标事件第一个片段 */
+export interface TieLink {
+  /** 目标事件 id（同谱表、下个小节开头） */
+  targetId: number
+  /** 本事件 keys 中参与延音线的下标 */
+  fromKeys: number[]
+  /** 目标事件 keys 中参与延音线的下标（与 fromKeys 对齐） */
+  toKeys: number[]
+}
+
 export interface NotatedEvent {
   id: number
   /** 量化后起止时间（秒），供播放高亮比对 */
@@ -73,6 +77,10 @@ export interface NotatedEvent {
   rest: boolean
   /** 延音线连接的时值片段（≥1） */
   pieces: ScorePiece[]
+  /** 跨小节延音线（来源音符跨小节拆分） */
+  tieNext?: TieLink[]
+  /** 跨小节延音线的来源事件 id（渲染反向半边弧用） */
+  tiePrev?: number[]
 }
 
 export interface Measure {
@@ -140,16 +148,36 @@ function activeAt<T extends { time: number }>(events: T[], beat: number, curve: 
   return found
 }
 
+/**
+ * 拍号 → 节奏/符杠分组的拍边界（小节偏移，单位：四分音符拍）。
+ * 简单拍按拍均等划分；复合拍（x/8，分子为 3 的倍数）每 3 个八分一组；
+ * 不规则拍 5/8、7/8 按 3+2、2+2+3 惯例。
+ */
+export function beatBounds(numerator: number, denominator: number): number[] {
+  if (denominator === 8) {
+    if (numerator % 3 === 0) {
+      const bounds: number[] = []
+      for (let i = 0; i <= numerator; i += 3) bounds.push(i / 2)
+      return bounds
+    }
+    if (numerator === 5) return [0, 1.5, 2.5]
+    if (numerator === 7) return [0, 1, 2, 3.5]
+  }
+  const beats = (numerator * 4) / denominator
+  const unit = 4 / denominator
+  const bounds: number[] = []
+  for (let b = 0; b <= beats + EPS; b += unit) bounds.push(b)
+  return bounds
+}
+
 function buildMeasures(
   curve: BeatCurve,
   timeSignatures: TimeSignatureEvent[],
-  keySignatures: KeySignatureEvent[],
+  keysig: { sf: number; mi: 0 | 1 },
   totalBeats: number,
 ): Measure[] {
   const sigs = [...timeSignatures].sort((a, b) => a.time - b.time)
   if (sigs.length === 0) sigs.push({ time: 0, numerator: 4, denominator: 4 })
-  const keys = [...keySignatures].sort((a, b) => a.time - b.time)
-  const fallbackKey = keys[0] ?? { time: 0, sf: 0, mi: 0 as const }
 
   const measures: Measure[] = []
   let startBeat = 0
@@ -158,7 +186,6 @@ function buildMeasures(
     const sig = activeAt(sigs, startBeat, curve)
     const beatCount = (sig.numerator * 4) / sig.denominator
     const endBeat = startBeat + beatCount
-    const ks = activeAt(keys.length > 0 ? keys : [fallbackKey], startBeat, curve)
     measures.push({
       index,
       startBeat,
@@ -167,7 +194,7 @@ function buildMeasures(
       numerator: sig.numerator,
       denominator: sig.denominator,
       beatCount,
-      keysig: { sf: ks.sf, mi: ks.mi },
+      keysig,
     })
     startBeat = endBeat
     index++
@@ -221,21 +248,39 @@ export function spellPitch(pitch: number, sf: number): ScoreKey {
 }
 
 /**
- * 把 [offset, offset+total) 拍分解为合法时值片段（全/半/四分/八分/十六分，跨拍延音线连接）。
- * 规则：整拍起用尽量长的整拍时值；半拍起可用八分；其余用十六分逐步填。
+ * 把 [offset, offset+total) 拍分解为合法时值片段（全/附点半/半/附点四分/四分/附点八分/八分/十六分，
+ * 跨拍延音线连接）。
+ * 规则：
+ * - 拍点上优先用尽量长的时值（含附点半/附点四分）；
+ * - 附点八分仅当其整体落在本拍内部时采用（附点不越拍点）；
+ * - 八分需八分网格对齐；其余用十六分逐步填。
  */
-function decomposeBeats(offset: number, total: number): ScorePiece[] {
+export function decomposeBeats(
+  offset: number,
+  total: number,
+  bounds: readonly number[],
+): ScorePiece[] {
+  const onBeat = (pos: number): boolean => bounds.some((b) => Math.abs(pos - b) < EPS)
+  const nextBeatEnd = (pos: number): number => {
+    for (const b of bounds) {
+      if (b > pos + EPS) return b
+    }
+    return pos + 1
+  }
+  const atEighth = (pos: number): boolean => Math.abs(pos * 2 - Math.round(pos * 2)) < EPS
+
   const pieces: ScorePiece[] = []
   let pos = offset
   let remaining = total
   while (remaining > EPS) {
-    const onBeat = Math.abs(pos - Math.round(pos)) < EPS
-    const onHalf = Math.abs(pos * 2 - Math.round(pos * 2)) < EPS
     let dur: number
-    if (onBeat && remaining >= 4 - EPS) dur = 4
-    else if (onBeat && remaining >= 2 - EPS) dur = 2
-    else if (onBeat && remaining >= 1 - EPS) dur = 1
-    else if (onHalf && remaining >= 0.5 - EPS) dur = 0.5
+    if (onBeat(pos) && remaining >= 4 - EPS) dur = 4
+    else if (onBeat(pos) && remaining >= 3 - EPS) dur = 3
+    else if (onBeat(pos) && remaining >= 2 - EPS) dur = 2
+    else if (onBeat(pos) && remaining >= 1.5 - EPS) dur = 1.5
+    else if (onBeat(pos) && remaining >= 1 - EPS) dur = 1
+    else if (remaining >= 0.75 - EPS && pos + 0.75 <= nextBeatEnd(pos) + EPS) dur = 0.75
+    else if (atEighth(pos) && remaining >= 0.5 - EPS) dur = 0.5
     else dur = 0.25
     pieces.push({ beatOffset: pos, durationBeats: dur })
     pos += dur
@@ -413,7 +458,7 @@ function makeRestEvent(
     beatOffset,
     keys: [],
     rest: true,
-    pieces: decomposeBeats(beatOffset, total),
+    pieces: decomposeBeats(beatOffset, total, beatBounds(m.numerator, m.denominator)),
   }
 }
 
@@ -448,18 +493,80 @@ function buildRests(
   return rests
 }
 
+/**
+ * 全局调号裁决：优先采用音符内容拟合结果（现实中 MIDI 调号 meta 常为占位值/自相矛盾）；
+ * meta 与估计一致时取 meta；估计置信度不足时回落 meta。
+ */
+function resolveKeysig(song: Song): { sf: number; mi: 0 | 1 } {
+  const est: KeyEstimate = estimateKey(song.notes)
+  const meta = song.keySignatures[0]
+  if (meta === undefined) return { sf: est.sf, mi: est.mi }
+  if (meta.sf === est.sf) return { sf: meta.sf, mi: meta.mi }
+  if (est.confidence >= ESTIMATE_OVERRIDE_CONFIDENCE) return { sf: est.sf, mi: est.mi }
+  return { sf: meta.sf, mi: meta.mi }
+}
+
+/**
+ * 跨小节延音线标记：同一来源音符在小节边界被拆成相邻两个事件时，
+ * 在前一事件记 tieNext、后一事件记 tiePrev，渲染端据此画延音线/半边弧。
+ */
+function markCrossMeasureTies(events: NotatedEvent[], measures: Measure[]): void {
+  // 各谱表中「从小节第 0 拍开始」的音符事件，按 谱表|小节 索引
+  const startMap = new Map<string, NotatedEvent[]>()
+  for (const ev of events) {
+    if (ev.rest || Math.abs(ev.beatOffset) > EPS) continue
+    const k = `${ev.staffIndex}|${ev.measureIndex}`
+    const arr = startMap.get(k) ?? []
+    arr.push(ev)
+    startMap.set(k, arr)
+  }
+  const used = new Set<string>() // `${eventId}|${keyIndex}` 防重复
+  for (const ev of events) {
+    if (ev.rest) continue
+    const m = measures[ev.measureIndex]
+    const endOff = ev.beatOffset + ev.pieces.reduce((s, p) => s + p.durationBeats, 0)
+    if (Math.abs(endOff - m.beatCount) > EPS) continue
+    const candidates = [...(startMap.get(`${ev.staffIndex}|${ev.measureIndex + 1}`) ?? [])].sort(
+      (a, b) => Math.abs(a.voiceIndex - ev.voiceIndex) - Math.abs(b.voiceIndex - ev.voiceIndex),
+    )
+    for (let i = 0; i < ev.keys.length; i++) {
+      if (used.has(`${ev.id}|${i}`)) continue
+      const k = ev.keys[i]
+      for (const nx of candidates) {
+        const j = nx.keys.findIndex(
+          (kk, jj) =>
+            !used.has(`${nx.id}|${jj}`) &&
+            kk.letter === k.letter &&
+            kk.octave === k.octave &&
+            kk.accidental === k.accidental,
+        )
+        if (j < 0) continue
+        used.add(`${ev.id}|${i}`)
+        used.add(`${nx.id}|${j}`)
+        let link = (ev.tieNext ?? []).find((l) => l.targetId === nx.id)
+        if (link === undefined) {
+          link = { targetId: nx.id, fromKeys: [], toKeys: [] }
+          ev.tieNext = [...(ev.tieNext ?? []), link]
+        }
+        link.fromKeys.push(i)
+        link.toKeys.push(j)
+        nx.tiePrev = [...(nx.tiePrev ?? []), ev.id]
+        break
+      }
+    }
+  }
+}
+
 export function quantizeToScore(song: Song): ScoreModel {
   const curve = buildBeatCurve(song.tempos)
   const totalBeats = curve.secToBeat(song.duration)
-  const measures = buildMeasures(curve, song.timeSignatures, song.keySignatures, totalBeats)
+  const keysig = resolveKeysig(song)
+  const measures = buildMeasures(curve, song.timeSignatures, keysig, totalBeats)
   const staffs = buildStaffs(song)
   const staffIndexByTrack = new Map<number, number>()
   staffs.forEach((s, i) => staffIndexByTrack.set(s.trackIndex, i))
 
-  const displayKeysig =
-    song.keySignatures.length > 0
-      ? { sf: song.keySignatures[0].sf, mi: song.keySignatures[0].mi }
-      : { sf: 0, mi: 0 as const }
+  const displayKeysig = keysig
 
   const extendedNotes = extendWithSustain(song.notes, song.sustainEvents)
 
@@ -534,13 +641,15 @@ export function quantizeToScore(song: Song): ScoreModel {
             beatOffset: offset,
             keys: c.pitches.map((p) => spellPitch(p, m.keysig.sf)),
             rest: false,
-            pieces: decomposeBeats(offset, total),
+            pieces: decomposeBeats(offset, total, beatBounds(m.numerator, m.denominator)),
           })
         }
         events.push(...noteEvents, ...buildRests(m, si, vi, noteEvents, curve, nextIdFn))
       }
     }
   }
+
+  markCrossMeasureTies(events, measures)
 
   events.sort(
     (a, b) =>

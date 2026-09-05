@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { Song, SustainEvent } from '../model'
-import { GRID_STEP, quantizeToScore, spellPitch } from './quantize'
+import { beatBounds, GRID_STEP, decomposeBeats, quantizeToScore, spellPitch } from './quantize'
 
 interface NoteSpec {
   pitch: number
@@ -13,7 +13,7 @@ interface NoteSpec {
 
 function makeSong(
   notes: NoteSpec[],
-  opts: { sf?: number; mi?: 0 | 1; sustainEvents?: SustainEvent[] } = {},
+  opts: { sf?: number; mi?: 0 | 1; sustainEvents?: SustainEvent[]; noKeySig?: boolean } = {},
 ): Song {
   const trackOf = (n: NoteSpec): number => n.trackIndex ?? 0
   const indices = [...new Set(notes.map(trackOf))].sort((a, b) => a - b)
@@ -30,7 +30,7 @@ function makeSong(
     duration: notes.reduce((m, n) => Math.max(m, n.end), 0),
     tempos: [{ time: 0, bpm: 60 }], // 1 拍 = 1 秒
     timeSignatures: [{ time: 0, numerator: 4, denominator: 4 }],
-    keySignatures: [{ time: 0, sf: opts.sf ?? 0, mi: opts.mi ?? 0 }],
+    keySignatures: opts.noKeySig === true ? [] : [{ time: 0, sf: opts.sf ?? 0, mi: opts.mi ?? 0 }],
     tracks,
     notes: notes.map((n) => ({
       pitch: n.pitch,
@@ -80,14 +80,11 @@ describe('quantizeToScore', () => {
     ).toBeCloseTo(2)
   })
 
-  it('跨拍长音拆分为延音线连接的片段', () => {
-    // 1.5 拍长音从第 0 拍开始：0~1 拍(四分) + 1~1.5 拍(八分) 两片段
+  it('1.5 拍长音 → 单一附点四分片段（不再拆延音线）', () => {
     const song = makeSong([{ pitch: 60, start: 0, end: 1.5 }])
     const score = quantizeToScore(song)
     const ev = score.events.find((e) => !e.rest)!
-    expect(ev.pieces).toHaveLength(2)
-    expect(ev.pieces[0]).toEqual({ beatOffset: 0, durationBeats: 1 })
-    expect(ev.pieces[1]).toEqual({ beatOffset: 1, durationBeats: 0.5 })
+    expect(ev.pieces).toEqual([{ beatOffset: 0, durationBeats: 1.5 }])
   })
 
   it('跨小节音符在小节边界断开', () => {
@@ -193,5 +190,116 @@ describe('quantizeToScore', () => {
     const score = quantizeToScore(song)
     expect(score.staffs).toHaveLength(1)
     expect(score.staffs[0].trackIndex).toBe(0)
+  })
+
+  it('全局调号：G 小调内容且无 meta → sf=-2（写进每个小节与 displayKeysig）', () => {
+    // G 小调音阶内容：G4 A4 Bb4 C5 D5 Eb5 F5
+    const pcs = [67, 69, 70, 72, 74, 75, 77]
+    const song = makeSong(
+      pcs.flatMap((p, i) => [
+        { pitch: p, start: i * 0.5, end: i * 0.5 + 0.45 },
+        { pitch: p, start: 4 + i * 0.5, end: 4 + i * 0.5 + 0.45 },
+      ]),
+      { noKeySig: true },
+    )
+    const score = quantizeToScore(song)
+    expect(score.measures[0].keysig.sf).toBe(-2)
+    expect(score.displayKeysig.sf).toBe(-2)
+    // Bb 在 -2 调号下拼写为 B 无记号
+    const bb = score.events.find((e) => !e.rest && e.keys[0].letter === 'B')
+    expect(bb).toBeDefined()
+    expect(bb!.keys[0].accidental).toBe('')
+  })
+
+  it('估计与 meta 冲突：meta 说 C、内容却是 G 小调 → 估计覆盖（高置信度）', () => {
+    const pcs = [67, 69, 70, 72, 74, 75, 77]
+    const song = makeSong(
+      pcs.flatMap((p, i) => [
+        { pitch: p, start: i * 0.5, end: i * 0.5 + 0.45 },
+        { pitch: p, start: 4 + i * 0.5, end: 4 + i * 0.5 + 0.45 },
+      ]),
+      { sf: 0, mi: 0 },
+    )
+    const score = quantizeToScore(song)
+    expect(score.measures[0].keysig.sf).toBe(-2)
+  })
+
+  it('估计置信度不足时回落 meta：全白键内容 + meta=Ab → 遵循 meta', () => {
+    const song = makeSong(
+      [60, 62, 64, 65, 67, 69, 71].map((p, i) => ({ pitch: p, start: i, end: i + 0.9 })),
+      { sf: -4, mi: 0 },
+    )
+    const score = quantizeToScore(song)
+    expect(score.measures[0].keysig.sf).toBe(-4)
+  })
+
+  it('跨小节延音线：横跨小节线的音符标记 tieNext/tiePrev', () => {
+    // 60 BPM：1 秒 = 1 拍；第 3 拍开始长 2 拍 → 跨小节，且 C6 和弦部分延续
+    const song = makeSong([
+      { pitch: 60, start: 3, end: 6 },
+      { pitch: 64, start: 3, end: 6 },
+      { pitch: 67, start: 3, end: 4 },
+    ])
+    const score = quantizeToScore(song)
+    const ev0 = score.events.find((e) => !e.rest && e.measureIndex === 0)!
+    const ev1 = score.events.find((e) => !e.rest && e.measureIndex === 1)!
+    expect(ev0.tieNext).toBeDefined()
+    const link = ev0.tieNext!.find((l) => l.targetId === ev1.id)
+    expect(link).toBeDefined()
+    // C(60)、E(64) 跨小节延续，G(67) 不延续
+    expect(link!.fromKeys.sort()).toEqual([0, 1])
+    expect(link!.toKeys.sort()).toEqual([0, 1])
+    expect(ev1.tiePrev).toContain(ev0.id)
+  })
+})
+
+describe('beatBounds', () => {
+  it('常见拍号的拍边界', () => {
+    expect(beatBounds(4, 4)).toEqual([0, 1, 2, 3, 4])
+    expect(beatBounds(3, 4)).toEqual([0, 1, 2, 3])
+    expect(beatBounds(2, 2)).toEqual([0, 2, 4])
+    expect(beatBounds(6, 8)).toEqual([0, 1.5, 3])
+    expect(beatBounds(3, 8)).toEqual([0, 1.5])
+    expect(beatBounds(5, 8)).toEqual([0, 1.5, 2.5])
+    expect(beatBounds(7, 8)).toEqual([0, 1, 2, 3.5])
+  })
+})
+
+describe('decomposeBeats（附点）', () => {
+  const bounds44 = beatBounds(4, 4)
+
+  it('附点八分：起于拍点', () => {
+    expect(decomposeBeats(0, 0.75, bounds44)).toEqual([{ beatOffset: 0, durationBeats: 0.75 }])
+  })
+
+  it('附点八分：起于十六分位、收于拍点', () => {
+    expect(decomposeBeats(0.25, 0.75, bounds44)).toEqual([
+      { beatOffset: 0.25, durationBeats: 0.75 },
+    ])
+  })
+
+  it('起于八分位的 0.75 拍若越过拍点 → 八分 + 十六分延音线', () => {
+    expect(decomposeBeats(0.5, 0.75, bounds44)).toEqual([
+      { beatOffset: 0.5, durationBeats: 0.5 },
+      { beatOffset: 1, durationBeats: 0.25 },
+    ])
+  })
+
+  it('附点四分：起于拍点的 1.5 拍', () => {
+    expect(decomposeBeats(1, 1.5, bounds44)).toEqual([{ beatOffset: 1, durationBeats: 1.5 }])
+  })
+
+  it('附点半音符：起于拍点的 3 拍', () => {
+    expect(decomposeBeats(0, 3, bounds44)).toEqual([{ beatOffset: 0, durationBeats: 3 }])
+  })
+
+  it('3/8：整小节 1.5 拍 → 附点四分', () => {
+    expect(decomposeBeats(0, 1.5, beatBounds(3, 8))).toEqual([
+      { beatOffset: 0, durationBeats: 1.5 },
+    ])
+  })
+
+  it('0.25 拍仍落十六分', () => {
+    expect(decomposeBeats(0.5, 0.25, bounds44)).toEqual([{ beatOffset: 0.5, durationBeats: 0.25 }])
   })
 })

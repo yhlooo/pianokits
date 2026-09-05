@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>PianoKits</title>
+    <script>
+      // GitHub Pages 对未知路径（如 /midi-player）返回本页（404 回退）。
+      // 把目标路径暂存到 sessionStorage，跳回应用根，由 SPA 路由器读取并恢复
+      // （见 src/router.ts 的 consumeRedirectPath）。
+      sessionStorage.setItem(
+        'pianokits-redirect',
+        location.pathname + location.search + location.hash,
+      )
+      location.replace(new URL('./', location.href).href)
+    </script>
+  </head>
+  <body></body>
+</html>

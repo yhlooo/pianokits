@@ -830,6 +830,275 @@ input[type='range']::-moz-range-thumb {
   line-height: 1;
 }
 
+/* ---------- 调试菜单与浮动面板（仅 ?debug=1 时挂载） ---------- */
+.debug-menu {
+  position: relative;
+  margin-left: auto;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+}
+
+/* 文字按钮与工具页签同型；激活时底部 2px 琥珀指示条 */
+.debug-menu__trigger {
+  position: relative;
+  height: 100%;
+  padding: 0 14px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  font-size: 0.875rem;
+  color: var(--text-2);
+}
+
+.debug-menu__trigger:hover {
+  color: var(--text-0);
+  background: transparent;
+  border-color: transparent;
+}
+
+.debug-menu__trigger.is-active {
+  color: var(--text-0);
+}
+
+.debug-menu__trigger.is-active::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: 24px;
+  height: 2px;
+  transform: translateX(-50%);
+  border-radius: 1px;
+  background: var(--accent);
+}
+
+/* hover 或键盘触发的 .is-open 均展开下拉 */
+.debug-menu__dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  min-width: 168px;
+  display: none;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-toast);
+  z-index: 30;
+}
+
+.debug-menu:hover .debug-menu__dropdown,
+.debug-menu.is-open .debug-menu__dropdown {
+  display: flex;
+}
+
+.debug-menu__item {
+  height: 32px;
+  padding: 0 10px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--text-1);
+}
+
+.debug-menu__item:hover {
+  background: var(--bg-2);
+  border-color: transparent;
+  color: var(--text-0);
+}
+
+/* ---------- MIDI 键盘调试工具页面（与正常工具一样挂载内容区） ---------- */
+.midi-debug {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.midi-debug__inner {
+  margin: auto 0;
+  width: 100%;
+  max-width: 1024px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  padding: 32px 24px;
+  text-align: center;
+}
+
+.midi-debug__status {
+  font-size: 0.875rem;
+  color: var(--text-1);
+}
+
+.midi-debug__devices {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  max-width: 720px;
+}
+
+.midi-debug__device {
+  font-size: 0.75rem;
+  color: var(--text-1);
+  padding: 6px 12px;
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.midi-debug__device--empty {
+  color: var(--text-2);
+  background: transparent;
+  border-color: transparent;
+}
+
+.midi-debug__stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  width: 100%;
+}
+
+/* 按住键 chips 容器：多键并显（音高升序），高度固定避免无键/有键时跳动 */
+.midi-debug__keys {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 5.5rem;
+}
+
+/* 无按键占位 */
+.midi-debug__note {
+  font-family: var(--font-display);
+  font-size: 3.5rem;
+  line-height: 1;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 按住键 chip：所有键同色 */
+.midi-debug__key {
+  font-family: var(--font-display);
+  font-size: 3.5rem;
+  line-height: 1;
+  color: var(--text-0);
+  padding: 14px 24px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 88 键钢琴键盘 ---------- */
+.midi-debug__piano {
+  position: relative;
+  width: 100%;
+  height: 112px;
+  background: #1a1816;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.midi-debug__whites {
+  position: absolute;
+  inset: 0;
+  display: flex;
+}
+
+.midi-debug__wkey {
+  flex: none;
+  width: calc(100% / 52);
+  height: 100%;
+  box-sizing: border-box;
+  background: linear-gradient(#f4f1eb, #e3dfd7);
+  border-right: 1px solid rgba(0, 0, 0, 0.25);
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.midi-debug__wkey:last-child {
+  border-right: none;
+}
+
+.midi-debug__wkey.is-pressed {
+  background: linear-gradient(#e4b871, #d9a45b);
+}
+
+.midi-debug__blacks {
+  position: absolute;
+  inset: 0;
+}
+
+.midi-debug__bkey {
+  position: absolute;
+  top: 0;
+  width: calc(100% / 52 * 0.6);
+  height: 62%;
+  background: linear-gradient(#2a2825, #141312);
+  border-radius: 0 0 3px 3px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.midi-debug__bkey.is-pressed {
+  background: linear-gradient(#a8772e, #8a6126);
+}
+
+/* ---------- 大谱表（自绘 SVG，暖象牙纸卡片） ---------- */
+.midi-debug__score {
+  width: min(560px, 100%);
+  background: var(--paper);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-paper);
+  padding: 10px 14px;
+}
+
+.midi-debug__score-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.midi-debug__staff-lines line {
+  stroke: var(--paper-text);
+  stroke-width: 1;
+}
+
+.midi-debug__clef {
+  fill: var(--paper-text);
+  font-family: Bravura, 'Noto Music', 'Segoe UI Symbol', 'Apple Symbols', sans-serif;
+}
+
+.midi-debug__snote line {
+  stroke: var(--paper-text);
+  stroke-width: 1;
+}
+
+.midi-debug__shead {
+  fill: var(--paper-text);
+  stroke: var(--paper-text);
+  stroke-width: 1;
+}
+
 /* ---------- 降低动效偏好 ---------- */
 @media (prefers-reduced-motion: reduce) {
   *,

@@ -1,25 +1,37 @@
-import type { Song, TempoEvent, TimeSignatureEvent, KeySignatureEvent } from '../model'
+import type {
+  Note,
+  Song,
+  TempoEvent,
+  TimeSignatureEvent,
+  KeySignatureEvent,
+  SustainEvent,
+} from '../model'
 
 /**
  * MIDI（演奏数据）→ ScoreModel（记谱中间表示）。
  *
- * M1 算法（"参考谱"级，见设计文档 §6.6）：
- * 1. 网格量化：起止时间吸附到 1/8 拍（QUANTIZE_STEP = 0.5 拍）网格；
- * 2. 跨小节拆分：事件在小节边界处断开；
- * 3. 分声部：以 C4（MIDI 60）为界分左右手谱表，同一起音合并为和弦；
- * 4. 时值分解：按拍分解为合法时值（半/四分/八分），跨拍用延音线连接；
- * 5. 拼写：按小节生效调号拼写音名与临时记号；
- * 6. 休止符：声部内空隙折叠为休止符。
+ * M2 算法（见设计文档 docs/development/design/20260905-score-notation.draft1.md）：
+ * 1. 踏板延音：用 CC64 延长长音，避免长音被量化切碎成休止符；
+ * 2. 网格量化：起止时间吸附到 1/16 拍网格（GRID_STEP = 0.25 拍）；
+ * 3. 分谱表：按 MIDI 音轨分组，一轨一谱表；谱号按轨内主音区（时长加权中位数 vs C4）判定；
+ * 4. 谱表内分声部：重叠事件分多声部（MAX_VOICES，默认 2、可放宽）；
+ * 5. 跨小节拆分：事件在小节边界处断开；
+ * 6. 时值分解：按拍分解为合法时值（全/半/四分/八分/十六分），跨拍用延音线连接；
+ * 7. 拼写：按小节生效调号拼写音名与临时记号；
+ * 8. 休止符：每声部内空隙折叠为休止符。
  */
 
-/** 量化网格步长（拍，四分之一音符为单位）；0.5 = 八分音符 */
-export const QUANTIZE_STEP = 0.5
-/** 左右手分界音高 */
-export const SPLIT_PITCH = 60
+/** 量化网格步长（拍，四分之一音符为单位）；0.25 = 十六分音符 */
+export const GRID_STEP = 0.25
+/** treble/bass 谱号分界音高（C4），按轨内主音区（时长加权中位数）比较 */
+export const CLEF_PITCH = 60
+/** 谱表内声部上限：默认 2，可放宽（设计 §5.3 / Q2，上限 4） */
+export const MAX_VOICES = 2
 const EPS = 1e-6
 
 export type Accidental = '' | '#' | 'b' | 'n'
 export type Letter = 'C' | 'D' | 'E' | 'F' | 'G' | 'A' | 'B'
+export type Clef = 'treble' | 'bass'
 
 export interface ScoreKey {
   letter: Letter
@@ -35,12 +47,24 @@ export interface ScorePiece {
   durationBeats: number
 }
 
+/** 谱表：一轨一谱表，谱号按轨内主音区判定 */
+export interface ScoreStaff {
+  /** 来源 MIDI 轨道序号（对应 Song.tracks） */
+  trackIndex: number
+  /** 轨道名（展示用，可空） */
+  name: string
+  clef: Clef
+}
+
 export interface NotatedEvent {
   id: number
   /** 量化后起止时间（秒），供播放高亮比对 */
   onsetSec: number
   endSec: number
-  staff: 'upper' | 'lower'
+  /** 指向 ScoreModel.staffs 下标 */
+  staffIndex: number
+  /** 谱表内声部序号（0 起，主声部 = 0） */
+  voiceIndex: number
   measureIndex: number
   /** 小节内起始拍 */
   beatOffset: number
@@ -67,6 +91,8 @@ export interface ScoreModel {
   ppq: number
   durationSec: number
   measures: Measure[]
+  /** 谱表列表（一轨一谱表），数组下标即 staffIndex */
+  staffs: ScoreStaff[]
   events: NotatedEvent[]
   /** 谱面展示用调号（取首个调号事件） */
   displayKeysig: { sf: number; mi: 0 | 1 }
@@ -194,23 +220,26 @@ export function spellPitch(pitch: number, sf: number): ScoreKey {
   return { letter, accidental: 'b', octave }
 }
 
-/** 把 [offset, offset+total) 拍分解为合法时值片段（半/四分/八分，跨拍延音线连接） */
+/**
+ * 把 [offset, offset+total) 拍分解为合法时值片段（全/半/四分/八分/十六分，跨拍延音线连接）。
+ * 规则：整拍起用尽量长的整拍时值；半拍起可用八分；其余用十六分逐步填。
+ */
 function decomposeBeats(offset: number, total: number): ScorePiece[] {
   const pieces: ScorePiece[] = []
   let pos = offset
   let remaining = total
   while (remaining > EPS) {
-    if (Math.abs(pos - Math.round(pos)) < EPS && remaining >= 2 - EPS) {
-      pieces.push({ beatOffset: pos, durationBeats: 2 })
-      pos += 2
-      remaining -= 2
-      continue
-    }
-    const nextBeat = Math.floor(pos + EPS) + 1
-    const take = Math.min(remaining, nextBeat - pos)
-    pieces.push({ beatOffset: pos, durationBeats: take })
-    pos += take
-    remaining -= take
+    const onBeat = Math.abs(pos - Math.round(pos)) < EPS
+    const onHalf = Math.abs(pos * 2 - Math.round(pos * 2)) < EPS
+    let dur: number
+    if (onBeat && remaining >= 4 - EPS) dur = 4
+    else if (onBeat && remaining >= 2 - EPS) dur = 2
+    else if (onBeat && remaining >= 1 - EPS) dur = 1
+    else if (onHalf && remaining >= 0.5 - EPS) dur = 0.5
+    else dur = 0.25
+    pieces.push({ beatOffset: pos, durationBeats: dur })
+    pos += dur
+    remaining -= dur
   }
   return pieces
 }
@@ -221,60 +250,253 @@ function quantizeNote(start: number, end: number, step: number): { qs: number; q
   return { qs, qe }
 }
 
+// ---------- 分谱表 ----------
+
+/** 时长加权中位数：累计时长过半处的音高（对极端高低音稳健） */
+function durationWeightedMedian(notes: Note[]): number {
+  if (notes.length === 0) return CLEF_PITCH
+  const sorted = [...notes].sort((a, b) => a.pitch - b.pitch)
+  const total = sorted.reduce((s, n) => s + Math.max(0, n.end - n.start), 0)
+  if (total <= 0) return sorted[Math.floor(sorted.length / 2)]?.pitch ?? CLEF_PITCH
+  let acc = 0
+  for (const n of sorted) {
+    acc += Math.max(0, n.end - n.start)
+    if (acc * 2 >= total) return n.pitch
+  }
+  return sorted[sorted.length - 1]?.pitch ?? CLEF_PITCH
+}
+
+/** 谱号：轨内主要音区 ≥ C4 → treble，否则 bass */
+function clefForNotes(notes: Note[]): Clef {
+  return durationWeightedMedian(notes) >= CLEF_PITCH ? 'treble' : 'bass'
+}
+
+/** 一轨一谱表：过滤打击乐轨与空轨，按文件原始顺序，谱号按轨内主音区判定 */
+function buildStaffs(song: Song): ScoreStaff[] {
+  const notesByTrack = new Map<number, Note[]>()
+  for (const n of song.notes) {
+    const arr = notesByTrack.get(n.trackIndex) ?? []
+    arr.push(n)
+    notesByTrack.set(n.trackIndex, arr)
+  }
+  const staffs: ScoreStaff[] = []
+  for (const t of song.tracks) {
+    if (t.percussion || t.noteCount === 0) continue
+    staffs.push({
+      trackIndex: t.index,
+      name: t.name,
+      clef: clefForNotes(notesByTrack.get(t.index) ?? []),
+    })
+  }
+  return staffs
+}
+
+// ---------- 踏板延音 ----------
+
+interface SustainInterval {
+  on: number
+  off: number
+}
+
+function buildSustainIntervals(events: SustainEvent[]): SustainInterval[] {
+  const intervals: SustainInterval[] = []
+  let current: SustainInterval | null = null
+  for (const e of events) {
+    if (e.value >= 64) {
+      if (current === null) current = { on: e.time, off: Number.POSITIVE_INFINITY }
+    } else if (current !== null) {
+      current.off = e.time
+      intervals.push(current)
+      current = null
+    }
+  }
+  if (current !== null) intervals.push(current)
+  return intervals
+}
+
+/**
+ * 用 CC64 踏板延长音符结束（参考 Magenta applySustainControlChanges 语义）：
+ * 踏板踩住期间，note 结束延长到「下一个同音高的 note-on」或「踏板抬起」，二者取先到者。
+ */
+function extendWithSustain(notes: Note[], events: SustainEvent[]): Note[] {
+  if (events.length === 0) return notes
+  const intervals = buildSustainIntervals(events)
+  if (intervals.length === 0) return notes
+
+  const byPitch = new Map<number, Note[]>()
+  for (const n of notes) {
+    const arr = byPitch.get(n.pitch) ?? []
+    arr.push(n)
+    byPitch.set(n.pitch, arr)
+  }
+  for (const arr of byPitch.values()) arr.sort((a, b) => a.start - b.start)
+
+  return notes.map((n) => {
+    for (const iv of intervals) {
+      if (iv.on <= n.start + EPS && iv.off > n.start) {
+        const samePitch = byPitch.get(n.pitch) ?? []
+        let nextOnset = Number.POSITIVE_INFINITY
+        for (const m of samePitch) {
+          if (m.start > n.start + EPS) {
+            nextOnset = m.start
+            break
+          }
+        }
+        const cap = Math.min(iv.off, nextOnset)
+        if (cap > n.end) return { ...n, end: cap }
+        return n
+      }
+    }
+    return n
+  })
+}
+
+// ---------- 谱表内复调分声部 ----------
+
+interface ChordSeg {
+  qs: number
+  qe: number
+  pitches: number[]
+}
+
+/** 重叠 + 贪心分声部：不重叠的归入最早可用声部（主声部优先），重叠则开新声部或并入最近者 */
+function assignVoices(
+  chords: ChordSeg[],
+  maxVoices: number,
+): { qs: number; qe: number; pitches: number[]; voiceIndex: number }[] {
+  const lastEnds: number[] = []
+  const result: { qs: number; qe: number; pitches: number[]; voiceIndex: number }[] = []
+  for (const c of chords) {
+    let vi = -1
+    for (let i = 0; i < lastEnds.length; i++) {
+      if (lastEnds[i] <= c.qs + EPS) {
+        vi = i
+        break
+      }
+    }
+    if (vi === -1) {
+      if (lastEnds.length < maxVoices) {
+        vi = lastEnds.length
+        lastEnds.push(0)
+      } else {
+        // 超出声部上限：并入结束最早的声部（起点收紧，最小化位移）
+        vi = 0
+        for (let i = 1; i < lastEnds.length; i++) {
+          if (lastEnds[i] < lastEnds[vi]) vi = i
+        }
+      }
+    }
+    const qs = Math.max(c.qs, lastEnds[vi])
+    const qe = Math.max(qs + GRID_STEP, c.qe)
+    result.push({ qs, qe, pitches: c.pitches, voiceIndex: vi })
+    lastEnds[vi] = qe
+  }
+  return result
+}
+
+function makeRestEvent(
+  m: Measure,
+  staffIndex: number,
+  voiceIndex: number,
+  beatOffset: number,
+  total: number,
+  curve: BeatCurve,
+  nextId: () => number,
+): NotatedEvent {
+  return {
+    id: nextId(),
+    onsetSec: curve.beatToSec(m.startBeat + beatOffset),
+    endSec: curve.beatToSec(m.startBeat + beatOffset + total),
+    staffIndex,
+    voiceIndex,
+    measureIndex: m.index,
+    beatOffset,
+    keys: [],
+    rest: true,
+    pieces: decomposeBeats(beatOffset, total),
+  }
+}
+
+/** 单声部内空隙折叠为休止符（含小节尾部） */
+function buildRests(
+  m: Measure,
+  staffIndex: number,
+  voiceIndex: number,
+  noteEvents: NotatedEvent[],
+  curve: BeatCurve,
+  nextId: () => number,
+): NotatedEvent[] {
+  const rests: NotatedEvent[] = []
+  let coveredUntil = 0
+  for (const e of noteEvents) {
+    const gapStart = coveredUntil
+    const gapEnd = e.beatOffset
+    if (gapEnd - gapStart >= GRID_STEP - EPS) {
+      rests.push(
+        makeRestEvent(m, staffIndex, voiceIndex, gapStart, gapEnd - gapStart, curve, nextId),
+      )
+    }
+    coveredUntil = Math.max(
+      coveredUntil,
+      e.beatOffset + e.pieces.reduce((s, p) => s + p.durationBeats, 0),
+    )
+  }
+  const tail = m.beatCount - coveredUntil
+  if (tail >= GRID_STEP - EPS) {
+    rests.push(makeRestEvent(m, staffIndex, voiceIndex, coveredUntil, tail, curve, nextId))
+  }
+  return rests
+}
+
 export function quantizeToScore(song: Song): ScoreModel {
   const curve = buildBeatCurve(song.tempos)
   const totalBeats = curve.secToBeat(song.duration)
   const measures = buildMeasures(curve, song.timeSignatures, song.keySignatures, totalBeats)
+  const staffs = buildStaffs(song)
+  const staffIndexByTrack = new Map<number, number>()
+  staffs.forEach((s, i) => staffIndexByTrack.set(s.trackIndex, i))
 
   const displayKeysig =
     song.keySignatures.length > 0
       ? { sf: song.keySignatures[0].sf, mi: song.keySignatures[0].mi }
       : { sf: 0, mi: 0 as const }
 
-  type Segment = {
-    pitch: number
-    velocity: number
-    qs: number
-    qe: number
-    staff: 'upper' | 'lower'
-  }
+  const extendedNotes = extendWithSustain(song.notes, song.sustainEvents)
+
+  type Segment = { pitch: number; qs: number; qe: number; staffIndex: number }
   const byMeasure: Segment[][] = measures.map(() => [])
 
-  for (const note of song.notes) {
+  for (const note of extendedNotes) {
+    const staffIndex = staffIndexByTrack.get(note.trackIndex)
+    if (staffIndex === undefined) continue
     if (note.pitch < 0 || note.pitch > 127) continue
-    const staff: 'upper' | 'lower' = note.pitch >= SPLIT_PITCH ? 'upper' : 'lower'
     const { qs, qe } = quantizeNote(
       curve.secToBeat(note.start),
       curve.secToBeat(note.end),
-      QUANTIZE_STEP,
+      GRID_STEP,
     )
     // 跨小节拆分
     for (const m of measures) {
       const segStart = Math.max(qs, m.startBeat)
       const segEnd = Math.min(qe, m.startBeat + m.beatCount)
       if (segStart < segEnd - EPS) {
-        byMeasure[m.index].push({
-          pitch: note.pitch,
-          velocity: note.velocity,
-          qs: segStart,
-          qe: segEnd,
-          staff,
-        })
+        byMeasure[m.index].push({ pitch: note.pitch, qs: segStart, qe: segEnd, staffIndex })
       }
     }
   }
 
   const events: NotatedEvent[] = []
   let nextId = 1
+  const nextIdFn = (): number => nextId++
 
   for (const m of measures) {
-    for (const staff of ['upper', 'lower'] as const) {
+    for (let si = 0; si < staffs.length; si++) {
       const segs = byMeasure[m.index]
-        .filter((s) => s.staff === staff)
+        .filter((s) => s.staffIndex === si)
         .sort((a, b) => a.qs - b.qs || a.pitch - b.pitch)
 
       // 同一起音合并为和弦
-      const chords: { qs: number; qe: number; pitches: number[] }[] = []
+      const chords: ChordSeg[] = []
       for (const s of segs) {
         const last = chords[chords.length - 1]
         if (last !== undefined && Math.abs(last.qs - s.qs) < EPS) {
@@ -285,86 +507,54 @@ export function quantizeToScore(song: Song): ScoreModel {
         }
       }
 
-      // 单声部：与前一事件重叠时收紧起点（避免 VexFlow 单声部重叠的非法输入）
-      const normalized: { qs: number; qe: number; pitches: number[] }[] = []
-      let lastEnd = -1
-      for (const c of chords) {
-        const qs = Math.max(c.qs, lastEnd)
-        const qe = Math.max(qs + QUANTIZE_STEP, c.qe)
-        normalized.push({ qs, qe, pitches: c.pitches })
-        lastEnd = qe
+      // 谱表内复调分声部
+      const assigned = assignVoices(chords, MAX_VOICES)
+      const byVoice = new Map<number, typeof assigned>()
+      for (const a of assigned) {
+        const arr = byVoice.get(a.voiceIndex) ?? []
+        arr.push(a)
+        byVoice.set(a.voiceIndex, arr)
       }
 
-      // 生成事件
-      const staffEvents: NotatedEvent[] = []
-      for (const c of normalized) {
-        const offset = c.qs - m.startBeat
-        const total = c.qe - c.qs
-        if (total < QUANTIZE_STEP - EPS) continue
-        staffEvents.push({
-          id: nextId++,
-          onsetSec: curve.beatToSec(c.qs),
-          endSec: curve.beatToSec(c.qe),
-          staff,
-          measureIndex: m.index,
-          beatOffset: offset,
-          keys: c.pitches.map((p) => spellPitch(p, m.keysig.sf)),
-          rest: false,
-          pieces: decomposeBeats(offset, total),
-        })
-      }
-
-      // 休止符：事件空隙折叠
-      const restEvents: NotatedEvent[] = []
-      let coveredUntil = 0
-      for (const e of staffEvents) {
-        const gapStart = coveredUntil
-        const gapEnd = e.beatOffset
-        if (gapEnd - gapStart >= QUANTIZE_STEP - EPS) {
-          restEvents.push({
-            id: nextId++,
-            onsetSec: curve.beatToSec(m.startBeat + gapStart),
-            endSec: curve.beatToSec(m.startBeat + gapEnd),
-            staff,
+      // 声部 0 始终存在（至少含休止符）；其余声部按实际出现的最高声部号生成
+      const maxVoice = assigned.reduce((mx, a) => Math.max(mx, a.voiceIndex), 0)
+      for (let vi = 0; vi <= maxVoice; vi++) {
+        const noteEvents: NotatedEvent[] = []
+        for (const c of byVoice.get(vi) ?? []) {
+          const offset = c.qs - m.startBeat
+          const total = c.qe - c.qs
+          if (total < GRID_STEP - EPS) continue
+          noteEvents.push({
+            id: nextIdFn(),
+            onsetSec: curve.beatToSec(c.qs),
+            endSec: curve.beatToSec(c.qe),
+            staffIndex: si,
+            voiceIndex: vi,
             measureIndex: m.index,
-            beatOffset: gapStart,
-            keys: [],
-            rest: true,
-            pieces: decomposeBeats(gapStart, gapEnd - gapStart),
+            beatOffset: offset,
+            keys: c.pitches.map((p) => spellPitch(p, m.keysig.sf)),
+            rest: false,
+            pieces: decomposeBeats(offset, total),
           })
         }
-        coveredUntil = Math.max(
-          coveredUntil,
-          e.beatOffset + e.pieces.reduce((s, p) => s + p.durationBeats, 0),
-        )
+        events.push(...noteEvents, ...buildRests(m, si, vi, noteEvents, curve, nextIdFn))
       }
-      // 小节尾部空隙的休止符（弱起小节会在开头补休止符，此处补结尾）
-      const tail = m.beatCount - coveredUntil
-      if (tail >= QUANTIZE_STEP - EPS) {
-        restEvents.push({
-          id: nextId++,
-          onsetSec: curve.beatToSec(m.startBeat + coveredUntil),
-          endSec: m.endSec,
-          staff,
-          measureIndex: m.index,
-          beatOffset: coveredUntil,
-          keys: [],
-          rest: true,
-          pieces: decomposeBeats(coveredUntil, tail),
-        })
-      }
-      events.push(...staffEvents, ...restEvents)
     }
   }
 
   events.sort(
-    (a, b) => a.onsetSec - b.onsetSec || (a.staff === b.staff ? 0 : a.staff === 'upper' ? -1 : 1),
+    (a, b) =>
+      a.onsetSec - b.onsetSec ||
+      a.staffIndex - b.staffIndex ||
+      a.voiceIndex - b.voiceIndex ||
+      (a.rest === b.rest ? 0 : a.rest ? 1 : -1),
   )
 
   return {
     ppq: song.ppq,
     durationSec: song.duration,
     measures,
+    staffs,
     events,
     displayKeysig,
   }

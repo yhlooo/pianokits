@@ -16,7 +16,7 @@ import type { View } from './store'
 
 const STAFF_TOP_Y = 10
 const STAFF_GAP = 100
-const SYSTEM_HEIGHT = STAFF_TOP_Y + STAFF_GAP + 100
+const BOTTOM_PAD = 100
 /** 记谱墨色：近黑微暖（暖象牙纸面上不用纯黑） */
 const INK = '#1c1a17'
 /** 播放高亮：纸面上的加深琥珀（视觉风格指南 §6.5） */
@@ -46,29 +46,32 @@ const SF_TO_KEYSPEC: Record<number, string> = {
 }
 
 function pieceToDuration(beats: number): string {
+  if (beats >= 4 - 1e-6) return '1'
   if (beats >= 2 - 1e-6) return '2'
   if (beats >= 1 - 1e-6) return '4'
-  return '8'
+  if (beats >= 0.5 - 1e-6) return '8'
+  return '16'
 }
 
 function restDuration(beats: number): string {
   if (beats >= 4 - 1e-6) return '1r'
   if (beats >= 2 - 1e-6) return '2r'
   if (beats >= 1 - 1e-6) return '4r'
-  return '8r'
+  if (beats >= 0.5 - 1e-6) return '8r'
+  return '16r'
 }
 
 /** 合并相邻休止符片段为尽量大的合法时值（休止符无需延音线） */
 function mergeRestPieces(totalBeats: number): number[] {
   const parts: number[] = []
   let remaining = totalBeats
-  for (const size of [4, 2, 1, 0.5]) {
+  for (const size of [4, 2, 1, 0.5, 0.25]) {
     while (remaining >= size - 1e-6) {
       parts.push(size)
       remaining -= size
     }
   }
-  if (remaining > 1e-6) parts.push(0.5)
+  if (remaining > 1e-6) parts.push(0.25)
   return parts
 }
 
@@ -78,9 +81,16 @@ interface SystemRef {
   dirty: boolean
 }
 
+interface StaffRow {
+  stave: Stave
+  voices: Voice[]
+  ties: StaveTie[]
+}
+
 /**
- * 五线谱视图（VexFlow 直雕，设计文档 §6.5）：
- * 双谱表（大谱表）+ 调号/拍号 + 延音线 + 符杠 + 播放高亮 + 自动滚动。
+ * 五线谱视图（VexFlow 直雕，设计文档 §6.5 / §6）：
+ * 多谱表（一轨一谱表，2 轨用 brace、>2 轨用 bracket）+ 调号/拍号 + 谱表内多声部 +
+ * 延音线 + 符杠 + 播放高亮 + 自动滚动。
  * 按系统（一行）渲染，懒加载（IntersectionObserver），高亮变化只重绘受影响系统。
  */
 export class ScoreView implements View {
@@ -113,7 +123,7 @@ export class ScoreView implements View {
       el(
         'div',
         { class: 'score__notice' },
-        '自动记谱，仅供跟随参考 · 量化到八分音符网格 · 以 C4 为界分左右手',
+        '自动记谱，仅供跟随参考 · 量化到十六分音符网格 · 按音轨分谱表',
       ),
       this.scrollEl,
       this.emptyEl,
@@ -255,6 +265,8 @@ export class ScoreView implements View {
     if (score === null || sys === undefined) return
     const width = this.el.clientWidth - SCROLL_PAD_X * 2 - CARD_PAD_X * 2
     if (width <= 0) return
+    const staffCount = score.staffs.length
+    if (staffCount === 0) return
 
     sys.div.replaceChildren()
     sys.rendered = true
@@ -264,8 +276,9 @@ export class ScoreView implements View {
     const endMeasure = Math.min(score.measures.length, startMeasure + this.measuresPerSystem)
     if (startMeasure >= endMeasure) return
 
+    const systemHeight = STAFF_TOP_Y + (staffCount - 1) * STAFF_GAP + BOTTOM_PAD
     const renderer = new Renderer(sys.div, Renderer.Backends.SVG)
-    renderer.resize(width, SYSTEM_HEIGHT)
+    renderer.resize(width, systemHeight)
     const ctx = renderer.getContext()
     if (ctx === null) return
     // 记谱墨色：近黑微暖
@@ -274,74 +287,107 @@ export class ScoreView implements View {
 
     const measureWidth = (width - 30) / (endMeasure - startMeasure)
 
+    let systemTop: Stave | null = null
+    let systemBottom: Stave | null = null
+
     for (let m = startMeasure; m < endMeasure; m++) {
       const measure = score.measures[m]
       const x = 10 + (m - startMeasure) * measureWidth
       const staveW = measureWidth - 4
+      // 谱号/调号只在行首（系统第一小节）显示；调号行内变化时重显
+      const isSystemStart = m === startMeasure
+      const prev = m > 0 ? score.measures[m - 1] : null
+      const keyChanged =
+        prev !== null &&
+        (prev.keysig.sf !== measure.keysig.sf || prev.keysig.mi !== measure.keysig.mi)
 
-      const treble = new Stave(x, STAFF_TOP_Y, staveW)
-      const bass = new Stave(x, STAFF_TOP_Y + STAFF_GAP, staveW)
-      treble.addClef('treble')
-      bass.addClef('bass')
-      const keySpec = this.keySpec(measure)
-      treble.addKeySignature(keySpec)
-      bass.addKeySignature(keySpec)
-      if (m === 0) {
-        treble.addTimeSignature(`${measure.numerator}/${measure.denominator}`)
-        bass.addTimeSignature(`${measure.numerator}/${measure.denominator}`)
+      const rows: StaffRow[] = []
+
+      for (let si = 0; si < staffCount; si++) {
+        const stave = new Stave(x, STAFF_TOP_Y + si * STAFF_GAP, staveW)
+        stave.setContext(ctx)
+        if (isSystemStart) {
+          stave.addClef(score.staffs[si].clef)
+        }
+        if (isSystemStart || keyChanged) {
+          stave.addKeySignature(this.keySpec(measure.keysig))
+        }
+        if (m === 0) {
+          stave.addTimeSignature(`${measure.numerator}/${measure.denominator}`)
+        }
+
+        const voices: Voice[] = []
+        const ties: StaveTie[] = []
+        const maxVoice = this.maxVoiceIndex(measure, si)
+        for (let vi = 0; vi <= maxVoice; vi++) {
+          const r = this.buildVoice(measure, si, vi, this.activeIds)
+          if (r.voice !== null) voices.push(r.voice)
+          ties.push(...r.ties)
+        }
+        if (voices.length > 0) {
+          const formatter = new Formatter()
+          formatter.joinVoices(voices)
+          // 音符区宽度按该小节实际谱号/调号占位计算（行内无谱号时音符区更宽）
+          const noteWidth = stave.getNoteEndX() - stave.getNoteStartX()
+          formatter.format(voices, noteWidth)
+        }
+        rows.push({ stave, voices, ties })
       }
 
-      const upper = this.buildVoice(measure, 'upper', this.activeIds)
-      const lower = this.buildVoice(measure, 'lower', this.activeIds)
-      const voices = upper.voice !== null ? [upper.voice] : []
-      if (lower.voice !== null) voices.push(lower.voice)
-
-      if (voices.length > 0) {
-        const formatter = new Formatter()
-        formatter.joinVoices(voices)
-        formatter.format(voices, staveW - 40)
+      // 首个小节记录系统顶/底谱表，供系统左端竖线连接符使用
+      if (m === startMeasure) {
+        systemTop = rows[0].stave
+        systemBottom = rows[rows.length - 1].stave
       }
 
-      const connector = new StaveConnector(treble, bass)
-      connector.setType('brace')
+      for (const row of rows) row.stave.draw()
+      for (const row of rows) {
+        for (const voice of row.voices) voice.draw(ctx, row.stave)
+        for (const tie of row.ties) tie.setContext(ctx).draw()
+      }
+    }
 
-      treble.setContext(ctx).draw()
-      bass.setContext(ctx).draw()
+    // 系统左端一条竖线连接所有谱表（每系统一次，而非每小节画连接符）
+    if (systemTop !== null && systemBottom !== null) {
+      const connector = new StaveConnector(systemTop, systemBottom)
+      connector.setType('singleLeft')
       connector.setContext(ctx).draw()
-
-      if (upper.voice !== null) upper.voice.draw(ctx, treble)
-      if (lower.voice !== null) lower.voice.draw(ctx, bass)
-      for (const tie of [...upper.ties, ...lower.ties]) {
-        tie.setContext(ctx).draw()
-      }
     }
   }
 
-  private keySpec(measure: Measure): string {
-    if (measure.index === 0) {
-      const ks = this.score?.displayKeysig
-      if (ks !== undefined) {
-        const base = SF_TO_KEYSPEC[ks.sf] ?? 'C'
-        return ks.mi === 1 ? `${base}m` : base
+  private maxVoiceIndex(measure: Measure, staffIndex: number): number {
+    let mx = -1
+    if (this.score === null) return -1
+    for (const e of this.score.events) {
+      if (e.measureIndex === measure.index && e.staffIndex === staffIndex) {
+        if (e.voiceIndex > mx) mx = e.voiceIndex
       }
     }
-    // 中间调号变化 M1 不展示：与首小节调号一致（参考谱定位）
-    const ks = this.score?.displayKeysig
-    if (ks === undefined) return 'C'
-    const base = SF_TO_KEYSPEC[ks.sf] ?? 'C'
-    return ks.mi === 1 ? `${base}m` : base
+    return mx
+  }
+
+  private keySpec(keysig: { sf: number; mi: 0 | 1 }): string {
+    const base = SF_TO_KEYSPEC[keysig.sf] ?? 'C'
+    return keysig.mi === 1 ? `${base}m` : base
   }
 
   private buildVoice(
     measure: Measure,
-    staff: 'upper' | 'lower',
+    staffIndex: number,
+    voiceIndex: number,
     activeIds: Set<number>,
   ): { voice: Voice | null; ties: StaveTie[] } {
     const score = this.score
     if (score === null) return { voice: null, ties: [] }
-    const events = score.events.filter((e) => e.measureIndex === measure.index && e.staff === staff)
+    const events = score.events.filter(
+      (e) =>
+        e.measureIndex === measure.index &&
+        e.staffIndex === staffIndex &&
+        e.voiceIndex === voiceIndex,
+    )
     if (events.length === 0) return { voice: null, ties: [] }
 
+    const clef = score.staffs[staffIndex].clef
     const notes: StaveNote[] = []
     const tickables: StaveNote[] = []
     const ties: StaveTie[] = []
@@ -350,7 +396,7 @@ export class ScoreView implements View {
       if (ev.rest) {
         const total = ev.pieces.reduce((s, p) => s + p.durationBeats, 0)
         for (const part of mergeRestPieces(total)) {
-          const rest = new StaveNote({ keys: ['b/4'], duration: restDuration(part) })
+          const rest = new StaveNote({ keys: ['b/4'], duration: restDuration(part), clef })
           tickables.push(rest)
         }
         continue
@@ -361,6 +407,7 @@ export class ScoreView implements View {
         const note = new StaveNote({
           keys: ev.keys.map((k) => `${k.letter.toLowerCase()}/${k.octave}`),
           duration: pieceToDuration(piece.durationBeats),
+          clef,
           autoStem: true,
         })
         if (activeIds.has(ev.id)) {

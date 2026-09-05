@@ -521,12 +521,12 @@ alphaSynth 只做播放输出）。
 `@magenta/music@1.23.1`（§1.1，npm 自 2021-11 停发）的 `core/sequences` 模块提供与
 "MIDI→谱"量化环节直接相关的纯函数（官方 TypeDoc，获取日期 2026-09-05）：
 
-| 函数                         | 作用（原文摘要）                                                                                                                          |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| 函数                         | 作用（原文摘要）                                                                                                                        |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `quantizeNoteSequence`       | "Quantize a NoteSequence proto relative to tempo ... snapped to a nearby quantized step"，要求单一 tempo、单一拍号，抛多 tempo/拍号异常 |
-| `quantizeToStep`             | "Quantizes seconds to the nearest step, given steps_per_second"                                                                          |
-| `mergeConsecutiveNotes`      | "Any consecutive notes of the same pitch are merged into a sustained note ... grouped by instrument"                                     |
-| `applySustainControlChanges` | "Create a new NoteSequence with sustain pedal control changes applied ... Extends each note within a sustain"                            |
+| `quantizeToStep`             | "Quantizes seconds to the nearest step, given steps_per_second"                                                                         |
+| `mergeConsecutiveNotes`      | "Any consecutive notes of the same pitch are merged into a sustained note ... grouped by instrument"                                    |
+| `applySustainControlChanges` | "Create a new NoteSequence with sustain pedal control changes applied ... Extends each note within a sustain"                           |
 
 这些是**量化/延音处理工具函数**，输出仍是 Magenta 的 `NoteSequence`（量化步进），
 **不产出五线谱/MusicXML**；但作为自研量化算法的参考实现有价值（尤其是

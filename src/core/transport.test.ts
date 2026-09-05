@@ -63,6 +63,7 @@ function makeSong(notes: Array<{ pitch: number; start: number; end: number }>): 
     keySignatures: [],
     tracks: [],
     notes: notes.map((n, i) => ({ ...n, velocity: 100, trackIndex: i })),
+    sustainEvents: [],
   }
 }
 

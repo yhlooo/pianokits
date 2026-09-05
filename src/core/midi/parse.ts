@@ -1,6 +1,12 @@
 import { Midi } from '@tonejs/midi'
 
-import type { KeySignatureEvent, Song, TempoEvent, TimeSignatureEvent } from '../model'
+import type {
+  KeySignatureEvent,
+  Song,
+  SustainEvent,
+  TempoEvent,
+  TimeSignatureEvent,
+} from '../model'
 
 /** GM 打击乐通道（channel 9 = 第 10 通道） */
 const PERCUSSION_CHANNEL = 9
@@ -62,9 +68,15 @@ export function parseMidi(bytes: ArrayBuffer): Song {
   }))
 
   const notes: Song['notes'] = []
+  const sustainEvents: SustainEvent[] = []
   for (let i = 0; i < midi.tracks.length; i++) {
     const t = midi.tracks[i]
     if (t.instrument.percussion || t.channel === PERCUSSION_CHANNEL) continue
+    // 延音踏板（CC64）：记谱用它延长长音，避免长音被量化切成休止符碎片
+    const cc64 = t.controlChanges[64]
+    if (cc64 !== undefined) {
+      for (const c of cc64) sustainEvents.push({ time: c.time, value: c.value })
+    }
     for (const n of t.notes) {
       // velocity 0 的 note-on 等价 note-off，@tonejs/midi 一般已处理，这里兜底过滤
       if (n.velocity <= 0) continue
@@ -78,6 +90,7 @@ export function parseMidi(bytes: ArrayBuffer): Song {
     }
   }
   notes.sort((a, b) => a.start - b.start || a.pitch - b.pitch)
+  sustainEvents.sort((a, b) => a.time - b.time)
 
   const duration = notes.reduce((m, n) => Math.max(m, n.end), 0)
 
@@ -89,5 +102,6 @@ export function parseMidi(bytes: ArrayBuffer): Song {
     keySignatures,
     tracks,
     notes,
+    sustainEvents,
   }
 }

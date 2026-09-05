@@ -50,6 +50,14 @@ export interface Note {
   trackIndex: number
 }
 
+/** CC64 延音踏板事件（value > 0 为踩下，0 为抬起） */
+export interface SustainEvent {
+  /** 秒 */
+  time: number
+  /** 0~127 */
+  value: number
+}
+
 export interface Song {
   /** 每四分音符 tick 数 */
   ppq: number
@@ -61,4 +69,6 @@ export interface Song {
   tracks: Track[]
   /** 播放用事件流：默认合并所有非打击乐轨，按 start 排序 */
   notes: Note[]
+  /** 延音踏板事件（CC64，合并所有非打击乐轨、按 time 排序），供记谱延长长音 */
+  sustainEvents: SustainEvent[]
 }

@@ -41,13 +41,13 @@ Visualizer 配置接口（同上文件）：
 
 ```ts
 export interface VisualizerConfig {
-  noteHeight?: number;
-  noteSpacing?: number;
-  pixelsPerTimeStep?: number;
-  noteRGB?: string;
-  activeNoteRGB?: string;
-  minPitch?: number;
-  maxPitch?: number;
+  noteHeight?: number
+  noteSpacing?: number
+  pixelsPerTimeStep?: number
+  noteRGB?: string
+  activeNoteRGB?: string
+  minPitch?: number
+  maxPitch?: number
 }
 ```
 
@@ -72,19 +72,23 @@ of the screen.
 
 ```ts
 const player = new mm.SoundFontPlayer(
-    'https://storage.googleapis.com/magentadata/js/soundfonts/sgm_plus',
-    mm.Player.tone.Master, null, null, {
-      run: (note: mm.NoteSequence.Note) => {
-        for (let i = 0; i < visualizers.length; i++) {
-          visualizers[i].redraw(note, true);
-        }
-      },
-      stop: () => {
-        for (let i = 0; i < visualizers.length; i++) {
-          visualizers[i].clearActiveNotes();
-        }
+  'https://storage.googleapis.com/magentadata/js/soundfonts/sgm_plus',
+  mm.Player.tone.Master,
+  null,
+  null,
+  {
+    run: (note: mm.NoteSequence.Note) => {
+      for (let i = 0; i < visualizers.length; i++) {
+        visualizers[i].redraw(note, true)
       }
-    });
+    },
+    stop: () => {
+      for (let i = 0; i < visualizers.length; i++) {
+        visualizers[i].clearActiveNotes()
+      }
+    },
+  },
+)
 ```
 
 即：Visualizer 输入是 Magenta 自己的 `NoteSequence` 数据结构；播放中的"当前音符高亮 +
@@ -118,13 +122,14 @@ noteData={[
 播放控制通过 ref 暴露（README "Playback API" 一节）：
 
 ```jsx
-playbackRef.current.toggle(); // ⏯️
-playbackRef.current.seek("0:0:0"); // ⏹️
+playbackRef.current.toggle() // ⏯️
+playbackRef.current.seek('0:0:0') // ⏹️
 ```
 
 其上游 `pixi-piano-roll`（mjhasbach）的文档说明（随 README 一并复制）：
 
 > ## pixiPianoRoll
+>
 > JavaScript 2D WebGL / Canvas animated piano roll
 >
 > **Author:** Matthew Hasbach
@@ -152,15 +157,15 @@ npm 上无独立包。AGPL-3.0 且无独立分发，是引用其 PianoRoll 代�
 以下为 npm 搜索 "piano-roll" 命中的相关包，周下载量均不超过两位数，全部属于
 个人项目 / 新项目：
 
-| 包名 | 最新版 | npm 最后发布 | 周下载量 | 许可证 | GitHub stars | 最后 push |
-| --- | --- | --- | --- | --- | --- | --- |
-| `wave-roll`（crescent-stdio/wave-roll） | 0.4.0 | 2025-12-06 | 66 | MIT | 27 | 2026-08-07 |
-| `@minagishl/react-piano-roll` | 0.1.0 | 2025-12-22 | 15 | MIT | 6 | 2026-04-14 |
-| `vue-piano-roll`（howardah/vue-piano-roll） | 1.3.1 | 2025-12-12 | 17 | MIT | 5 | 2025-12-12 |
-| `piano-visualizer`（d-buckner/piano-visualizer） | 1.2.1 | 2026-06-12 | 5 | MIT | 1 | 2026-06-12 |
-| `midi-visualizer`（stagas/midi-visualizer） | 1.0.1 | 2022-08-01 | 11 | — | — | — |
-| `wavesurfer-piano-roll-plugin` | 0.2.0 | 2026-02-19 | 0 | — | — | — |
-| `piano-roll` | 0.1.1 | 2017-08-18 | — | GPL-2.0 | — | — |
+| 包名                                             | 最新版 | npm 最后发布 | 周下载量 | 许可证  | GitHub stars | 最后 push  |
+| ------------------------------------------------ | ------ | ------------ | -------- | ------- | ------------ | ---------- |
+| `wave-roll`（crescent-stdio/wave-roll）          | 0.4.0  | 2025-12-06   | 66       | MIT     | 27           | 2026-08-07 |
+| `@minagishl/react-piano-roll`                    | 0.1.0  | 2025-12-22   | 15       | MIT     | 6            | 2026-04-14 |
+| `vue-piano-roll`（howardah/vue-piano-roll）      | 1.3.1  | 2025-12-12   | 17       | MIT     | 5            | 2025-12-12 |
+| `piano-visualizer`（d-buckner/piano-visualizer） | 1.2.1  | 2026-06-12   | 5        | MIT     | 1            | 2026-06-12 |
+| `midi-visualizer`（stagas/midi-visualizer）      | 1.0.1  | 2022-08-01   | 11       | —       | —            | —          |
+| `wavesurfer-piano-roll-plugin`                   | 0.2.0  | 2026-02-19   | 0        | —       | —            | —          |
+| `piano-roll`                                     | 0.1.1  | 2017-08-18   | —        | GPL-2.0 | —            | —          |
 
 其中 `wave-roll` 的 README 摘录（获取日期 2026-09-05）：
 
@@ -207,10 +212,10 @@ README 与文档中均无 MIDI → ABC 的转换功能。
 
 参数表（同页）：
 
-| 参数 | 说明（原文） |
-| --- | --- |
-| `beatCallback` | "Called for each beat passing the beat number (starting at 0)." |
-| `eventCallback` | "Called for each event (either a note, a rest, or a chord, and notes in separate voices are grouped together.)" |
+| 参数              | 说明（原文）                                                                                                                 |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `beatCallback`    | "Called for each beat passing the beat number (starting at 0)."                                                              |
+| `eventCallback`   | "Called for each event (either a note, a rest, or a chord, and notes in separate voices are grouped together.)"              |
 | `lineEndCallback` | "Called at the end of each line. (This is useful if you want to be sure the music is scrolled into view at the right time.)" |
 
 `beatCallback` 传入参数中包括光标坐标信息（同页节选）：
@@ -278,8 +283,8 @@ README 中关于播放能力的说明（图片配图文字）：
 
 Key Features 节选：
 
-> - *Soon: Audio Playback (work in progress, early access build available for
->   [Github sponsors](https://github.com/sponsors/opensheetmusicdisplay))*
+> - _Soon: Audio Playback (work in progress, early access build available for
+>   [Github sponsors](https://github.com/sponsors/opensheetmusicdisplay))_
 > - Uses [Vexflow](https://www.vexflow.com/) for rendering and (partly) layout
 > - Parses most MusicXML tags and integrates it into an accessible and modifiable
 >   data model (e.g. to change a note's color)
@@ -290,9 +295,10 @@ Key Features 节选：
 Limitations 节选：
 
 > Not all MusicXML tags and attributes are (fully) supported:
-> * Advanced Pedal marks (down/up brackets and lift wedge currently in early access
+>
+> - Advanced Pedal marks (down/up brackets and lift wedge currently in early access
 >   for sponsors, "Ped." and "*" signs supported)
-> * Some attributes like special drums noteheads/glyphs
+> - Some attributes like special drums noteheads/glyphs
 >
 > Also, **OSMD is a renderer, not a full interactive sheet music editor.**
 > Rendering takes some time for long scores, and you can't easily/quickly move
@@ -305,10 +311,10 @@ Limitations 节选：
 
 配套播放器的 npm 状态（2026-09-05）：
 
-| 包 | 最新版 | 最后发布 | 许可证 | 周下载量 |
-| --- | --- | --- | --- | --- |
-| `osmd-audio-player`（官方 org） | 0.7.0 | 2021-12-30 | MIT | 325 |
-| `osmd-extended`（社区，带 AudioPlayer） | 1.9.2 | 2025-08-07 | **UNLICENSED** | — |
+| 包                                      | 最新版 | 最后发布   | 许可证         | 周下载量 |
+| --------------------------------------- | ------ | ---------- | -------------- | -------- |
+| `osmd-audio-player`（官方 org）         | 0.7.0  | 2021-12-30 | MIT            | 325      |
+| `osmd-extended`（社区，带 AudioPlayer） | 1.9.2  | 2025-08-07 | **UNLICENSED** | —        |
 
 ### 2.4 music21j（cuthbertLab/music21j）
 
@@ -325,6 +331,7 @@ README 摘录（获取日期 2026-09-05）：
 > **Music21j** is a Javascript reinterpretation of the [Music21 Python] package,
 > a toolkit for computer-aided musicology, now with intuitive HTML/Javascript
 > interfaces. Some things music21j can do include:
+>
 > - Visualize and hear changes in Streams quickly (using [Vexflow] and [MIDI.js])
 > - Connect scores to MIDI devices (via Web Midi or [JazzSoft] plugin)
 > - Analyze and perform music theory at a lower level than Python music21
@@ -351,16 +358,16 @@ README 摘录（获取日期 2026-09-05）：
 >
 > ## Features
 >
-> * Parse `mscz` file data
-> * Get score metadata
-> * Export part score
-> * Generate music sheets in SVG/PNG/PDF format
-> * Generate MIDI
-> * Generate audio files in WAV, OGG, MP3, or FLAC format
-> * Synthesize raw audio frames, can be used in the Web Audio API
-> * Export as MusicXML compressed/uncompressed
-> * Generate position information of measures or segments on the generated sheets
-> * Run inside a Web Worker thread
+> - Parse `mscz` file data
+> - Get score metadata
+> - Export part score
+> - Generate music sheets in SVG/PNG/PDF format
+> - Generate MIDI
+> - Generate audio files in WAV, OGG, MP3, or FLAC format
+> - Synthesize raw audio frames, can be used in the Web Audio API
+> - Export as MusicXML compressed/uncompressed
+> - Generate position information of measures or segments on the generated sheets
+> - Run inside a Web Worker thread
 
 MIDI 导入支持：README 的输入只描述 "Parse `mscz` file data"；检索其
 `webmscore.cdn.mjs`（获取日期 2026-09-05），`load()` 中出现的文件扩展名字符串只有
@@ -410,13 +417,13 @@ npm 包 `vexflow@5.0.0` 的文件清单（unpkg meta 接口实测）显示：主
 
 `@vexflow-fonts/bravura@1.0.2` 包内容（unpkg meta 接口实测）：
 
-| 文件 | 大小 | 说明 |
-| --- | --- | --- |
+| 文件            | 大小         | 说明                     |
+| --------------- | ------------ | ------------------------ |
 | `bravura.woff2` | 247,200 字节 | Web 字体（浏览器加载用） |
-| `bravura.otf` | 512,924 字节 | 桌面/排版用途 |
-| `metadata.json` | 733,542 字节 | SMuFL 字形度量 |
-| `index.css` | 177 字节 | @font-face 声明 |
-| `LICENSE.txt` | 4,420 字节 | 许可文本 |
+| `bravura.otf`   | 512,924 字节 | 桌面/排版用途            |
+| `metadata.json` | 733,542 字节 | SMuFL 字形度量           |
+| `index.css`     | 177 字节     | @font-face 声明          |
+| `LICENSE.txt`   | 4,420 字节   | 许可文本                 |
 
 `@vexflow-fonts/bravura` LICENSE.txt 关键内容摘录：
 
@@ -429,7 +436,7 @@ OFL 1.1 许可文本中与本项目相关的条款摘录：
 
 > The OFL allows the licensed fonts to be used, studied, modified and redistributed freely as long as they are not sold by themselves. The fonts, including any derivative works, can be bundled, embedded, redistributed and/or sold with any software provided that any reserved names are not used by derivative works.
 >
-> 2) Original or Modified Versions of the Font Software may be bundled, redistributed and/or sold with any software, provided that each copy contains the above copyright notice and this license. ...
+> 2. Original or Modified Versions of the Font Software may be bundled, redistributed and/or sold with any software, provided that each copy contains the above copyright notice and this license. ...
 
 （结论性判断见 research 文档 `20260905-packaging-and-licensing.md`，此处仅收录原文。）
 
@@ -464,33 +471,33 @@ alphaSynth 只做播放输出）。
 
 ### 2.8 其他候选（简要数据）
 
-| 包/产品 | 说明（官方描述或页面） | 许可证 | 备注 |
-| --- | --- | --- | --- |
+| 包/产品                                           | 说明（官方描述或页面）                                                                                                    | 许可证       | 备注                                                     |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------ | -------------------------------------------------------- |
 | `@sudobility/music_codecs`（johnqh/music_codecs） | "Score encoders and decoders for ScoreSmith - MIDI, MusicXML and tracker modules. Shared by ..."，0.2.19，2026-09-03 发布 | **BUSL-1.1** | Business Source License，非开放许可证，商用/生产使用受限 |
-| `musicxml-io`（tan-z-tan/musicxml-io） | "Parse and serialize MusicXML (.xml/.mxl) and ABC notation with high round-trip fidelity"，0.10.1，2026-09-02 发布 | MIT | 只做 MusicXML/ABC 序列化，无 MIDI 输入 |
-| `osmd-extended` | OSMD + AudioPlayer 的社区增强包 | UNLICENSED | npm 许可证字段为 UNLICENSED，引用有风险 |
-| Soundslice | 在线乐谱平台，提供 embed miniplayer 与 Data API（soundslice.com） | 商业服务 | 依赖其平台与付费计划，非本地渲染库 |
-| SmartScore（Musitek） | 商业乐谱识别/编辑软件 | 商业软件 | 桌面产品，与浏览器内渲染场景关系弱 |
+| `musicxml-io`（tan-z-tan/musicxml-io）            | "Parse and serialize MusicXML (.xml/.mxl) and ABC notation with high round-trip fidelity"，0.10.1，2026-09-02 发布        | MIT          | 只做 MusicXML/ABC 序列化，无 MIDI 输入                   |
+| `osmd-extended`                                   | OSMD + AudioPlayer 的社区增强包                                                                                           | UNLICENSED   | npm 许可证字段为 UNLICENSED，引用有风险                  |
+| Soundslice                                        | 在线乐谱平台，提供 embed miniplayer 与 Data API（soundslice.com）                                                         | 商业服务     | 依赖其平台与付费计划，非本地渲染库                       |
+| SmartScore（Musitek）                             | 商业乐谱识别/编辑软件                                                                                                     | 商业软件     | 桌面产品，与浏览器内渲染场景关系弱                       |
 
 ## 3. 数据汇总表（2026-09-05 实测）
 
-| 包 / 仓库 | npm 最新版 | npm 最后发布 | 周下载量 | 许可证 | unpacked | GitHub stars | 最后 push |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `@magenta/music` | 1.23.1 | 2021-11-01 | 3,068 | Apache-2.0 | 11.43 MB | 2,125 | 2026-06-22 |
-| `react-piano-roll` | 0.1.3 | 2019-07-02 | 30 | MIT | 0.04 MB | 27 | 2024-06-27 |
-| `pixi-piano-roll` | 1.2.3 | 2015-12-17 | 11 | MIT | — | 23 | 2015-12-17 |
-| gridsound/daw | （无 npm） | — | — | AGPL-3.0 | — | 1,860 | 2026-07-28 |
-| `wave-roll` | 0.4.0 | 2025-12-06 | 66 | MIT | — | 27 | 2026-08-07 |
-| `abcjs` | 6.7.0 | 2026-08-07 | 55,059 | MIT | 5.68 MB | 2,334 | 2026-08-09 |
-| `opensheetmusicdisplay` | 2.1.2 | 2026-08-06 | 25,329 | BSD-3-Clause | 1.92 MB | 1,953 | 2026-09-03 |
-| `vexflow` | 5.0.0 | 2025-03-05 | 43,760 | MIT | 20.29 MB | 234（新 org）/ 4,366（0xfe 旧仓） | 2026-08-06 |
-| `music21j` | 0.23.7 | 2026-08-25 | 441 | BSD-3-Clause | 10.66 MB | 159 | 2026-09-02 |
-| `webmscore` | 1.2.1 | 2023-01-24 | 769 | GPL | 23.46 MB | 181 | 2023-01-24 |
-| `@coderline/alphatab` | 1.8.4 | 2026-07-05 | 10,790 | MPL-2.0 | 13.04 MB | 1,822 | 2026-09-03 |
-| `@sudobility/music_codecs` | 0.2.19 | 2026-09-03 | — | BUSL-1.1 | 0.49 MB | — | — |
-| `musicxml-io` | 0.10.1 | 2026-09-02 | — | MIT | 1.60 MB | — | — |
-| `osmd-audio-player` | 0.7.0 | 2021-12-30 | 325 | MIT | 0.18 MB | — | — |
-| `osmd-extended` | 1.9.2 | 2025-08-07 | — | UNLICENSED | 1.88 MB | — | — |
+| 包 / 仓库                  | npm 最新版 | npm 最后发布 | 周下载量 | 许可证       | unpacked | GitHub stars                      | 最后 push  |
+| -------------------------- | ---------- | ------------ | -------- | ------------ | -------- | --------------------------------- | ---------- |
+| `@magenta/music`           | 1.23.1     | 2021-11-01   | 3,068    | Apache-2.0   | 11.43 MB | 2,125                             | 2026-06-22 |
+| `react-piano-roll`         | 0.1.3      | 2019-07-02   | 30       | MIT          | 0.04 MB  | 27                                | 2024-06-27 |
+| `pixi-piano-roll`          | 1.2.3      | 2015-12-17   | 11       | MIT          | —        | 23                                | 2015-12-17 |
+| gridsound/daw              | （无 npm） | —            | —        | AGPL-3.0     | —        | 1,860                             | 2026-07-28 |
+| `wave-roll`                | 0.4.0      | 2025-12-06   | 66       | MIT          | —        | 27                                | 2026-08-07 |
+| `abcjs`                    | 6.7.0      | 2026-08-07   | 55,059   | MIT          | 5.68 MB  | 2,334                             | 2026-08-09 |
+| `opensheetmusicdisplay`    | 2.1.2      | 2026-08-06   | 25,329   | BSD-3-Clause | 1.92 MB  | 1,953                             | 2026-09-03 |
+| `vexflow`                  | 5.0.0      | 2025-03-05   | 43,760   | MIT          | 20.29 MB | 234（新 org）/ 4,366（0xfe 旧仓） | 2026-08-06 |
+| `music21j`                 | 0.23.7     | 2026-08-25   | 441      | BSD-3-Clause | 10.66 MB | 159                               | 2026-09-02 |
+| `webmscore`                | 1.2.1      | 2023-01-24   | 769      | GPL          | 23.46 MB | 181                               | 2023-01-24 |
+| `@coderline/alphatab`      | 1.8.4      | 2026-07-05   | 10,790   | MPL-2.0      | 13.04 MB | 1,822                             | 2026-09-03 |
+| `@sudobility/music_codecs` | 0.2.19     | 2026-09-03   | —        | BUSL-1.1     | 0.49 MB  | —                                 | —          |
+| `musicxml-io`              | 0.10.1     | 2026-09-02   | —        | MIT          | 1.60 MB  | —                                 | —          |
+| `osmd-audio-player`        | 0.7.0      | 2021-12-30   | 325      | MIT          | 0.18 MB  | —                                 | —          |
+| `osmd-extended`            | 1.9.2      | 2025-08-07   | —        | UNLICENSED   | 1.88 MB  | —                                 | —          |
 
 > 说明：`@magenta/music` 的 registry `time.modified` 为 2022-06-12（早于 2026 年），
 > 但按版本 `time` 字段其最后一个版本 1.23.1 发布于 2021-11-01，上表采用版本发布时间。

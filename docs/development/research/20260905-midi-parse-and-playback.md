@@ -8,13 +8,13 @@
 
 **推荐技术组合：**
 
-| 环节 | 推荐 | 理由（详见下文） |
-| --- | --- | --- |
-| MIDI 解析 | `@tonejs/midi`（2.0.28，MIT） | 功能最贴合需求：音符/轨道/tempo 变化/拍号/调号/PPQ 全解析，且直接给出每个音符的**秒级**时间；零依赖 Tone.js 本体（只依赖 `midi-file`）；类型完整 |
-| 播放（首选） | `smplr`（1.0.0，MIT）的 `SplendidGrandPiano` | 音质最好（Steinway、4 层力度、303 个采样、逐音采样不靠移调）；自带 lookahead 调度器与播放事件；`baseUrl` 支持自托管镜像 |
-| 播放（备选） | Tone.js `Sampler` + Salamander Grand Piano 采样自托管 | 生态最稳（Tonejs 官方组织、周下载 22.7 万）；采样许可 CC BY 3.0 明确可自托管；代价是单力度层、音色偏“干” |
-| 播放（兜底） | Tone.js `PolySynth`（合成音色） | 零下载、可立即开发调试；音质差，仅作开发兜底 |
-| 视觉同步 | 基于 `AudioContext.currentTime` 的统一时钟 + lookahead 调度队列 + `requestAnimationFrame` 渲染 | 所有路线共用；音频回调（onStart 等）均不保证精确到帧，视觉必须以解析出的确定性时间驱动 |
+| 环节         | 推荐                                                                                           | 理由（详见下文）                                                                                                                                 |
+| ------------ | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| MIDI 解析    | `@tonejs/midi`（2.0.28，MIT）                                                                  | 功能最贴合需求：音符/轨道/tempo 变化/拍号/调号/PPQ 全解析，且直接给出每个音符的**秒级**时间；零依赖 Tone.js 本体（只依赖 `midi-file`）；类型完整 |
+| 播放（首选） | `smplr`（1.0.0，MIT）的 `SplendidGrandPiano`                                                   | 音质最好（Steinway、4 层力度、303 个采样、逐音采样不靠移调）；自带 lookahead 调度器与播放事件；`baseUrl` 支持自托管镜像                          |
+| 播放（备选） | Tone.js `Sampler` + Salamander Grand Piano 采样自托管                                          | 生态最稳（Tonejs 官方组织、周下载 22.7 万）；采样许可 CC BY 3.0 明确可自托管；代价是单力度层、音色偏“干”                                         |
+| 播放（兜底） | Tone.js `PolySynth`（合成音色）                                                                | 零下载、可立即开发调试；音质差，仅作开发兜底                                                                                                     |
+| 视觉同步     | 基于 `AudioContext.currentTime` 的统一时钟 + lookahead 调度队列 + `requestAnimationFrame` 渲染 | 所有路线共用；音频回调（onStart 等）均不保证精确到帧，视觉必须以解析出的确定性时间驱动                                                           |
 
 **关键事实（详见 reference 文档）：**
 
@@ -46,12 +46,12 @@
 
 npm 数据（2026-09-05 查询，下载量区间 2026-08-23 ~ 2026-08-29，详见参考文档 §2）：
 
-| 库 | 最新版（发布时间） | 许可 | 周下载 | 定位 | 是否给秒级时间 | tempo/拍号/调号 | TS 类型 | 维护状态 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **@tonejs/midi** | 2.0.28（2022-02-04） | MIT | 64,094 | 高层：MIDI ↔ JSON/JS 对象 | ✅（note.time / duration 秒 + note.ticks 原始 tick） | ✅（header.tempos/timeSignatures/keySignatures + PPQ） | ✅ 自带 `dist/Midi.d.ts` | npm 2022 年停更；repo 最后 push 2023-07-19，1,001 stars，功能稳定 |
-| midi-file | 1.2.4（mod. 2023-03-15） | MIT | 70,660 | 底层：二进制 ↔ 事件数组 | ❌（只给 deltaTime/absoluteTime ticks，需自行换算） | 原样透传 meta 事件，需自行组装 | ✅ 自带 `index.d.ts` | repo 2026-08-12 仍有 push；157 stars；@tonejs/midi 的底层依赖 |
-| midi-json-parser | 8.1.75（mod. 2026-07-21） | MIT | 1,205 | 中层：二进制 → 事件 JSON | ❌（同样只有 ticks） | 事件齐全但需自行计算 | ✅ | 活跃（repo push 2026-09-01）；132 stars |
-| jsmidgen | 0.1.8（mod. 2025-11-16） | MIT | 705 | **生成器**（从零写 MIDI 文件） | ❌ 不解析文件 | ❌ | ❌ | 多年未实质演进；与“解析”需求不匹配 |
+| 库               | 最新版（发布时间）        | 许可 | 周下载 | 定位                           | 是否给秒级时间                                       | tempo/拍号/调号                                        | TS 类型                  | 维护状态                                                          |
+| ---------------- | ------------------------- | ---- | ------ | ------------------------------ | ---------------------------------------------------- | ------------------------------------------------------ | ------------------------ | ----------------------------------------------------------------- |
+| **@tonejs/midi** | 2.0.28（2022-02-04）      | MIT  | 64,094 | 高层：MIDI ↔ JSON/JS 对象      | ✅（note.time / duration 秒 + note.ticks 原始 tick） | ✅（header.tempos/timeSignatures/keySignatures + PPQ） | ✅ 自带 `dist/Midi.d.ts` | npm 2022 年停更；repo 最后 push 2023-07-19，1,001 stars，功能稳定 |
+| midi-file        | 1.2.4（mod. 2023-03-15）  | MIT  | 70,660 | 底层：二进制 ↔ 事件数组        | ❌（只给 deltaTime/absoluteTime ticks，需自行换算）  | 原样透传 meta 事件，需自行组装                         | ✅ 自带 `index.d.ts`     | repo 2026-08-12 仍有 push；157 stars；@tonejs/midi 的底层依赖     |
+| midi-json-parser | 8.1.75（mod. 2026-07-21） | MIT  | 1,205  | 中层：二进制 → 事件 JSON       | ❌（同样只有 ticks）                                 | 事件齐全但需自行计算                                   | ✅                       | 活跃（repo push 2026-09-01）；132 stars                           |
+| jsmidgen         | 0.1.8（mod. 2025-11-16）  | MIT  | 705    | **生成器**（从零写 MIDI 文件） | ❌ 不解析文件                                        | ❌                                                     | ❌                       | 多年未实质演进；与“解析”需求不匹配                                |
 
 **推荐：`@tonejs/midi`**。理由：
 
@@ -92,13 +92,13 @@ npm 数据（2026-09-05 查询，下载量区间 2026-08-23 ~ 2026-08-29，详�
 
 ### 5.1 方案总览
 
-| 方案 | 音质 | 首次加载 | 网络依赖 | 许可 | 调度/同步能力 | 综合评价 |
-| --- | --- | --- | --- | --- | --- | --- |
-| **smplr `SplendidGrandPiano`** | ★★★★★（Steinway、4 层力度、303 采样、逐音采样） | 全量约 18MB（估算，单文件实测 ~61KB/ogg × 303）；可流式起播（加载一个即可出声） | 默认 GitHub Pages（有每秒限流警告）；`baseUrl` 可改自托管 | 库 MIT；采样源为 AKAI 公有领域 | 自带 lookahead 调度（`time` 参数对齐 currentTime）、`ready/loadProgress`、`onStart/onEnded`、`Sequencer` 事件（beat/bar/noteOn/noteOff） | **首选**：音质与开箱体验最佳 |
-| Tone.js `Sampler` + Salamander（官方托管集） | ★★★（Yamaha C5、单力度层、小三度采样+移调） | mp3 1.92MB 或 ogg 6.62MB（30 音） | 默认 tonejs.github.io；可复制自托管 | 采样 CC BY 3.0（需署名） | 用 Tone.Transport/Sampler 自带 `triggerAttackRelease(time)`；事件需自建 | **备选**：体积小、生态稳、许可明确；音色偏“干” |
-| Salamander V3 多层（`@audio-samples/piano-mp3-velocityN`） | ★★★★（16 层力度，按层分包） | 单层 4.49MB；全 16 层 70MB+（估计，未逐包实测） | npm 安装 → 本地文件，天然自托管 | CC BY 3.0 | 同 Tone.Sampler（需把多层组织成 urls map） | 升级音质的中间选项，体积换取真实度 |
-| SpessaSynth（spessasynth_lib + SF2/SF3 音源） | 取决于音源（SoundFont 钢琴普遍逊于专用采样） | 库 2.4MB（unpacked）+ 自备音源文件 | 音源自备（本地文件） | 库 Apache-2.0；音源许可各自独立（如 GeneralUser GS） | **最强**：直接读 MIDI、`noteOn/noteOff/timeChange` 事件、`currentHighResolutionTime` 官方定位就是给可视化用 | 备选/进阶路线：换“完整 MIDI 播放器”思路时启用 |
-| Tone.js `PolySynth`（合成） | ★（无采样） | 0 | 无 | MIT | 同 Tone.js | 开发兜底 |
+| 方案                                                       | 音质                                            | 首次加载                                                                        | 网络依赖                                                  | 许可                                                 | 调度/同步能力                                                                                                                            | 综合评价                                       |
+| ---------------------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------- | --------------------------------------------------------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| **smplr `SplendidGrandPiano`**                             | ★★★★★（Steinway、4 层力度、303 采样、逐音采样） | 全量约 18MB（估算，单文件实测 ~61KB/ogg × 303）；可流式起播（加载一个即可出声） | 默认 GitHub Pages（有每秒限流警告）；`baseUrl` 可改自托管 | 库 MIT；采样源为 AKAI 公有领域                       | 自带 lookahead 调度（`time` 参数对齐 currentTime）、`ready/loadProgress`、`onStart/onEnded`、`Sequencer` 事件（beat/bar/noteOn/noteOff） | **首选**：音质与开箱体验最佳                   |
+| Tone.js `Sampler` + Salamander（官方托管集）               | ★★★（Yamaha C5、单力度层、小三度采样+移调）     | mp3 1.92MB 或 ogg 6.62MB（30 音）                                               | 默认 tonejs.github.io；可复制自托管                       | 采样 CC BY 3.0（需署名）                             | 用 Tone.Transport/Sampler 自带 `triggerAttackRelease(time)`；事件需自建                                                                  | **备选**：体积小、生态稳、许可明确；音色偏“干” |
+| Salamander V3 多层（`@audio-samples/piano-mp3-velocityN`） | ★★★★（16 层力度，按层分包）                     | 单层 4.49MB；全 16 层 70MB+（估计，未逐包实测）                                 | npm 安装 → 本地文件，天然自托管                           | CC BY 3.0                                            | 同 Tone.Sampler（需把多层组织成 urls map）                                                                                               | 升级音质的中间选项，体积换取真实度             |
+| SpessaSynth（spessasynth_lib + SF2/SF3 音源）              | 取决于音源（SoundFont 钢琴普遍逊于专用采样）    | 库 2.4MB（unpacked）+ 自备音源文件                                              | 音源自备（本地文件）                                      | 库 Apache-2.0；音源许可各自独立（如 GeneralUser GS） | **最强**：直接读 MIDI、`noteOn/noteOff/timeChange` 事件、`currentHighResolutionTime` 官方定位就是给可视化用                              | 备选/进阶路线：换“完整 MIDI 播放器”思路时启用  |
+| Tone.js `PolySynth`（合成）                                | ★（无采样）                                     | 0                                                                               | 无                                                        | MIT                                                  | 同 Tone.js                                                                                                                               | 开发兜底                                       |
 
 ### 5.2 smplr（重点调查结论）
 
@@ -147,20 +147,20 @@ Tone.js `PolySynth`（可包 `Synth`/`FMSynth` 等）：纯合成、无采样、
 
 **许可结论（能否放进 `public/` 自托管）：**
 
-| 采样 | 许可 | 能否自托管 |
-| --- | --- | --- |
-| Salamander Grand Piano（Tone.js 托管集 / V3 分层） | **CC BY 3.0**（作者 Alexander Holm，见参考文档 §3.3、§3.4） | ✅ 可以，**必须保留署名**（README/关于页注明来源） |
-| smplr `SplendidGrandPiano` 所用采样 | AKAI 公有领域（Public Domain，见 [sfzinstruments/SplendidGrandPiano](https://github.com/sfzinstruments/SplendidGrandPiano) README） | ✅ 可以，无署名义务（但建议注明来源） |
-| GeneralUser GS（SpessaSynth 路线） | 独立第三方许可（s.Christian Collins 站点分发） | ⚠️ 需另行核查其许可条款（本次未验证，见 §10） |
+| 采样                                               | 许可                                                                                                                                | 能否自托管                                         |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| Salamander Grand Piano（Tone.js 托管集 / V3 分层） | **CC BY 3.0**（作者 Alexander Holm，见参考文档 §3.3、§3.4）                                                                         | ✅ 可以，**必须保留署名**（README/关于页注明来源） |
+| smplr `SplendidGrandPiano` 所用采样                | AKAI 公有领域（Public Domain，见 [sfzinstruments/SplendidGrandPiano](https://github.com/sfzinstruments/SplendidGrandPiano) README） | ✅ 可以，无署名义务（但建议注明来源）              |
+| GeneralUser GS（SpessaSynth 路线）                 | 独立第三方许可（s.Christian Collins 站点分发）                                                                                      | ⚠️ 需另行核查其许可条款（本次未验证，见 §10）      |
 
 **CDN vs 自托管取舍：**
 
-| 维度 | 外部托管（tonejs.github.io / smpldsnds.github.io） | 自托管（复制到 `public/` 或 npm 依赖本地文件） |
-| --- | --- | --- |
-| 加载可靠性 | 依赖 GitHub Pages：无 SLA、有**每秒请求限流**（smplr README 明示）、被墙/断网即失效 | 与 App 同源同命运：离线可用（配合 Service Worker 可 PWA 化）、无第三方限流 |
-| 首次部署体积 | 0 | Salamander 集 ~8.5MB（mp3+ogg）；smplr 钢琴集 ~18MB；需进入 git 仓库 |
-| 加载速度 | 单文件 ~60KB，可流式起播；但 303 个请求受限流影响可能变慢 | 本地静态资源 + HTTP 缓存，最稳定可控；仍可只加载所需音域子集 |
-| 维护成本 | 无（但上游改动/下线不可控） | 需在仓库内存放采样并跟随上游更新（一次性成本） |
+| 维度         | 外部托管（tonejs.github.io / smpldsnds.github.io）                                  | 自托管（复制到 `public/` 或 npm 依赖本地文件）                             |
+| ------------ | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| 加载可靠性   | 依赖 GitHub Pages：无 SLA、有**每秒请求限流**（smplr README 明示）、被墙/断网即失效 | 与 App 同源同命运：离线可用（配合 Service Worker 可 PWA 化）、无第三方限流 |
+| 首次部署体积 | 0                                                                                   | Salamander 集 ~8.5MB（mp3+ogg）；smplr 钢琴集 ~18MB；需进入 git 仓库       |
+| 加载速度     | 单文件 ~60KB，可流式起播；但 303 个请求受限流影响可能变慢                           | 本地静态资源 + HTTP 缓存，最稳定可控；仍可只加载所需音域子集               |
+| 维护成本     | 无（但上游改动/下线不可控）                                                         | 需在仓库内存放采样并跟随上游更新（一次性成本）                             |
 
 **结论**：本项目场景（本地工具类应用，追求稳定）**倾向自托管**：把 Salamander 集（或 smplr 采样镜像）放入 `public/`，smplr 用 `baseUrl` 指向，Tone.Sampler 用 `baseUrl` 指向本地路径；保留 PolySynth 作为加载失败兜底。若初期想快速验证，可直接用默认在线采样（注意限流风险）。
 

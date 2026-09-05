@@ -134,6 +134,7 @@ showOpenFilePicker(options)
 `SecurityError` 的触发条件（原文节选）：
 
 > Thrown in one of the following cases:
+>
 > - The method was called in a context that's not same-origin as the top-level context (i.e., a cross-origin iframe).
 > - There was no transient user activation such as a button press. This includes when the handle is in a non-Window context which cannot consume user activation, such as a worker.
 >
@@ -160,11 +161,13 @@ Chrome 122 起的新三选一权限提示（原文）：
 > The new behavior can be observed as of Chrome 122. To test it earlier, starting from Chrome 120, toggle the two flags `chrome://flags/#file-system-access-persistent-permission` and `chrome://flags/#one-time-permission` to **Enabled**.
 >
 > This new three-way prompt has the following options:
+>
 > - **Allow this time:** Allows the app to have access to files for the current session. (This corresponds to the existing behavior.)
 > - **Allow on every visit:** Allows the app to have indefinite access unless access is revoked. Once the app has been granted persistent access, newly opened files and folders will be accessible persistently, too.
 > - **Don't allow:** Doesn't allow the app to have access to files. (This corresponds to the existing behavior.)
 >
 > 译：新行为自 Chrome 122 起可观察到（120 起可经两个 flag 提前开启）。新的三选一提示包含：
+>
 > - **本次允许**：应用可在当前会话内访问文件（对应旧行为）。
 > - **每次访问都允许**：应用获得无限期访问，除非授权被撤销。一旦应用获得永久访问授权，之后新打开的文件和文件夹也将自动获得永久访问。
 > - **不允许**：应用不能访问文件（对应旧行为）。
@@ -178,11 +181,13 @@ Chrome 122 起的新三选一权限提示（原文）：
 触发永久授权的三个前置条件（原文）：
 
 > There are no developer-facing changes to the File System Access API. To trigger the new behavior with persistent permissions, there are three ways with different preconditions that need to be met:
+>
 > 1. The user must have granted permission to a file or folder (or multiple files or folders) during the last visit to an origin and the app must have stored the corresponding `FileSystemHandle` objects in IndexedDB. Upon the next visit to the origin, the app must have retrieved any one of the stored `FileSystemHandle` objects from IndexedDB and then have called its `FileSystemHandle.requestPermission()` method. If these preconditions are met, the new three-way prompt will be shown.
 > 2. The origin must have called the `FileSystemHandle.requestPermission()` method on a `FileSystemHandle` to which access was granted before, but whose access has been automatically revoked due to the tab being backgrounded for a while. (The automatic permission revocation works based on the same logic as described in the article One-time permissions in Chrome.) If these preconditions are met, the new three-way prompt will be shown.
 > 3. The user must have installed the app. Installed apps will automatically persist permissions once the user grants access. In this case, the three-way prompt won't be shown, instead the app gets the new behavior by default.
 >
 > 译：对 File System Access API 而言没有面向开发者的变化。触发永久授权的新行为有三条路径，各有前置条件：
+>
 > 1. 用户在上次访问该源时曾授予某个（或多个）文件/文件夹权限，且应用已把对应 `FileSystemHandle` 对象存入 IndexedDB；下次访问该源时，应用从 IndexedDB 取出任意一个已存的 handle 并调用其 `requestPermission()` 方法——满足这些条件即显示新的三选一提示。
 > 2. 源对之前已获授权、但因标签页长时间处于后台而被自动撤销权限的 handle 调用 `requestPermission()`（自动撤销逻辑与《One-time permissions in Chrome》一文相同）。
 > 3. **用户已安装该应用（PWA）。已安装的应用在用户授予访问权限后会自动持久化权限，此时不会显示三选一提示，应用默认直接获得新行为。**
@@ -196,12 +201,14 @@ Chrome 122 起的新三选一权限提示（原文）：
 来源：<https://developer.chrome.com/blog/one-time-permissions>（获取日期 2026-09-05；页面标注 "Last updated 2023-08-01 UTC"；介绍 Chrome 116 起的一次性权限，File System Access API 的会话授权按其规则自动撤销）
 
 > one-time permission grants expire as soon as any of the following conditions are met:
+>
 > - The page has been closed, was navigated away from, or was discarded. This includes closing Chrome.
 > - 16 hours have passed since granting permission.
 > - The user manually revokes the permission (for example, in Site controls), or the permission is overridden through an enterprise policy.
 > - The page has been in the background for at least 5 minutes—except if the capability is allowed to run in the background, like camera or microphone.
 >
 > 译：一次性权限授予在满足以下任一条件时立即失效：
+>
 > - 页面已被关闭、导航离开或被丢弃（包括关闭 Chrome）。
 > - 自授予权限起已过 16 小时。
 > - 用户手动撤销权限（例如在站点控件中），或权限被企业策略覆盖。
@@ -238,14 +245,14 @@ Chrome 122 起的新三选一权限提示（原文）：
 
 MDN BCD 数据（`api.Window.showOpenFilePicker` / `showDirectoryPicker` / `showSaveFilePicker`，2026-08-31）：
 
-| 浏览器 | showOpenFilePicker / showDirectoryPicker / showSaveFilePicker | queryPermission / requestPermission |
-| --- | --- | --- |
-| Chrome（桌面） | 86+ | 86+ |
-| Edge（桌面） | 86+（mirror Chrome） | 86+（mirror Chrome） |
-| Opera（桌面） | mirror Chrome（caniuse：72 起部分支持，91 起完整支持） | mirror Chrome |
-| Chrome Android | 132+ | 109+ |
-| Firefox（桌面/Android） | **不支持（false）** | **不支持（false）** |
-| Safari（macOS/iOS） | **不支持（false）** | **不支持（false）** |
+| 浏览器                  | showOpenFilePicker / showDirectoryPicker / showSaveFilePicker | queryPermission / requestPermission |
+| ----------------------- | ------------------------------------------------------------- | ----------------------------------- |
+| Chrome（桌面）          | 86+                                                           | 86+                                 |
+| Edge（桌面）            | 86+（mirror Chrome）                                          | 86+（mirror Chrome）                |
+| Opera（桌面）           | mirror Chrome（caniuse：72 起部分支持，91 起完整支持）        | mirror Chrome                       |
+| Chrome Android          | 132+                                                          | 109+                                |
+| Firefox（桌面/Android） | **不支持（false）**                                           | **不支持（false）**                 |
+| Safari（macOS/iOS）     | **不支持（false）**                                           | **不支持（false）**                 |
 
 caniuse "File System Access API" 条目（2026-08-24）：
 
@@ -260,16 +267,16 @@ caniuse "File System Access API" 条目（2026-08-24）：
 
 MDN BCD 数据（`api/FileSystemFileHandle.json`、`api/FileSystemDirectoryHandle.json`、`api/FileSystemWritableFileStream.json`、`api/FileSystemSyncAccessHandle.json`、`api/StorageManager.json`）：
 
-| 接口 / 方法 | Chrome | Edge/Opera | Firefox | Safari |
-| --- | --- | --- | --- | --- |
-| `FileSystemFileHandle` / `FileSystemDirectoryHandle` | 86+ | mirror | 111+ | 15.2+ |
-| `FileSystemFileHandle.getFile()` | 86+ | mirror | 111+ | 15.2+ |
-| `FileSystemFileHandle.createWritable()` | 86+ | mirror | 111+ | **26+** |
-| `FileSystemWritableFileStream` | 86+ | mirror | 111+ | **26+** |
-| `FileSystemFileHandle.createSyncAccessHandle()` | 102+ | mirror | 111+ | 15.2+ |
-| `StorageManager.getDirectory()`（OPFS 入口） | 86+ | mirror | 111+ | 15.2+ |
-| `StorageManager.persist()` / `persisted` | 55+ | mirror | 57+ | 15.2+ |
-| `StorageManager.estimate()` | 61+ | mirror | 57+ | 17+ |
+| 接口 / 方法                                          | Chrome | Edge/Opera | Firefox | Safari  |
+| ---------------------------------------------------- | ------ | ---------- | ------- | ------- |
+| `FileSystemFileHandle` / `FileSystemDirectoryHandle` | 86+    | mirror     | 111+    | 15.2+   |
+| `FileSystemFileHandle.getFile()`                     | 86+    | mirror     | 111+    | 15.2+   |
+| `FileSystemFileHandle.createWritable()`              | 86+    | mirror     | 111+    | **26+** |
+| `FileSystemWritableFileStream`                       | 86+    | mirror     | 111+    | **26+** |
+| `FileSystemFileHandle.createSyncAccessHandle()`      | 102+   | mirror     | 111+    | 15.2+   |
+| `StorageManager.getDirectory()`（OPFS 入口）         | 86+    | mirror     | 111+    | 15.2+   |
+| `StorageManager.persist()` / `persisted`             | 55+    | mirror     | 57+     | 15.2+   |
+| `StorageManager.estimate()`                          | 61+    | mirror     | 57+     | 17+     |
 
 > 注：BCD 中 Firefox 111 / Safari 15.2 对上述 handle 类接口的支持指的是 File System API 的 **OPFS 部分**（配合 `getDirectory()` 使用），而非用户可见文件系统的选择器；Firefox 与 Safari 均无 `showOpenFilePicker` 等选择器（见 6.1）。Safari 26 起补充了 `createWritable()` / `FileSystemWritableFileStream`（写能力）。
 
@@ -319,6 +326,7 @@ MDN BCD 数据（`api/FileSystemFileHandle.json`、`api/FileSystemDirectoryHandl
 ### 9.1 两种存储模式（原文）
 
 > Data for an origin can be stored in two ways in a browser, _persistent_ and _best-effort_:
+>
 > - Best-effort: this is the way that data is stored by default. Best-effort data persists as long as the origin is below its quota, the device has enough storage space, and the user doesn't choose to delete the data via their browser's settings.
 > - Persistent: an origin can opt-in to store its data in a persistent way. Data stored this way is only evicted, or deleted, if the user chooses to, by using their browser's settings.
 >
@@ -347,6 +355,7 @@ Chrome / Chromium 系：
 Safari / WebKit：
 
 > Starting with macOS 14 and iOS 17:
+>
 > - For WebKit-based browser apps, each origin can store up to around 60% of total disk.
 > - For other WebKit-based apps that embed web content, each origin can store up to around 15% of total disk. ...
 >
@@ -393,6 +402,7 @@ Safari 的主动驱逐（原文）：
 > The **`estimate()`** method of the `StorageManager` interface asks the Storage Manager for how much storage the current origin takes up (`usage`), and how much space is available (`quota`).
 >
 > Return value: A `Promise` that resolves to an object with the following properties:
+>
 > - `quota`: A numeric value in bytes which provides a conservative approximation of the total storage the user's device or computer has available for the site origin or Web app.
 > - `usage`: A numeric value in bytes approximating the amount of storage space currently being used by the site or Web app...
 >
@@ -416,6 +426,7 @@ OPFS 与用户可见文件系统的区别（原文）：
 > - Browsers persist the contents of the OPFS to disk somewhere, but you cannot expect to find the created files matched one-to-one. The OPFS is not intended to be visible to the user.
 >
 > 译：
+>
 > - OPFS 与其它按源划分的存储机制（如 IndexedDB）一样受浏览器存储配额限制；可用 `navigator.storage.estimate()` 查看 OPFS 占用空间。
 > - 清除站点存储数据会删除 OPFS。
 > - 访问 OPFS 中的文件不需要权限提示与安全检查。
@@ -445,25 +456,25 @@ Firefox（原文节选）：
 
 ## 13. 来源链接汇总
 
-| # | 来源 | URL | 获取/更新时间 |
-| --- | --- | --- | --- |
-| 1 | MDN File System API | <https://developer.mozilla.org/en-US/docs/Web/API/File_System_API> | 2026-09-05 |
-| 2 | MDN Window.showOpenFilePicker() | <https://developer.mozilla.org/en-US/docs/Web/API/Window/showOpenFilePicker> | 2026-09-05 |
-| 3 | MDN FileSystemFileHandle | <https://developer.mozilla.org/en-US/docs/Web/API/FileSystemFileHandle> | 2026-09-05 |
-| 4 | MDN FileSystemHandle.queryPermission() | <https://developer.mozilla.org/en-US/docs/Web/API/FileSystemHandle/queryPermission> | 2026-09-05 |
-| 5 | MDN FileSystemHandle.requestPermission() | <https://developer.mozilla.org/en-US/docs/Web/API/FileSystemHandle/requestPermission> | 2026-09-05 |
-| 6 | Chrome for Developers: Persistent permissions for the File System Access API | <https://developer.chrome.com/blog/persistent-permissions-for-the-file-system-access-api> | 获取 2026-09-05；文章更新 2024-01-09 |
-| 7 | Chrome for Developers: One-time permissions | <https://developer.chrome.com/blog/one-time-permissions> | 获取 2026-09-05；文章更新 2023-08-01 |
-| 8 | WICG File System Access 规范 | <https://wicg.github.io/file-system-access/> | 2026-09-05 |
-| 9 | MDN BCD（compat 数据） | <https://github.com/mdn/browser-compat-data> | 2026-09-05（Window.json 更新 2026-08-31；FileSystemFileHandle.json 更新 2025-06-17） |
-| 10 | caniuse: File System Access API | <https://caniuse.com/native-filesystem-api> | 数据更新 2026-08-24 |
-| 11 | MDN Firefox 111 for developers | <https://developer.mozilla.org/en-US/docs/Mozilla/Firefox/Releases/111> | 2026-09-05 |
-| 12 | MDN Firefox 133 for developers | <https://developer.mozilla.org/en-US/docs/Mozilla/Firefox/Releases/133> | 2026-09-05 |
-| 13 | MDN IndexedDB API | <https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API> | 2026-09-05 |
-| 14 | MDN The structured clone algorithm | <https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm> | 2026-09-05 |
-| 15 | MDN Storage quotas and eviction criteria | <https://developer.mozilla.org/en-US/docs/Web/API/Storage_API/Storage_quotas_and_eviction_criteria> | 2026-09-05 |
-| 16 | MDN StorageManager.persist() | <https://developer.mozilla.org/en-US/docs/Web/API/StorageManager/persist> | 2026-09-05 |
-| 17 | MDN StorageManager.estimate() | <https://developer.mozilla.org/en-US/docs/Web/API/StorageManager/estimate> | 2026-09-05 |
-| 18 | MDN StorageManager.getDirectory() | <https://developer.mozilla.org/en-US/docs/Web/API/StorageManager/getDirectory> | 2026-09-05 |
-| 19 | MDN Origin private file system | <https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system> | 2026-09-05 |
-| 20 | web.dev: Persistent storage | <https://web.dev/articles/persistent-storage> | 2026-09-05 |
+| #   | 来源                                                                         | URL                                                                                                 | 获取/更新时间                                                                        |
+| --- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| 1   | MDN File System API                                                          | <https://developer.mozilla.org/en-US/docs/Web/API/File_System_API>                                  | 2026-09-05                                                                           |
+| 2   | MDN Window.showOpenFilePicker()                                              | <https://developer.mozilla.org/en-US/docs/Web/API/Window/showOpenFilePicker>                        | 2026-09-05                                                                           |
+| 3   | MDN FileSystemFileHandle                                                     | <https://developer.mozilla.org/en-US/docs/Web/API/FileSystemFileHandle>                             | 2026-09-05                                                                           |
+| 4   | MDN FileSystemHandle.queryPermission()                                       | <https://developer.mozilla.org/en-US/docs/Web/API/FileSystemHandle/queryPermission>                 | 2026-09-05                                                                           |
+| 5   | MDN FileSystemHandle.requestPermission()                                     | <https://developer.mozilla.org/en-US/docs/Web/API/FileSystemHandle/requestPermission>               | 2026-09-05                                                                           |
+| 6   | Chrome for Developers: Persistent permissions for the File System Access API | <https://developer.chrome.com/blog/persistent-permissions-for-the-file-system-access-api>           | 获取 2026-09-05；文章更新 2024-01-09                                                 |
+| 7   | Chrome for Developers: One-time permissions                                  | <https://developer.chrome.com/blog/one-time-permissions>                                            | 获取 2026-09-05；文章更新 2023-08-01                                                 |
+| 8   | WICG File System Access 规范                                                 | <https://wicg.github.io/file-system-access/>                                                        | 2026-09-05                                                                           |
+| 9   | MDN BCD（compat 数据）                                                       | <https://github.com/mdn/browser-compat-data>                                                        | 2026-09-05（Window.json 更新 2026-08-31；FileSystemFileHandle.json 更新 2025-06-17） |
+| 10  | caniuse: File System Access API                                              | <https://caniuse.com/native-filesystem-api>                                                         | 数据更新 2026-08-24                                                                  |
+| 11  | MDN Firefox 111 for developers                                               | <https://developer.mozilla.org/en-US/docs/Mozilla/Firefox/Releases/111>                             | 2026-09-05                                                                           |
+| 12  | MDN Firefox 133 for developers                                               | <https://developer.mozilla.org/en-US/docs/Mozilla/Firefox/Releases/133>                             | 2026-09-05                                                                           |
+| 13  | MDN IndexedDB API                                                            | <https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API>                                    | 2026-09-05                                                                           |
+| 14  | MDN The structured clone algorithm                                           | <https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API/Structured_clone_algorithm>       | 2026-09-05                                                                           |
+| 15  | MDN Storage quotas and eviction criteria                                     | <https://developer.mozilla.org/en-US/docs/Web/API/Storage_API/Storage_quotas_and_eviction_criteria> | 2026-09-05                                                                           |
+| 16  | MDN StorageManager.persist()                                                 | <https://developer.mozilla.org/en-US/docs/Web/API/StorageManager/persist>                           | 2026-09-05                                                                           |
+| 17  | MDN StorageManager.estimate()                                                | <https://developer.mozilla.org/en-US/docs/Web/API/StorageManager/estimate>                          | 2026-09-05                                                                           |
+| 18  | MDN StorageManager.getDirectory()                                            | <https://developer.mozilla.org/en-US/docs/Web/API/StorageManager/getDirectory>                      | 2026-09-05                                                                           |
+| 19  | MDN Origin private file system                                               | <https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system>       | 2026-09-05                                                                           |
+| 20  | web.dev: Persistent storage                                                  | <https://web.dev/articles/persistent-storage>                                                       | 2026-09-05                                                                           |

@@ -16,6 +16,7 @@
 
 > A standard MIDI file is composed of "chunks". It starts with a header chunk and is followed by one or more track chunks.
 > SMF = \<header_chunk> + \<track_chunk> [ + \<track_chunk> ... ]
+>
 > 1. The track ID string which is four characters long. For example, header chunk IDs are "MThd", and Track chunk IDs are "MTrk".
 > 2. next is a four-byte unsigned value that specifies the number of bytes in the data section of the track.
 > 3. finally comes the data section of the chunk.
@@ -35,6 +36,7 @@
 官方规范对 `<division>` 的说明：
 
 > The third word, \<division\>, specifies the meaning of the delta-times. It has two formats, one for metrical time, and one for time-code-based time:
+>
 > - ticks per quarter-note
 > - negative SMPTE format
 >
@@ -101,13 +103,13 @@
 >
 > ```javascript
 > // load a midi file in the browser
-> const midi = await Midi.fromUrl("path/to/midi.mid")
+> const midi = await Midi.fromUrl('path/to/midi.mid')
 > //the file name decoded from the first track
 > const name = midi.name
 > //get the tracks
-> midi.tracks.forEach(track => {
+> midi.tracks.forEach((track) => {
 >   const notes = track.notes
->   notes.forEach(note => {
+>   notes.forEach((note) => {
 >     //note.midi, note.time, note.duration, note.name
 >   })
 > })
@@ -115,7 +117,7 @@
 >
 > ```javascript
 > // If you are using Node.js or have the raw binary string from the midi file, just use the `parse` method:
-> const midiData = fs.readFileSync("test.mid")
+> const midiData = fs.readFileSync('test.mid')
 > const midi = new Midi(midiData)
 > ```
 
@@ -167,21 +169,21 @@ README 中给出的解析结果数据结构（关键字段）：
 
 > ```typescript
 > export interface TempoEvent {
->     ticks: number;
->     bpm: number;
->     time?: number;
+>   ticks: number
+>   bpm: number
+>   time?: number
 > }
 >
 > export interface TimeSignatureEvent {
->     ticks: number;
->     timeSignature: number[];
->     measures?: number;
+>   ticks: number
+>   timeSignature: number[]
+>   measures?: number
 > }
 >
 > export interface KeySignatureEvent {
->     ticks: number;
->     key: string;
->     scale: string;
+>   ticks: number
+>   key: string
+>   scale: string
 > }
 > ```
 
@@ -237,12 +239,12 @@ npm 注册表数据（registry.npmjs.org，2026-09-05 查询）：
 > The parser is loosely based on midi-file-parser and jasmid, but totally rewritten to use arrays instead of strings for portability.
 
 > ```typescript
-> import * as midiManager from 'midi-file';
-> const input = fs.readFileSync('star_wars.mid');
+> import * as midiManager from 'midi-file'
+> const input = fs.readFileSync('star_wars.mid')
 > // Convert buffer to midi object
-> const parsed = midiManager.parseMidi(input);
+> const parsed = midiManager.parseMidi(input)
 > // Convert object to midi buffer
-> const output = midiManager.writeMidi(parsed);
+> const output = midiManager.writeMidi(parsed)
 > ```
 
 > The intermediate representation has a 'header' and 'tracks', and each track is an array of events.
@@ -271,17 +273,17 @@ npm 注册表数据（2026-09-05 查询）：
 > This module parses a binary MIDI file and turns it into a JSON representation. This JSON representation can then for example be used to pass it on to the midi-player.
 
 > ```typescript
-> import { parseArrayBuffer } from 'midi-json-parser';
+> import { parseArrayBuffer } from 'midi-json-parser'
 > parseArrayBuffer(arrayBuffer).then((json) => {
->     // json is the JSON representation of the MIDI file.
-> });
+>   // json is the JSON representation of the MIDI file.
+> })
 > ```
 
 > ```typescript
 > interface IMidiFile {
->     division: number;
->     format: number;
->     tracks: TMidiEvent[][];
+>   division: number
+>   format: number
+>   tracks: TMidiEvent[][]
 > }
 > ```
 
@@ -331,9 +333,9 @@ npm 注册表数据（2026-09-05 查询）：
 核心调度循环（文章代码）：
 
 > ```javascript
-> while (nextNoteTime < audioContext.currentTime + scheduleAheadTime ) {
->   scheduleNote( current16thNote, nextNoteTime );
->   nextNote();
+> while (nextNoteTime < audioContext.currentTime + scheduleAheadTime) {
+>   scheduleNote(current16thNote, nextNoteTime)
+>   nextNote()
 > }
 > ```
 
@@ -350,9 +352,13 @@ npm 注册表数据（2026-09-05 查询）：
 > Tone.Transport's callbacks pass `time` into the callback because, without the Web Audio API, Javascript timing can be quite imprecise. ... The Web Audio API provides sample-accurate scheduling for methods like `start`, `stop` and `setValueAtTime`, so we have to use the precise `time` parameter passed into the callback to schedule methods within the callback.
 
 > ```javascript
-> Tone.Transport.scheduleRepeat(function(time){
->     note.triggerAttack(time);
-> }, "8n", "1m");
+> Tone.Transport.scheduleRepeat(
+>   function (time) {
+>     note.triggerAttack(time)
+>   },
+>   '8n',
+>   '1m',
+> )
 > ```
 
 wiki 的 References 一节直接链接到 Chris Wilson 的 Web Audio 调度文章。
@@ -384,20 +390,21 @@ npm 注册表数据（2026-09-05 查询，包名 `tone`）：
 - 来源：Tone.js README（dev 分支，2026-09-05 获取）
 
 > ## Tone.Sampler
+>
 > Multiple samples can also be combined into an instrument. If you have audio files organized by note, `Tone.Sampler` will pitch shift the samples to fill in gaps between notes. So for example, if you only have every 3rd note on a piano sampled, you could turn that into a full piano sample.
 > Unlike the other synths, Tone.Sampler is polyphonic so doesn't need to be passed into Tone.PolySynth
 >
 > ```javascript
 > const sampler = new Tone.Sampler({
->     urls: {
->         C4: "C4.mp3",
->         "D#4": "Ds4.mp3",
->         "F#4": "Fs4.mp3",
->         A4: "A4.mp3",
->     },
->     release: 1,
->     baseUrl: "https://tonejs.github.io/audio/salamander/",
-> }).toDestination();
+>   urls: {
+>     C4: 'C4.mp3',
+>     'D#4': 'Ds4.mp3',
+>     'F#4': 'Fs4.mp3',
+>     A4: 'A4.mp3',
+>   },
+>   release: 1,
+>   baseUrl: 'https://tonejs.github.io/audio/salamander/',
+> }).toDestination()
 > ```
 
 Tone.js 官方示例采样仓库 [Tonejs/audio](https://github.com/Tonejs/audio)（“Audio files used in Tone.js examples”）：
@@ -422,13 +429,20 @@ Tone.js 官方示例采样仓库 [Tonejs/audio](https://github.com/Tonejs/audio)
   （README 经 jsDelivr 获取，2026-09-05）
 
 > # @audio-samples/piano-mp3-velocity1
+>
 > Salamander Grand Piano V3 MP3 samples
+>
 > ## Samples source
+>
 > archive.org/details/SalamanderGrandPianoV3
+>
 > ## Samples license
+>
 > - CC BY 3.0 creativecommons.org/licenses/by/3.0/
 > - Author: Alexander Holm
+>
 > ## Total size
+>
 > 4.49MB
 
 （该系列另有 velocity3/5/7/9/11/13/15、release、pedals 等包，属于 Salamander Grand Piano V3 的 16 层力度分层，按层分包装载。）
@@ -441,6 +455,7 @@ Tone.js 官方示例采样仓库 [Tonejs/audio](https://github.com/Tonejs/audio)
 > `smplr` is a collection of sampled instruments for Web Audio API ready to be used with no setup required.
 
 > #### Library goals
+>
 > - No setup: specifically, all samples are online, so no need for a server.
 > - Easy to use: everything should be intuitive for non-experienced developers
 > - Decent sounding: uses high quality open source samples.
@@ -450,27 +465,30 @@ Tone.js 官方示例采样仓库 [Tonejs/audio](https://github.com/Tonejs/audio)
 SplendidGrandPiano 一节原文：
 
 > ### SplendidGrandPiano
+>
 > A sampled acoustic piano. It uses Steinway samples with 4 velocity groups from SplendidGrandPiano
 >
 > ```javascript
-> import { SplendidGrandPiano } from "smplr";
-> const piano = SplendidGrandPiano(new AudioContext());
-> piano.start({ note: "C4" });
+> import { SplendidGrandPiano } from 'smplr'
+> const piano = SplendidGrandPiano(new AudioContext())
+> piano.start({ note: 'C4' })
 > ```
 >
 > The second argument of the constructor accepts the following options:
+>
 > - `baseUrl`: where the piano samples are fetched from. Defaults to the public hosted set on `smpldsnds.github.io`; override only if you mirror the samples yourself.
 
 加载与播放 API 摘录：
 
 > You can start playing notes as soon as one sample is loaded. To wait for all of them, await either:
+>
 > - `piano.ready` — resolves to `void` (preferred for new code).
 >
 > Track how many samples have loaded via the `onLoadProgress` option or the `loadProgress` getter...
 > `total` is known before loading starts, so you can display a determinate progress bar.
 
 > ```javascript
-> piano.start({ note: "C4", velocity: 80, time: 5, duration: 1 });
+> piano.start({ note: 'C4', velocity: 80, time: 5, duration: 1 })
 > ```
 >
 > Schedule notes via the `time` and `duration` properties (both in seconds). `time` is measured against `audioContext.currentTime`.
@@ -492,7 +510,7 @@ Sequencer 一节摘录：
 >   loop: false,
 >   lookaheadMs: 200, // scheduling lookahead, default 200
 >   intervalMs: 50, // flush interval, default 50
-> });
+> })
 > ```
 
 > `noteOn` and `noteOff` events fire when the instrument's `onStart` / `onEnded` callbacks are called, so they are driven by the actual audio playback — not by the scheduling lookahead.
@@ -515,7 +533,7 @@ Sequencer 一节摘录：
 smplr 钢琴采样清单（源码 `src/splendid-grand-piano.ts`，main 分支，2026-09-05 获取，经统计）：
 
 > ```typescript
-> const BASE_URL = "https://smpldsnds.github.io/sfzinstruments-splendid-grand-piano/samples";
+> const BASE_URL = 'https://smpldsnds.github.io/sfzinstruments-splendid-grand-piano/samples'
 > ```
 >
 > `formats` 默认 `["ogg", "m4a"]`；力度分层 `LAYERS` 共 5 组：
@@ -538,6 +556,7 @@ npm 注册表数据（2026-09-05 查询）：
 采样来源仓库 [sfzinstruments/SplendidGrandPiano](https://github.com/sfzinstruments/SplendidGrandPiano) README（2026-09-05 获取）原文：
 
 > # Splendid Grand Piano
+>
 > Public Domain samples by AKAI
 > This samples set was released as public domain in early 2000 by Akai company.
 > It's a Steinway samples with 4 velocity layers.
@@ -557,15 +576,18 @@ npm 注册表数据（2026-09-05 查询）：
 > **SpessaSynth** is a SoundFont2-based real-time synthesizer written in TypeScript, previously pure JavaScript.
 
 > ### SpessaSynth Project index
+>
 > - spessasynth_core - SF2/DLS/MIDI library
 > - spessasynth_lib - spessasynth_core wrapper optimized for browsers and WebAudioAPI
 > - SpessaSynth (you are here) - online/local MIDI player/editor application
 
 > Features 中与可视化相关：
+>
 > - **Visualization of the played sequence:** with cool effects like visual pitch bend and note-on effects!
 > - Comes bundled with a compressed GeneralUser GS SoundFont to get you started
 
 > ## License
+>
 > Copyright © 2026 Spessasus
 > Licensed under the Apache-2.0 License.
 
@@ -574,9 +596,11 @@ spessasynth_core README 摘录（引擎形态关键表述）：
 > _A powerful multipurpose SF2/DLS/MIDI JavaScript library. It works with any modern JS environment that supports WebAssembly._
 >
 > ### Limitations
+>
 > - Audio engine is written in pure TypeScript, so it may not be as performant as native implementations
 >
 > #### TODO
+>
 > - Improve the performance of the engine
 > - Potentially port the system to Emscripten
 
@@ -584,18 +608,20 @@ spessasynth_core README 摘录（引擎形态关键表述）：
 README 同时注明 “No external dependencies: Only vorbis decoder for SF3 support!”。
 
 > ### Powerful and Fast MIDI Sequencer
+>
 > - **Supports MIDI formats 0, 1, and 2:** _note: format 2 support is experimental as it's very, very rare._
 > - **Smart preloading:** Only preloads the samples used in the MIDI file for smooth playback _(down to key and velocity!)_
 
 spessasynth_lib README 摘录：
 
 > It allows you to:
+>
 > - Play MIDI files using SF2/SF3/DLS files!
 > - Read and write MIDI files!
 >
 > - **AudioWorklet synthesizer:**
->     - Runs in a **separate thread** for maximum performance!
->     - Does not stop playing even when the main thread is frozen!
+>   - Runs in a **separate thread** for maximum performance!
+>   - Does not stop playing even when the main thread is frozen!
 > - **Web Worker synthesizer:** ...
 
 > ```javascript
@@ -612,22 +638,28 @@ spessasynth_lib README 摘录：
 spessasynth_lib `docs/sequencer/index.md` 摘录（位置与可视化相关，2026-09-05 获取）：
 
 > ### currentTime
+>
 > The current playback time of the song in seconds. Can be set to seek to a specific position in the song.
 >
 > ### currentHighResolutionTime
+>
 > A smoothed version of currentTime. **Use for visualization** as it's not affected by the audioContext stutter.
 
 > ### eventHandler
+>
 > Allows setting up custom event listeners for the sequencer.
 > The event types match spessasynth_core's sequencer event types...
 
 spessasynth_core `docs/spessa-synth-sequencer/event-types.md` 摘录（2026-09-05 获取）：
 
 > ### timeChange
+>
 > Called when the time is changed. It also gets called when a song gets changed.
+>
 > - newTime: number - the new time in seconds.
 >
 > ### metaEvent
+>
 > Called when a MIDI Meta event is encountered. ...
 >
 > ### songChange / songEnded / loopCountChange ...
@@ -635,11 +667,15 @@ spessasynth_core `docs/spessa-synth-sequencer/event-types.md` 摘录（2026-09-0
 spessasynth_core `docs/spessa-synth-processor/event-types.md` 摘录（2026-09-05 获取）：
 
 > ### `noteOn`
+>
 > - `midiNote`: `number` - the MIDI key number of the note that was pressed. Ranges from 0 to 127.
 > - `channel`: `number` ...
 > - `velocity`: `number` - the velocity of the note... Ranges from 0 to 127.
+>
 > ### `noteOff`
+>
 > - `midiNote`: `number` ...
+>
 > ### `controllerChange` / `programChange` ...
 
 npm 注册表数据（2026-09-05 查询）：
@@ -657,6 +693,7 @@ npm 注册表数据（2026-09-05 查询）：
 - 来源：[https://developer.mozilla.org/en-US/docs/Web/Media/Guides/Autoplay](https://developer.mozilla.org/en-US/docs/Web/Media/Guides/Autoplay)（2026-09-05 获取）
 
 > As a general rule, you can assume that media will be allowed to autoplay only if _at least one_ of the following is true:
+>
 > - The audio is muted or its volume is set to 0
 > - The user has interacted with the site (by clicking, tapping, pressing keys, etc.)
 > - If the site has been allowlisted...
@@ -673,11 +710,11 @@ npm 注册表数据（2026-09-05 查询）：
 > 自 Chrome 71 起，Web Audio API 已纳入自动播放功能。……如果在文件接收使用者手势之前建立 `AudioContext`，则会以「已暂停」状态建立，您必须在使用者手势后呼叫 `resume()`。
 
 > ```javascript
-> document.querySelector('button').addEventListener('click', function() {
+> document.querySelector('button').addEventListener('click', function () {
 >   context.resume().then(() => {
->     console.log('Playback resumed successfully');
->   });
-> });
+>     console.log('Playback resumed successfully')
+>   })
+> })
 > ```
 
 > 如要侦测浏览器是否需要使用者互动才能播放音讯，请在建立 `AudioContext.state` 后检查该值。如果允许播放，则应立即切换为 `running`。否则为 `suspended`。
@@ -707,6 +744,21 @@ npm 注册表数据（2026-09-05 查询）：
 > A sampled acoustic piano. It uses Steinway samples with 4 velocity groups from SplendidGrandPiano
 
 库本体许可：MIT（README 末尾 "## License MIT License"）。
+
+采样 URL 拼接方式（源码 `src/smplr/sample-loader.ts`，node_modules 内 1.0.0 实测，2026-09-05）：
+
+> ```ts
+> const format = findFirstSupportedFormat(json.samples.formats) ?? json.samples.formats[0] ?? "ogg";
+> const base = json.samples.baseUrl.replace(/\/$/, "");
+> const names = collectSampleNames(json);
+> ...
+> const path = json.samples.map?.[name] ?? name;
+> const url = `${base}/${path}.${format}`;
+> ```
+
+即：URL 由 `baseUrl + 采样名 + 扩展名` 直接拼接，**采样名不做 URL 编码**；`formats`
+按浏览器支持顺序选择（Safari 跳过 ogg）。该行为的工程影响见 research 文档
+`20260905-packaging-and-licensing.md` §3.1（此处仅收录事实）。
 
 ### 7.2 采样上游仓库 sfzinstruments/SplendidGrandPiano README 许可声明
 

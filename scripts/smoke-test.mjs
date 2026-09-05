@@ -199,7 +199,7 @@ try {
   const highlightCount = await page.evaluate(() => {
     let n = 0
     for (const svg of document.querySelectorAll('.score__system svg')) {
-      if (svg.outerHTML.includes('#0e7490')) n++
+      if (svg.outerHTML.includes('#a8772e')) n++
     }
     return n
   })

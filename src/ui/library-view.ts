@@ -1,6 +1,7 @@
 import type { LibraryItem } from '../storage/library'
 import { formatSize } from '../storage/library'
 import { el } from './dom'
+import { keysArtIcon, plusIcon, refreshIcon, xIcon } from './icons'
 import type { View } from './store'
 
 export interface LibraryViewCallbacks {
@@ -10,7 +11,21 @@ export interface LibraryViewCallbacks {
   onReimport(files: File[], id: string): void | Promise<void>
 }
 
-/** 文件库侧栏：导入按钮 + 持久化列表（名称/大小/时间，选中态，删除/重新导入） */
+/** 相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前 / YYYY/M/D */
+export function formatRelativeTime(timestamp: number): string {
+  const diff = Date.now() - timestamp
+  const min = Math.floor(diff / 60000)
+  if (min < 1) return '刚刚'
+  if (min < 60) return `${min} 分钟前`
+  const hour = Math.floor(min / 60)
+  if (hour < 24) return `${hour} 小时前`
+  const day = Math.floor(hour / 24)
+  if (day < 30) return `${day} 天前`
+  const d = new Date(timestamp)
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
+}
+
+/** 文件库侧栏：标题行（导入为图标按钮）+ 持久化列表（hover 动作）+ 空状态 + 拖放导入 */
 export class LibraryView implements View {
   readonly el: HTMLElement
   private readonly fileInput: HTMLInputElement
@@ -51,29 +66,69 @@ export class LibraryView implements View {
 
     this.listEl = el('ul', { class: 'library__list' })
 
+    const importBtn = el('button', {
+      class: 'icon-btn library__import',
+      title: '导入 MIDI',
+    })
+    importBtn.append(plusIcon())
+    importBtn.addEventListener('click', () => this.fileInput.click())
+
     this.el = el(
       'aside',
       { class: 'library' },
-      el('h2', { class: 'library__title' }, '文件库'),
       el(
-        'button',
-        {
-          class: 'library__import',
-          onclick: () => this.fileInput.click(),
-        },
-        '导入 MIDI',
+        'div',
+        { class: 'library__head' },
+        el('h2', { class: 'library__title' }, '文件库'),
+        importBtn,
       ),
-      el('p', { class: 'library__hint' }, '文件保存在浏览器本地（IndexedDB），刷新后仍在'),
       this.listEl,
       this.fileInput,
       this.reimportInput,
     )
+
+    // 拖放导入：整个侧栏兼作拖放区
+    let dragDepth = 0
+    this.el.addEventListener('dragenter', (e) => {
+      e.preventDefault()
+      dragDepth++
+      this.el.classList.add('is-drop')
+    })
+    this.el.addEventListener('dragover', (e) => e.preventDefault())
+    this.el.addEventListener('dragleave', () => {
+      dragDepth = Math.max(0, dragDepth - 1)
+      if (dragDepth === 0) this.el.classList.remove('is-drop')
+    })
+    this.el.addEventListener('drop', (e) => {
+      e.preventDefault()
+      dragDepth = 0
+      this.el.classList.remove('is-drop')
+      const files = Array.from(e.dataTransfer?.files ?? []).filter((f) => /\.midi?$/i.test(f.name))
+      if (files.length > 0) void cbs.onImport(files)
+    })
   }
 
   setFiles(files: LibraryItem[]): void {
     this.listEl.replaceChildren()
     if (files.length === 0) {
-      this.listEl.append(el('li', { class: 'library__empty' }, '还没有导入文件'))
+      const emptyImport = el('button', { class: 'btn-outline' }, '导入 MIDI')
+      emptyImport.addEventListener('click', () => this.fileInput.click())
+      const art = el('div', { class: 'library__empty-art' })
+      art.append(keysArtIcon())
+      this.listEl.append(
+        el(
+          'li',
+          { class: 'library__empty' },
+          art,
+          el('p', { class: 'library__empty-title' }, '还没有曲目'),
+          el(
+            'p',
+            { class: 'library__empty-hint' },
+            '导入 MIDI 文件开始播放，文件保存在浏览器本地（IndexedDB），刷新后仍在；也可以直接把 .mid 文件拖进侧栏',
+          ),
+          emptyImport,
+        ),
+      )
       return
     }
     for (const item of files) {
@@ -88,20 +143,22 @@ export class LibraryView implements View {
         el(
           'div',
           { class: 'library__item-meta' },
-          `${formatSize(item.size)} · ${new Date(item.importedAt).toLocaleString()}`,
+          `${formatSize(item.size)} · ${formatRelativeTime(item.importedAt)}`,
         ),
       )
       li.append(body)
-      const del = el('button', { class: 'library__item-del', title: '删除' }, '×')
-      del.addEventListener('click', (e) => {
-        e.stopPropagation()
-        void this.cbs.onRemove(item.id)
-      })
-      const re = el('button', { class: 'library__item-re', title: '重新导入更新快照' }, '↻')
+      const re = el('button', { class: 'icon-btn library__item-re', title: '重新导入更新快照' })
+      re.append(refreshIcon())
       re.addEventListener('click', (e) => {
         e.stopPropagation()
         this.pendingReimportId = item.id
         this.reimportInput.click()
+      })
+      const del = el('button', { class: 'icon-btn library__item-del', title: '删除' })
+      del.append(xIcon())
+      del.addEventListener('click', (e) => {
+        e.stopPropagation()
+        void this.cbs.onRemove(item.id)
       })
       li.append(re, del)
       li.addEventListener('click', () => {

@@ -1,4 +1,5 @@
 import { el } from './ui/dom'
+import { logoIcon } from './ui/icons'
 import { tools } from './tools'
 
 /**
@@ -6,7 +7,8 @@ import { tools } from './tools'
  * 同一时间只挂载一个工具；切换时先调用上一个工具的卸载函数释放资源。
  */
 export function createShell(root: HTMLElement): void {
-  const brand = el('span', { class: 'shell__brand' }, 'PianoKits')
+  const brand = el('span', { class: 'shell__brand' }, logoIcon(), 'PianoKits')
+  brand.querySelector('svg')?.classList.add('shell__logo')
   const tabsEl = el('div', { class: 'shell__tabs' })
   const host = el('div', { class: 'shell__tool' })
 

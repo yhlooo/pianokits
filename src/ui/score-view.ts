@@ -17,8 +17,14 @@ import type { View } from './store'
 const STAFF_TOP_Y = 10
 const STAFF_GAP = 100
 const SYSTEM_HEIGHT = STAFF_TOP_Y + STAFF_GAP + 100
-const ACTIVE_FILL = '#0e7490'
-const ACTIVE_STROKE = '#155e75'
+/** 记谱墨色：近黑微暖（暖象牙纸面上不用纯黑） */
+const INK = '#1c1a17'
+/** 播放高亮：纸面上的加深琥珀（视觉风格指南 §6.5） */
+const ACTIVE_FILL = '#a8772e'
+const ACTIVE_STROKE = '#8a6126'
+/** 谱面滚动区横向留白 + 纸张卡片横向内边距（与 style.css 保持一致） */
+const SCROLL_PAD_X = 16
+const CARD_PAD_X = 24
 
 /** 调号数量 → VexFlow keySpec */
 const SF_TO_KEYSPEC: Record<number, string> = {
@@ -81,6 +87,7 @@ export class ScoreView implements View {
   readonly el: HTMLElement
   private readonly scrollEl: HTMLDivElement
   private readonly systemsEl: HTMLDivElement
+  private readonly emptyEl: HTMLDivElement
   private score: ScoreModel | null = null
   private systems: SystemRef[] = []
   private measuresPerSystem = 4
@@ -93,6 +100,13 @@ export class ScoreView implements View {
   constructor() {
     this.systemsEl = el('div', { class: 'score__systems' })
     this.scrollEl = el('div', { class: 'score__scroll' }, this.systemsEl)
+    this.scrollEl.style.display = 'none'
+    this.emptyEl = el(
+      'div',
+      { class: 'score__empty' },
+      el('div', { class: 'score__empty-art' }, '𝄞'),
+      el('div', {}, '选择左侧的曲目后，这里会显示参考谱'),
+    )
     this.el = el(
       'div',
       { class: 'score' },
@@ -102,6 +116,7 @@ export class ScoreView implements View {
         '自动记谱，仅供跟随参考 · 量化到八分音符网格 · 以 C4 为界分左右手',
       ),
       this.scrollEl,
+      this.emptyEl,
     )
 
     this.resizeObserver = new ResizeObserver(() => {
@@ -114,6 +129,8 @@ export class ScoreView implements View {
     this.score = score
     this.activeIds.clear()
     this.activeSystem = -1
+    this.emptyEl.style.display = 'none'
+    this.scrollEl.style.display = ''
     this.rebuild()
   }
 
@@ -123,6 +140,8 @@ export class ScoreView implements View {
     this.systems = []
     this.activeIds.clear()
     this.activeSystem = -1
+    this.scrollEl.style.display = 'none'
+    this.emptyEl.style.display = ''
   }
 
   destroy(): void {
@@ -203,9 +222,9 @@ export class ScoreView implements View {
 
   private rebuild(): void {
     if (this.score === null) return
-    const width = this.el.clientWidth
-    if (width === 0) return
-    this.measuresPerSystem = Math.max(1, Math.floor((width - 20) / 210))
+    const width = this.el.clientWidth - SCROLL_PAD_X * 2
+    if (width <= 0) return
+    this.measuresPerSystem = Math.max(1, Math.floor((width - CARD_PAD_X * 2) / 210))
     const systemCount = Math.ceil(this.score.measures.length / this.measuresPerSystem)
     this.systemsEl.replaceChildren()
     this.systems = []
@@ -234,7 +253,7 @@ export class ScoreView implements View {
     const score = this.score
     const sys = this.systems[sysIdx]
     if (score === null || sys === undefined) return
-    const width = this.el.clientWidth - 16
+    const width = this.el.clientWidth - SCROLL_PAD_X * 2 - CARD_PAD_X * 2
     if (width <= 0) return
 
     sys.div.replaceChildren()
@@ -249,6 +268,9 @@ export class ScoreView implements View {
     renderer.resize(width, SYSTEM_HEIGHT)
     const ctx = renderer.getContext()
     if (ctx === null) return
+    // 记谱墨色：近黑微暖
+    ctx.fillStyle = INK
+    ctx.strokeStyle = INK
 
     const measureWidth = (width - 30) / (endMeasure - startMeasure)
 

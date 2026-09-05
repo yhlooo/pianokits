@@ -6,17 +6,36 @@ const MIN_PITCH = 21 // A0
 const MAX_PITCH = 108 // C8
 const PITCH_COUNT = MAX_PITCH - MIN_PITCH + 1
 const BLACK_PCS = new Set([1, 3, 6, 8, 10])
-const KEYBOARD_H = 96
+/** 键盘高度跟随键宽：真实白键宽长比约 1 : 6.3（23.6mm × 150mm），并设上下限 */
+const WHITE_KEY_ASPECT = 6.3
+const KEYBOARD_MIN_H = 44
+const KEYBOARD_MAX_H = 140
 const DEFAULT_PX_PER_SEC = 140
+/** 左右手分界：与记谱一致的 C4（设计文档：以 C4 为界分左右手） */
+const HAND_SPLIT_PITCH = 60
+/** 点亮键释放后的渐隐时长（ms） */
+const KEY_FADE_MS = 80
+
+/** 琥珀（右手）/ 钢蓝（左手）音符渐变端色 */
+const RH_TOP = [228, 184, 113] as const
+const RH_BOTTOM = [194, 145, 74] as const
+const LH_TOP = [143, 168, 196] as const
+const LH_BOTTOM = [95, 118, 148] as const
 
 export interface WaterfallViewCallbacks {
   onSeek(seconds: number): void
+}
+
+/** 按系数压暗 RGB 颜色（力度映射：弱音更暗） */
+function shade(c: readonly [number, number, number] | readonly number[], f: number): string {
+  return `rgb(${Math.round(c[0] * f)},${Math.round(c[1] * f)},${Math.round(c[2] * f)})`
 }
 
 /**
  * 钢琴瀑布流（自绘 Canvas 2D，设计文档 §6.4）：
  * 底部为 88 键钢琴键盘（判定线即键盘上沿，无中间判定线）；音符条自上而下坠落，
  * 落到琴键的瞬间即发声时刻（与音频调度共用同一时钟，天然对齐），发声期间琴键点亮。
+ * 视觉（视觉风格指南 §6.4）：右手琥珀 / 左手钢蓝双色 + 力度→明度映射 + 音区参考线。
  * 交互：点击跳转、拖拽平移（脱离跟随）、双击恢复跟随、滚轮缩放。
  */
 export class WaterfallView implements View {
@@ -35,6 +54,11 @@ export class WaterfallView implements View {
   private viewTopSec = 0
   private dragStart: { y: number; viewTopSec: number; moved: boolean } | null = null
   private keysOffscreen: HTMLCanvasElement | null = null
+  /** 键盘高度：随容器宽度按键宽比例换算（resize 时更新） */
+  private keyboardH = KEYBOARD_MIN_H
+  private bgGradient: CanvasGradient | null = null
+  private prevActive = new Set<number>()
+  private readonly releasedAt = new Map<number, number>()
   private readonly resizeObserver: ResizeObserver
 
   constructor(cbs: WaterfallViewCallbacks) {
@@ -110,6 +134,8 @@ export class WaterfallView implements View {
     this.viewTopSec = this.noteAreaHeight() / this.pxPerSecond
     this.playhead = 0
     this.follow = true
+    this.prevActive.clear()
+    this.releasedAt.clear()
     this.render()
   }
 
@@ -118,6 +144,8 @@ export class WaterfallView implements View {
     this.noteEnds = []
     this.playhead = 0
     this.viewTopSec = 0
+    this.prevActive.clear()
+    this.releasedAt.clear()
     this.render()
   }
 
@@ -129,7 +157,7 @@ export class WaterfallView implements View {
   }
 
   private noteAreaHeight(): number {
-    return Math.max(0, this.el.clientHeight - KEYBOARD_H)
+    return Math.max(0, this.el.clientHeight - this.keyboardH)
   }
 
   private resize(): void {
@@ -137,10 +165,20 @@ export class WaterfallView implements View {
     const w = this.el.clientWidth
     const h = this.el.clientHeight
     if (w === 0 || h === 0) return
+    // 键宽随容器变化，键盘高度按真实白键宽长比换算（钳制上下限），保持琴键比例协调
+    const keyW = w / PITCH_COUNT
+    this.keyboardH = Math.round(
+      Math.max(KEYBOARD_MIN_H, Math.min(KEYBOARD_MAX_H, keyW * WHITE_KEY_ASPECT)),
+    )
     this.canvas.width = Math.round(w * dpr)
     this.canvas.height = Math.round(h * dpr)
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     this.keysOffscreen = null
+    // 背景微渐变缓存：自上而下 #121110 → #161514
+    const g = this.ctx.createLinearGradient(0, 0, 0, h)
+    g.addColorStop(0, '#121110')
+    g.addColorStop(1, '#161514')
+    this.bgGradient = g
   }
 
   private render(): void {
@@ -148,9 +186,16 @@ export class WaterfallView implements View {
     const h = this.el.clientHeight
     if (w === 0 || h === 0) return
     const ctx = this.ctx
-    ctx.clearRect(0, 0, w, h)
-    const noteAreaH = h - KEYBOARD_H
+    const noteAreaH = h - this.keyboardH
     const keyboardTop = noteAreaH
+
+    // 背景（微渐变，替代纯色）
+    if (this.bgGradient !== null) {
+      ctx.fillStyle = this.bgGradient
+      ctx.fillRect(0, 0, w, h)
+    } else {
+      ctx.clearRect(0, 0, w, h)
+    }
 
     // 跟随播放：判定线（键盘上沿）始终对齐播放头；画布顶边 = 播放头 + 音符区高度/pps
     if (this.playing && this.follow) {
@@ -160,64 +205,102 @@ export class WaterfallView implements View {
     const tKey = this.viewTopSec - noteAreaH / this.pxPerSecond
     const yAt = (t: number): number => noteAreaH - (t - tKey) * this.pxPerSecond
 
-    this.drawKeyboard(w, noteAreaH)
+    this.drawLaneGuides(w, noteAreaH)
     this.drawNotes(w, noteAreaH, yAt)
+    this.drawJudgmentGlow(w, noteAreaH)
+    this.drawKeyboard(w, noteAreaH)
     this.drawActiveKeys(w, keyboardTop)
 
     if (this.notes.length === 0) {
-      ctx.fillStyle = 'rgba(128,128,128,0.8)'
+      ctx.fillStyle = '#807d76'
       ctx.font = '14px system-ui, sans-serif'
       ctx.textAlign = 'center'
       ctx.fillText('导入并选择一个 MIDI 文件后，瀑布流会显示在这里', w / 2, noteAreaH / 2)
     }
   }
 
-  /** 底部 88 键键盘（离屏缓存）；判定线即其上沿，不另画判定线 */
+  /** 音区参考线：每个 C 音位置 1px 发丝竖线 */
+  private drawLaneGuides(w: number, noteAreaH: number): void {
+    const ctx = this.ctx
+    const keyW = w / PITCH_COUNT
+    ctx.fillStyle = 'rgba(255,255,255,0.04)'
+    for (let i = 0; i < PITCH_COUNT; i++) {
+      const pc = (MIN_PITCH + i) % 12
+      if (pc !== 0) continue
+      ctx.fillRect(Math.round(i * keyW) + 0.5, 0, 1, noteAreaH)
+    }
+  }
+
+  /** 判定区：键盘上沿的琥珀光带（克制，非霓虹） */
+  private drawJudgmentGlow(w: number, noteAreaH: number): void {
+    const ctx = this.ctx
+    const g = ctx.createLinearGradient(0, noteAreaH - 10, 0, noteAreaH)
+    g.addColorStop(0, 'rgba(217,164,91,0)')
+    g.addColorStop(1, 'rgba(217,164,91,0.4)')
+    ctx.fillStyle = g
+    ctx.fillRect(0, noteAreaH - 10, w, 10)
+  }
+
+  /** 底部 88 键键盘（离屏缓存）；象牙白键 / 乌木黑键材质 */
   private drawKeyboard(w: number, noteAreaH: number): void {
     const dpr = window.devicePixelRatio || 1
     if (this.keysOffscreen === null) {
       const off = document.createElement('canvas')
       off.width = Math.round(w * dpr)
-      off.height = Math.round(KEYBOARD_H * dpr)
+      off.height = Math.round(this.keyboardH * dpr)
       const octx = off.getContext('2d')
       if (octx !== null) {
         octx.setTransform(dpr, 0, 0, dpr, 0, 0)
         const keyW = w / PITCH_COUNT
-        // 白键
+        // 白键：象牙微渐变
+        const ivory = octx.createLinearGradient(0, 0, 0, this.keyboardH)
+        ivory.addColorStop(0, '#f4f1eb')
+        ivory.addColorStop(1, '#e3dfd7')
         for (let i = 0; i < PITCH_COUNT; i++) {
           const pc = (MIN_PITCH + i) % 12
           const x = i * keyW
-          octx.fillStyle = '#f2f2f5'
-          octx.fillRect(x, 0, keyW, KEYBOARD_H)
-          octx.strokeStyle = 'rgba(0,0,0,0.3)'
+          octx.fillStyle = ivory
+          octx.fillRect(x, 0, keyW, this.keyboardH)
+          octx.strokeStyle = 'rgba(0,0,0,0.25)'
           octx.lineWidth = 0.5
-          octx.strokeRect(x + 0.5, 0.5, keyW - 1, KEYBOARD_H - 1)
+          octx.strokeRect(x + 0.5, 0.5, keyW - 1, this.keyboardH - 1)
           if (pc === 0) {
             const octave = Math.floor((MIN_PITCH + i) / 12) - 1
-            octx.fillStyle = 'rgba(0,0,0,0.55)'
+            octx.fillStyle = 'rgba(0,0,0,0.45)'
             octx.font = '10px system-ui, sans-serif'
             octx.textAlign = 'left'
-            octx.fillText(`C${octave}`, x + 3, KEYBOARD_H - 6)
+            octx.fillText(`C${octave}`, x + 3, this.keyboardH - 6)
           }
         }
-        // 黑键（叠画在白键上）
+        // 白键键底阴影线
+        octx.fillStyle = 'rgba(0,0,0,0.16)'
+        octx.fillRect(0, this.keyboardH - 1, w, 1)
+        // 黑键（叠画在白键上）：乌木渐变 + 顶边高光
+        const ebony = octx.createLinearGradient(0, 0, 0, this.keyboardH * 0.62)
+        ebony.addColorStop(0, '#2a2825')
+        ebony.addColorStop(1, '#141312')
         for (let i = 0; i < PITCH_COUNT; i++) {
           const pc = (MIN_PITCH + i) % 12
           if (!BLACK_PCS.has(pc)) continue
           const x = i * keyW
-          octx.fillStyle = '#1c1c20'
-          octx.fillRect(x - keyW * 0.18, 0, keyW * 0.72, KEYBOARD_H * 0.62)
+          const bx = x - keyW * 0.18
+          const bw = keyW * 0.72
+          const bh = this.keyboardH * 0.62
+          octx.fillStyle = ebony
+          octx.fillRect(bx, 0, bw, bh)
           octx.strokeStyle = 'rgba(0,0,0,0.6)'
           octx.lineWidth = 0.5
-          octx.strokeRect(x - keyW * 0.18, 0, keyW * 0.72, KEYBOARD_H * 0.62)
+          octx.strokeRect(bx, 0, bw, bh)
+          octx.fillStyle = 'rgba(255,255,255,0.08)'
+          octx.fillRect(bx, 0, bw, 1)
         }
       }
       this.keysOffscreen = off
     }
-    this.ctx.drawImage(this.keysOffscreen, 0, noteAreaH, w, KEYBOARD_H)
+    this.ctx.drawImage(this.keysOffscreen, 0, noteAreaH, w, this.keyboardH)
   }
 
-  /** 音符条：自上而下坠落；条底到判定线的时刻即发声时刻 */
+  /** 音符条：右手琥珀 / 左手钢蓝，力度调制明度与透明度，顶部 1px 高光 */
   private drawNotes(w: number, noteAreaH: number, yAt: (t: number) => number): void {
     if (this.notes.length === 0) return
     const keyW = w / PITCH_COUNT
@@ -234,8 +317,6 @@ export class WaterfallView implements View {
     }
 
     const ctx = this.ctx
-    ctx.shadowColor = 'rgba(99, 102, 241, 0.8)'
-    ctx.shadowBlur = 6
     for (let i = lo; i < this.notes.length; i++) {
       const n = this.notes[i]
       if (n.start > this.viewTopSec + 0.5) break
@@ -247,19 +328,40 @@ export class WaterfallView implements View {
       const y1 = Math.min(noteAreaH, bottomEdge)
       if (y1 - y0 < 1) continue
 
+      const right = n.pitch >= HAND_SPLIT_PITCH
+      const [top, bottom] = right ? [RH_TOP, RH_BOTTOM] : [LH_TOP, LH_BOTTOM]
+      // 力度映射：弱音更暗更淡，强音更亮更实
+      const v = Math.max(0, Math.min(1, n.velocity / 127))
+      const vf = 0.55 + 0.5 * v
+      const alpha = 0.55 + 0.45 * v
+
       const col = n.pitch - MIN_PITCH
       const black = BLACK_PCS.has(n.pitch % 12)
       const x = col * keyW + keyW * (black ? 0.1 : 0.07)
       const bw = keyW * (black ? 0.8 : 0.86)
-      ctx.fillStyle = 'rgba(99, 102, 241, 0.92)'
+
+      const g = ctx.createLinearGradient(0, y0, 0, y1)
+      g.addColorStop(0, shade(top, Math.min(1.05, vf)))
+      g.addColorStop(1, shade(bottom, vf))
+      ctx.globalAlpha = alpha
+      ctx.shadowColor = right ? 'rgba(217,164,91,0.45)' : 'rgba(143,168,196,0.4)'
+      ctx.shadowBlur = 6
+      ctx.fillStyle = g
       const radius = Math.min(3, keyW / 4, (y1 - y0) / 2)
       this.roundRect(x, y0, bw, y1 - y0, radius)
       ctx.fill()
+      ctx.shadowBlur = 0
+      // 顶部 1px 高光边（音符够高时才有意义）
+      if (y1 - y0 > 4) {
+        ctx.fillStyle = 'rgba(255,255,255,0.22)'
+        this.roundRect(x, y0, bw, 1, 0.5)
+        ctx.fill()
+      }
+      ctx.globalAlpha = 1
     }
-    ctx.shadowBlur = 0
   }
 
-  /** 发声中的琴键点亮（发光） */
+  /** 发声中的琴键点亮（颜色跟随音符手色：右手琥珀 / 左手钢蓝，释放后 80ms 渐隐） */
   private drawActiveKeys(w: number, keyboardTop: number): void {
     const ctx = this.ctx
     const keyW = w / PITCH_COUNT
@@ -268,21 +370,55 @@ export class WaterfallView implements View {
       if (n.start > this.playhead) break
       if (this.playhead < n.end) active.add(n.pitch)
     }
-    if (active.size === 0) return
-    ctx.shadowColor = 'rgba(34, 211, 238, 0.9)'
-    ctx.shadowBlur = 10
-    ctx.fillStyle = 'rgba(34, 211, 238, 0.9)'
-    for (const pitch of active) {
-      if (pitch < MIN_PITCH || pitch > MAX_PITCH) continue
+    // 记录释放时刻（用于渐隐）
+    const now = performance.now()
+    for (const p of this.prevActive) {
+      if (!active.has(p)) this.releasedAt.set(p, now)
+    }
+    for (const p of active) this.releasedAt.delete(p)
+    this.prevActive = active
+    for (const [p, t] of this.releasedAt) {
+      if (now - t > KEY_FADE_MS) this.releasedAt.delete(p)
+    }
+
+    const drawKey = (pitch: number, alpha: number): void => {
+      if (pitch < MIN_PITCH || pitch > MAX_PITCH) return
       const col = pitch - MIN_PITCH
       const black = BLACK_PCS.has(pitch % 12)
+      ctx.globalAlpha = alpha
       if (black) {
-        ctx.fillRect(col * keyW + keyW * 0.1, keyboardTop + 1, keyW * 0.8, KEYBOARD_H * 0.62)
+        ctx.fillRect(col * keyW + keyW * 0.1, keyboardTop + 1, keyW * 0.8, this.keyboardH * 0.62)
       } else {
-        ctx.fillRect(col * keyW + 1, keyboardTop + 1, keyW - 2, KEYBOARD_H - 2)
+        ctx.fillRect(col * keyW + 1, keyboardTop + 1, keyW - 2, this.keyboardH - 2)
       }
+      ctx.globalAlpha = 1
     }
-    ctx.shadowBlur = 0
+
+    // 按手色分两批绘制（每批一次 fillStyle/shadow 设置）
+    const activeR: [number, number][] = []
+    const activeL: [number, number][] = []
+    for (const p of active) {
+      if (p >= HAND_SPLIT_PITCH) activeR.push([p, 0.95])
+      else activeL.push([p, 0.95])
+    }
+    const fadingR: [number, number][] = []
+    const fadingL: [number, number][] = []
+    for (const [p, t] of this.releasedAt) {
+      const alpha = 0.95 * (1 - (now - t) / KEY_FADE_MS)
+      if (p >= HAND_SPLIT_PITCH) fadingR.push([p, alpha])
+      else fadingL.push([p, alpha])
+    }
+    const paint = (entries: [number, number][], right: boolean): void => {
+      ctx.shadowColor = right ? 'rgba(217,164,91,0.85)' : 'rgba(143,168,196,0.8)'
+      ctx.shadowBlur = 10
+      ctx.fillStyle = right ? 'rgb(217,164,91)' : 'rgb(143,168,196)'
+      for (const [p, alpha] of entries) drawKey(p, alpha)
+      ctx.shadowBlur = 0
+    }
+    paint(activeR, true)
+    paint(activeL, false)
+    paint(fadingR, true)
+    paint(fadingL, false)
   }
 
   private roundRect(x: number, y: number, w: number, h: number, r: number): void {

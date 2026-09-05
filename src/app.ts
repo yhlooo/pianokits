@@ -5,6 +5,7 @@ import { quantizeToScore } from './core/midi/quantize'
 import { Transport } from './core/transport'
 import { FileLibrary } from './storage/library'
 import { el } from './ui/dom'
+import { xIcon } from './ui/icons'
 import { LibraryView } from './ui/library-view'
 import type { ScoreView } from './ui/score-view'
 import { Store } from './ui/store'
@@ -48,13 +49,26 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
   const stage = el('div', { class: 'stage stage--split' })
   stage.append(waterfall.el)
 
-  // 五线谱视图懒加载（VexFlow 体积大，首次选文件时再加载）
+  // 五线谱视图懒加载（VexFlow 体积大，首次选文件时再加载）；
+  // 挂载前先用轻量占位元素占据谱面区，避免分屏右侧一块空板
+  const scorePlaceholder = el(
+    'div',
+    { class: 'score score--placeholder' },
+    el(
+      'div',
+      { class: 'score__empty' },
+      el('div', { class: 'score__empty-art' }, '𝄞'),
+      el('div', {}, '选择左侧的曲目后，这里会显示参考谱'),
+    ),
+  )
+  stage.append(scorePlaceholder)
+
   let scoreView: ScoreView | null = null
   let scoreViewPromise: Promise<ScoreView> | null = null
   function ensureScoreView(): Promise<ScoreView> {
     scoreViewPromise ??= import('./ui/score-view').then(({ ScoreView: SV }) => {
       scoreView = new SV()
-      stage.append(scoreView.el)
+      scorePlaceholder.replaceWith(scoreView.el)
       return scoreView
     })
     return scoreViewPromise
@@ -105,9 +119,24 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
     },
   })
 
-  const noticeEl = el('div', { class: 'notice' })
+  // 通知胶囊：文本 + 关闭按钮，6 秒自动消退
+  const noticeText = el('span', { class: 'notice__text' })
+  const noticeClose = el('button', { class: 'icon-btn notice__close', title: '关闭' })
+  noticeClose.append(xIcon())
+  const noticeEl = el('div', { class: 'notice' }, noticeText, noticeClose)
+  let noticeTimer: number | null = null
+  const hideNotice = (): void => {
+    noticeEl.classList.remove('is-visible')
+    if (noticeTimer !== null) {
+      window.clearTimeout(noticeTimer)
+      noticeTimer = null
+    }
+  }
+  noticeClose.addEventListener('click', hideNotice)
 
-  host.append(transportView.el, noticeEl, el('main', { class: 'main' }, libraryView.el, stage))
+  // 内容列：舞台在上，播放坞（进度条 + 控制行）钉在页面最底部（侧栏通高到底）
+  const contentCol = el('div', { class: 'content' }, stage, transportView.el)
+  host.append(noticeEl, el('main', { class: 'main' }, libraryView.el, contentCol))
 
   function applyViewMode(mode: ViewMode): void {
     stage.classList.remove('stage--split', 'stage--waterfall', 'stage--score')
@@ -126,10 +155,12 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
     libraryView.setFiles(st.files)
     libraryView.setSelected(st.currentFile?.id ?? null)
     if (st.notice !== null) {
-      noticeEl.textContent = st.notice
+      noticeText.textContent = st.notice
       noticeEl.classList.add('is-visible')
+      if (noticeTimer !== null) window.clearTimeout(noticeTimer)
+      noticeTimer = window.setTimeout(hideNotice, 6000)
     } else {
-      noticeEl.classList.remove('is-visible')
+      hideNotice()
     }
   })
 
@@ -170,17 +201,20 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
     .init({
       onProgress: (loaded, total) => {
         store.update({ engineProgress: { loaded, total } })
+        transportView.setEngineProgress({ loaded, total })
       },
     })
     .then(() => {
       if (disposed) return
       store.update({ engine: 'smplr', engineProgress: null })
+      transportView.setEngineProgress(null)
       transport.setEngine(smplr)
     })
     .catch((err: unknown) => {
       if (disposed) return
       console.warn('钢琴采样加载失败，使用振荡器兜底音色', err)
       store.update({ engine: 'oscillator', engineProgress: null })
+      transportView.setEngineProgress(null)
     })
 
   // ---------- 渲染循环：视觉统一按 transport.position 拉取（不依赖音频回调） ----------

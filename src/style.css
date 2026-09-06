@@ -490,6 +490,52 @@ input[type='range']::-moz-range-thumb {
   box-shadow: var(--shadow-card);
 }
 
+/* MIDI 连接 / 练习模式按钮（播放坞右下角，设计文档 20260906-midi-keyboard-and-practice.md §4.1） */
+.transport__midi {
+  margin-left: 8px;
+  /* 未连接：暗色（比常规图标按钮更弱一档） */
+  color: var(--text-2);
+}
+
+.transport__midi:hover {
+  color: var(--text-0);
+}
+
+/* 连接尝试中：旋转等待图标 */
+.transport__midi.is-connecting svg {
+  animation: midi-spin 0.9s linear infinite;
+}
+
+@keyframes midi-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 已连接 / 练习模式开启：琥珀高亮 */
+.icon-btn.is-connected,
+.icon-btn.is-active {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: transparent;
+}
+
+.icon-btn.is-connected:hover,
+.icon-btn.is-active:hover {
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+}
+
+/* 禁用（练习模式未连接 MIDI 键盘时置灰） */
+.icon-btn:disabled,
+.icon-btn:disabled:hover {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-2);
+  opacity: 0.45;
+  cursor: default;
+}
+
 /* ---------- 通知胶囊 ---------- */
 .notice {
   position: fixed;
@@ -520,6 +566,19 @@ input[type='range']::-moz-range-thumb {
   opacity: 1;
   transform: translate(-50%, 0);
   pointer-events: auto;
+}
+
+/* 右下角变体（MIDI 连接失败报错）：钉在播放坞右上方，不居中 */
+.notice--bottom-right {
+  top: auto;
+  left: auto;
+  right: 16px;
+  bottom: calc(var(--toolbar-h) + var(--seekbar-h) + 16px);
+  transform: translateY(8px);
+}
+
+.notice--bottom-right.is-visible {
+  transform: translateY(0);
 }
 
 .notice__close {

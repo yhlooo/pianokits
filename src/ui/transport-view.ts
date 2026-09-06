@@ -1,6 +1,16 @@
+import type { MidiUiState } from '../core/practice'
 import type { TransportState } from '../core/transport'
 import { el, formatTime } from './dom'
-import { pauseIcon, playIcon, sidebarIcon, stopIcon, volumeIcon } from './icons'
+import {
+  midiKeyboardIcon,
+  pauseIcon,
+  playIcon,
+  practiceIcon,
+  sidebarIcon,
+  spinnerIcon,
+  stopIcon,
+  volumeIcon,
+} from './icons'
 import type { View } from './store'
 import type { ViewMode } from './state'
 
@@ -12,6 +22,10 @@ export interface TransportViewCallbacks {
   onVolume(volume: number): void
   onViewMode(mode: ViewMode): void
   onExpandSidebar(): void
+  /** 点击钢琴图标：连接 / 断开 MIDI 键盘 */
+  onMidiToggle(): void
+  /** 点击练习图标：开关练习模式 */
+  onPracticeToggle(): void
 }
 
 const RING_R = 15
@@ -29,10 +43,13 @@ export class TransportView implements View {
   private readonly timeEl: HTMLSpanElement
   private readonly volumeEl: HTMLInputElement
   private readonly modeBtns: Map<ViewMode, HTMLButtonElement>
+  private readonly midiBtn: HTMLButtonElement
+  private readonly practiceBtn: HTMLButtonElement
   private readonly ring: SVGSVGElement
   private readonly ringCircle: SVGCircleElement
   private seeking = false
   private duration = 0
+  private practiceOn = false
 
   constructor(cbs: TransportViewCallbacks) {
     // 侧栏展开按钮：固定在控制行最左、位置始终预留；展开态隐藏但保留占位，
@@ -116,6 +133,20 @@ export class TransportView implements View {
       modeBar.append(btn)
     }
 
+    // MIDI 键盘连接：右下角钢琴图标（连接/断开，状态经 setMidiStatus 同步）
+    this.midiBtn = el('button', { class: 'icon-btn transport__midi', title: '连接 MIDI 键盘' })
+    this.midiBtn.append(midiKeyboardIcon())
+    this.midiBtn.addEventListener('click', () => cbs.onMidiToggle())
+
+    // 练习模式：连接 MIDI 键盘后才可用，未连接置灰禁用
+    this.practiceBtn = el('button', {
+      class: 'icon-btn transport__practice',
+      title: '练习模式（需先连接 MIDI 键盘）',
+    })
+    this.practiceBtn.disabled = true
+    this.practiceBtn.append(practiceIcon())
+    this.practiceBtn.addEventListener('click', () => cbs.onPracticeToggle())
+
     // 播放坞：进度条贴坞上沿，控制行在下；整体钉在页面底部
     this.el = el(
       'div',
@@ -132,6 +163,8 @@ export class TransportView implements View {
         volumeLabel,
         this.volumeEl,
         modeBar,
+        this.midiBtn,
+        this.practiceBtn,
       ),
     )
   }
@@ -188,6 +221,56 @@ export class TransportView implements View {
     for (const [m, btn] of this.modeBtns) {
       btn.classList.toggle('is-active', m === mode)
     }
+  }
+
+  /**
+   * 同步 MIDI 按钮状态（设计文档 §4.1）：
+   * - 未连接：暗色钢琴图标，tooltip “连接 MIDI 键盘”，点击尝试连接；
+   * - 连接尝试中：旋转等待图标，tooltip “连接中（点击取消）”，点击取消；
+   * - 已连接：琥珀高亮，tooltip 显示键盘名称（点击断开），点击断开；
+   * - 失败态（超时/被拒/不支持等）：恢复暗色，tooltip 提示原因，点击重试。
+   * 练习图标仅在已连接时可用。
+   */
+  setMidiStatus(ui: MidiUiState): void {
+    const { status, attempting, deviceLabel } = ui
+    const connected = status === 'connected'
+    const spinning = attempting && !connected
+    this.midiBtn.classList.toggle('is-connected', connected)
+    this.midiBtn.classList.toggle('is-connecting', spinning)
+    this.midiBtn.disabled = status === 'unsupported'
+    this.midiBtn.replaceChildren(spinning ? spinnerIcon() : midiKeyboardIcon())
+    this.midiBtn.title = connected
+      ? `已连接 ${deviceLabel ?? ''}（点击断开）`
+      : spinning
+        ? '连接中（点击取消）'
+        : status === 'unsupported'
+          ? '当前浏览器不支持 Web MIDI'
+          : status === 'no-devices'
+            ? '未检测到 MIDI 键盘（点击重连）'
+            : status === 'denied'
+              ? 'MIDI 授权被拒绝（点击重试）'
+              : status === 'timeout'
+                ? '连接超时（点击重试）'
+                : status === 'error'
+                  ? '连接失败（点击重试）'
+                  : '连接 MIDI 键盘'
+    this.practiceBtn.disabled = !connected
+    this.practiceBtn.title = this.practiceOn
+      ? '退出练习模式'
+      : connected
+        ? '练习模式'
+        : '练习模式（需先连接 MIDI 键盘）'
+  }
+
+  /** 同步练习模式开关：开启时琥珀高亮 */
+  setPractice(on: boolean): void {
+    this.practiceOn = on
+    this.practiceBtn.classList.toggle('is-active', on)
+    this.practiceBtn.title = on
+      ? '退出练习模式'
+      : this.practiceBtn.disabled
+        ? '练习模式（需先连接 MIDI 键盘）'
+        : '练习模式'
   }
 
   /** 同步侧栏折叠态：折叠时显示最左的展开按钮（其位置始终预留，不挤压其它控件） */

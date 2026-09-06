@@ -104,6 +104,52 @@ export const xIcon = (): SVGSVGElement => svg(['M5.5 5.5l9 9M14.5 5.5l-9 9'])
 /** 侧栏切换（类似 FontAwesome sidebar：面板轮廓 + 左侧窄栏分隔线）；折叠/展开共用同一图标 */
 export const sidebarIcon = (): SVGSVGElement => svg(['M2.5 3.5h15v13h-15z', 'M7 3.5v13'])
 
+/** MIDI 键盘连接（描边白键 + 实心黑键，呼应品牌琴键元素） */
+export function midiKeyboardIcon(): SVGSVGElement {
+  const el = document.createElementNS(SVG_NS, 'svg')
+  el.setAttribute('width', '20')
+  el.setAttribute('height', '20')
+  el.setAttribute('viewBox', '0 0 20 20')
+  el.setAttribute('aria-hidden', 'true')
+  // 白键：三枚描边圆角键
+  for (const x of [3.5, 7.5, 11.5]) {
+    const r = document.createElementNS(SVG_NS, 'rect')
+    r.setAttribute('x', String(x))
+    r.setAttribute('y', '6.5')
+    r.setAttribute('width', '4')
+    r.setAttribute('height', '9.5')
+    r.setAttribute('rx', '1')
+    r.setAttribute('fill', 'none')
+    r.setAttribute('stroke', 'currentColor')
+    r.setAttribute('stroke-width', '1.5')
+    r.setAttribute('stroke-linejoin', 'round')
+    el.append(r)
+  }
+  // 黑键：两枚实心短键，落在白键接缝上
+  for (const x of [6.4, 10.4]) {
+    const r = document.createElementNS(SVG_NS, 'rect')
+    r.setAttribute('x', String(x))
+    r.setAttribute('y', '6.5')
+    r.setAttribute('width', '2.2')
+    r.setAttribute('height', '6')
+    r.setAttribute('rx', '0.8')
+    r.setAttribute('fill', 'currentColor')
+    el.append(r)
+  }
+  return el
+}
+
+/** 练习模式（靶心：外环 + 内环 + 四向刻度） */
+export const practiceIcon = (): SVGSVGElement =>
+  svg([
+    'M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0',
+    'M7 10a3 3 0 1 0 6 0a3 3 0 1 0 -6 0',
+    'M10 1.5v2.5M10 16v2.5M1.5 10h2.5M16 10h2.5',
+  ])
+
+/** 连接等待（约 270° 圆弧，配合 CSS 旋转动画使用） */
+export const spinnerIcon = (): SVGSVGElement => svg(['M10 3a7 7 0 1 1 -7 7'])
+
 /** 空状态装饰：一排琴键剪影（64×24 视窗，currentColor 平涂） */
 export function keysArtIcon(): SVGSVGElement {
   const el = document.createElementNS(SVG_NS, 'svg')

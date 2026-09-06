@@ -2,6 +2,7 @@ import { OscillatorEngine } from './core/engine/oscillator-engine'
 import { SmplrEngine } from './core/engine/smplr-engine'
 import { parseMidi } from './core/midi/parse'
 import { quantizeToScore } from './core/midi/quantize'
+import { PracticeController } from './core/practice'
 import { Transport } from './core/transport'
 import { FileLibrary } from './storage/library'
 import { el } from './ui/dom'
@@ -128,6 +129,55 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
       applyViewMode(mode)
     },
     onExpandSidebar: () => setSidebarCollapsed(false),
+    onMidiToggle: () => practiceController.toggleMidi(),
+    onPracticeToggle: () => practiceController.togglePractice(),
+  })
+
+  // ---------- MIDI 键盘 + 练习模式 ----------
+  // MIDI 连接失败报错通知：右下角浮动胶囊（5 秒自动消退 + 关闭按钮），
+  // 位置与顶部居中的通用通知区分（设计文档 20260906-midi-keyboard-and-practice.md §4.1）
+  const midiErrorText = el('span', { class: 'notice__text' })
+  const midiErrorClose = el('button', { class: 'icon-btn notice__close', title: '关闭' })
+  midiErrorClose.append(xIcon())
+  const midiErrorEl = el(
+    'div',
+    { class: 'notice notice--bottom-right' },
+    midiErrorText,
+    midiErrorClose,
+  )
+  let midiErrorTimer: number | null = null
+  const hideMidiError = (): void => {
+    midiErrorEl.classList.remove('is-visible')
+    if (midiErrorTimer !== null) {
+      window.clearTimeout(midiErrorTimer)
+      midiErrorTimer = null
+    }
+  }
+  const showMidiError = (message: string): void => {
+    midiErrorText.textContent = message
+    midiErrorEl.classList.add('is-visible')
+    if (midiErrorTimer !== null) window.clearTimeout(midiErrorTimer)
+    midiErrorTimer = window.setTimeout(hideMidiError, 5000)
+  }
+  midiErrorClose.addEventListener('click', hideMidiError)
+
+  // 编排控制器（core/practice.ts）：连接生命周期、实时演奏、练习判定；
+  // 状态经回调推到播放坞按钮与瀑布流键盘反馈（设计文档 20260906-midi-keyboard-and-practice.md §3.5）
+  const practiceController = new PracticeController({
+    transport,
+    callbacks: {
+      onStatus: (ui) => transportView.setMidiStatus(ui),
+      onPractice: (on) => {
+        // 练习的视觉载体是瀑布流键盘：开启时自动切到瀑布流视图
+        if (on && store.get().view !== 'waterfall') {
+          store.update({ view: 'waterfall' })
+          applyViewMode('waterfall')
+        }
+        transportView.setPractice(on)
+      },
+      onFeedback: (fb) => waterfall.setKeyFeedback(fb),
+      onConnectError: (message) => showMidiError(message),
+    },
   })
 
   // 通知胶囊：文本 + 关闭按钮，6 秒自动消退
@@ -148,7 +198,7 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
   // 内容列：舞台在上，播放坞（进度条 + 控制行）钉在页面最底部（侧栏通高到底）
   const contentCol = el('div', { class: 'content' }, stage, transportView.el)
   mainEl.append(libraryView.el, contentCol)
-  host.append(noticeEl, mainEl)
+  host.append(noticeEl, midiErrorEl, mainEl)
 
   function applyViewMode(mode: ViewMode): void {
     stage.classList.remove('stage--split', 'stage--waterfall', 'stage--score')
@@ -253,6 +303,7 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
     if (disposed) return
     disposed = true
     cancelAnimationFrame(rafId)
+    practiceController.dispose()
     transport.dispose()
     oscillator.dispose()
     smplr.dispose()

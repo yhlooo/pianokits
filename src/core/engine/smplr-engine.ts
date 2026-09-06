@@ -25,6 +25,8 @@ export class SmplrEngine implements AudioEngine {
   private piano: Smplr | null = null
   private _ready = false
   private volume = 1
+  /** 实时演奏 voice（MIDI 键盘）：pitch → 停止函数（smplr start() 的返回值） */
+  private readonly liveStops = new Map<number, () => void>()
 
   constructor(context: AudioContext) {
     this.context = context
@@ -72,10 +74,26 @@ export class SmplrEngine implements AudioEngine {
     })
   }
 
+  noteOn(pitch: number, velocity: number): void {
+    // 同音高重复按下：先止住前一个实时 voice
+    this.noteOff(pitch)
+    if (this.piano === null) return
+    // duration 省略/null = 不自动止音（自然延音），离键时用返回的停止函数止音
+    const stop = this.piano.start({ note: pitch, velocity, duration: null })
+    this.liveStops.set(pitch, stop)
+  }
+
+  noteOff(pitch: number): void {
+    this.liveStops.get(pitch)?.()
+    this.liveStops.delete(pitch)
+  }
+
   allNotesOff(): void {
     // stop() 停掉发声中的 voice；其内部的 AudioBufferSourceNode 在排期时间之前被 stop
     // 则不会发声，因此已排期未发声的音符也会被取消。
     this.piano?.stop()
+    for (const stop of this.liveStops.values()) stop()
+    this.liveStops.clear()
   }
 
   setVolume(volume: number): void {

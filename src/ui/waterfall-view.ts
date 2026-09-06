@@ -23,6 +23,12 @@ export interface WaterfallViewCallbacks {
   onSeek(seconds: number): void
 }
 
+/** 练习模式键盘反馈：按住键 + 按错键（设计文档 20260906-midi-keyboard-and-practice.md §4.2） */
+export interface WaterfallKeyFeedback {
+  held: ReadonlySet<number>
+  wrong: ReadonlySet<number>
+}
+
 /** 按系数压暗 RGB 颜色（力度映射：弱音更暗） */
 function shade(c: readonly [number, number, number] | readonly number[], f: number): string {
   return `rgb(${Math.round(c[0] * f)},${Math.round(c[1] * f)},${Math.round(c[2] * f)})`
@@ -63,6 +69,8 @@ export class WaterfallView implements View {
   private prevActive = new Map<number, number>()
   /** 释放中的键：pitch → { 轨号, 释放时刻 } */
   private readonly releasedAt = new Map<number, { track: number; at: number }>()
+  /** 练习模式键盘反馈（按住/按错键）；null = 不显示 */
+  private keyFeedback: WaterfallKeyFeedback | null = null
   private readonly resizeObserver: ResizeObserver
 
   constructor(cbs: WaterfallViewCallbacks) {
@@ -145,6 +153,12 @@ export class WaterfallView implements View {
     this.render()
   }
 
+  /** 练习模式键盘反馈：按住键琥珀点亮、按错键红色（null 清除） */
+  setKeyFeedback(fb: WaterfallKeyFeedback | null): void {
+    this.keyFeedback = fb
+    this.render()
+  }
+
   /** 每帧调用：更新播放位置并重绘 */
   setPosition(positionSec: number, playing: boolean): void {
     this.playhead = positionSec
@@ -206,6 +220,7 @@ export class WaterfallView implements View {
     this.drawJudgmentGlow(w, noteAreaH)
     this.drawKeyboard(w, noteAreaH)
     this.drawActiveKeys(w, keyboardTop)
+    this.drawKeyFeedback(w, keyboardTop)
 
     if (this.notes.length === 0) {
       ctx.fillStyle = '#807d76'
@@ -412,6 +427,43 @@ export class WaterfallView implements View {
       ctx.shadowBlur = 0
     }
     for (const [colorIndex, entries] of byColor) paint(entries, TRACK_COLORS[colorIndex])
+  }
+
+  /** 练习模式键盘反馈：按住键琥珀点亮、按错键红色 + 光晕（画在轨色点亮之上） */
+  private drawKeyFeedback(w: number, keyboardTop: number): void {
+    const fb = this.keyFeedback
+    if (fb === null) return
+    const ctx = this.ctx
+    const keyW = w / PITCH_COUNT
+    const fillKey = (pitch: number): void => {
+      if (pitch < MIN_PITCH || pitch > MAX_PITCH) return
+      const col = pitch - MIN_PITCH
+      const black = BLACK_PCS.has(pitch % 12)
+      if (black) {
+        ctx.fillRect(
+          col * keyW - keyW * BLACK_KEY_INSET,
+          keyboardTop,
+          keyW * BLACK_KEY_WIDTH,
+          this.keyboardH * BLACK_KEY_HEIGHT,
+        )
+      } else {
+        ctx.fillRect(col * keyW, keyboardTop, keyW, this.keyboardH)
+      }
+    }
+    // 按住键（不含按错键）：琥珀半透明点亮
+    ctx.globalAlpha = 0.55
+    ctx.fillStyle = '#d9a45b'
+    for (const p of fb.held) {
+      if (!fb.wrong.has(p)) fillKey(p)
+    }
+    // 按错键：语义危险红 + 同色光晕，最上层
+    ctx.shadowColor = 'rgba(224,105,94,0.9)'
+    ctx.shadowBlur = 12
+    ctx.globalAlpha = 0.92
+    ctx.fillStyle = '#e0695e'
+    for (const p of fb.wrong) fillKey(p)
+    ctx.shadowBlur = 0
+    ctx.globalAlpha = 1
   }
 
   private roundRect(x: number, y: number, w: number, h: number, r: number): void {

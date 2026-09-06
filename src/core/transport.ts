@@ -1,4 +1,4 @@
-import type { Song } from './model'
+import type { Note, Song } from './model'
 import type { AudioEngine } from './engine/types'
 
 export type TransportState = 'empty' | 'ready' | 'playing' | 'paused'
@@ -17,7 +17,23 @@ export const TICK_MS = 25
 /** 排期补偿（秒）：避免定时器回调边界的竞态 */
 const LATENCY_SEC = 0.015
 
+/**
+ * 练习模式和弦分组容差（秒）：start 相差不超过此值的音符视为同一和弦、原子等待与放行。
+ * 30ms 远小于 120bpm 十六分音符间隔（125ms），不会误并相邻和弦（设计文档
+ * 20260906-midi-keyboard-and-practice.md §2-4）。
+ */
+export const CHORD_EPSILON_SEC = 0.03
+
+/** 练习模式等待中的和弦（到达判定线、冻结播放位置直到放行） */
+export interface PracticeChord {
+  /** 和弦起点（秒） */
+  start: number
+  /** 组内全部音符（start ∈ [start, start + CHORD_EPSILON_SEC]） */
+  notes: Note[]
+}
+
 type StateListener = (state: TransportState) => void
+type PracticeChordListener = (chord: PracticeChord | null) => void
 
 /**
  * 播放状态机 + lookahead 调度器 + 时钟（设计文档 §4、§6.3）。
@@ -38,6 +54,11 @@ export class Transport {
   private _state: TransportState = 'empty'
   private _duration = 0
   private volume = 1
+  /** 练习模式开关（见设计文档 20260906-midi-keyboard-and-practice.md §3.3） */
+  private practiceEnabled = false
+  /** 练习模式等待中的和弦；null = 未等待 */
+  private waitingChord: PracticeChord | null = null
+  private practiceChordCb: PracticeChordListener | null = null
 
   constructor(engine: AudioEngine, host: TransportHost) {
     this.engine = engine
@@ -52,9 +73,11 @@ export class Transport {
     return this._duration
   }
 
-  /** 实时位置（秒）：播放中按音频时钟计算，暂停时取暂停位置 */
+  /** 实时位置（秒）：播放中按音频时钟计算，暂停时取暂停位置；练习等待时冻结在和弦起点 */
   get position(): number {
     if (this._state === 'playing') {
+      // 等待中的和弦：位置恒为和弦起点（不随时钟推进，也不受时长钳制）
+      if (this.waitingChord !== null) return this.waitingChord.start
       return Math.min(this._duration, Math.max(0, this.host.now() - this.offset))
     }
     return this.pausedAt
@@ -80,7 +103,8 @@ export class Transport {
     engine.setVolume(this.volume)
     if (this.song !== null) {
       this.pausedAt = pos
-      this.setNotePointer(pos)
+      this.cancelWaiting()
+      this.setPointer(pos)
       if (wasPlaying) {
         this.offset = this.host.now() - pos
         this.setState('playing')
@@ -93,6 +117,7 @@ export class Transport {
   load(song: Song): void {
     this.stopTicker()
     this.engine.allNotesOff()
+    this.cancelWaiting()
     this.song = song
     this.notes = song.notes
     this._duration = song.duration
@@ -120,6 +145,8 @@ export class Transport {
     this.pausedAt = this.position
     this.stopTicker()
     this.engine.allNotesOff()
+    // 取消练习等待：暂停期间琴键不参与判定，恢复播放时重新进入等待并回调
+    this.cancelWaiting()
     this.setState('paused')
   }
 
@@ -129,6 +156,7 @@ export class Transport {
     this.offset = this.host.now()
     this.stopTicker()
     this.engine.allNotesOff()
+    this.cancelWaiting()
     this.nextIndex = 0
     this.setState('paused')
   }
@@ -139,7 +167,8 @@ export class Transport {
     const target = Math.max(0, Math.min(this._duration, seconds))
     this.engine.allNotesOff()
     this.pausedAt = target
-    this.setNotePointer(target)
+    this.cancelWaiting()
+    this.setPointer(target)
     this.offset = this.host.now() - target
     this.setState(wasPlaying ? 'playing' : 'paused')
     if (wasPlaying) this.tick()
@@ -150,16 +179,85 @@ export class Transport {
     this.engine.setVolume(this.volume)
   }
 
+  /** 实时演奏透传（MIDI 键盘）：按下/松开，绕过调度器直接驱动引擎（设计文档 §3.2） */
+  liveNoteOn(pitch: number, velocity: number): void {
+    this.engine.noteOn(pitch, velocity)
+  }
+
+  liveNoteOff(pitch: number): void {
+    this.engine.noteOff(pitch)
+  }
+
+  get practiceMode(): boolean {
+    return this.practiceEnabled
+  }
+
+  /**
+   * 开关练习模式（设计文档 20260906-midi-keyboard-and-practice.md §3.3）。
+   * 进入：清掉 lookahead 已排期与发声中的音符，指针改为“第一个 start ≥ 当前位置”；
+   * 退出：等待中的和弦按正常调度立即发声并继续（指针天然指向该和弦起点）。
+   */
+  setPracticeMode(on: boolean): void {
+    if (this.practiceEnabled === on) return
+    this.practiceEnabled = on
+    if (on) {
+      this.engine.allNotesOff()
+      this.cancelWaiting()
+      if (this.song !== null) this.setNotePointerStart(this.position)
+    } else {
+      this.cancelWaiting()
+    }
+  }
+
+  /**
+   * 订阅练习等待事件：播放位置到达和弦起点时回调该和弦（位置冻结在起点）；
+   * null 表示等待被取消（seek/停止/暂停/退出练习等）。
+   */
+  onPracticeChord(cb: PracticeChordListener): () => void {
+    this.practiceChordCb = cb
+    return () => {
+      if (this.practiceChordCb === cb) this.practiceChordCb = null
+    }
+  }
+
+  /** 放行当前等待的和弦：立即以当前时间发声（原始时值/力度），位置从和弦起点继续推进 */
+  releaseChord(): void {
+    if (!this.practiceEnabled || this.waitingChord === null) return
+    const chord = this.waitingChord
+    const now = this.host.now()
+    for (const n of chord.notes) {
+      if (n.end <= chord.start) continue
+      this.engine.scheduleNote({
+        pitch: n.pitch,
+        velocity: n.velocity,
+        time: now,
+        duration: n.end - n.start,
+      })
+    }
+    let i = this.nextIndex
+    const until = chord.start + CHORD_EPSILON_SEC
+    while (i < this.notes.length && this.notes[i].start <= until) i++
+    this.nextIndex = i
+    this.waitingChord = null
+    this.offset = now - chord.start
+  }
+
   dispose(): void {
     this.stopTicker()
     this.engine.allNotesOff()
     this.listeners.clear()
+    this.practiceChordCb = null
+    this.waitingChord = null
     this.setState('empty')
   }
 
   /** 定时器回调：把 [now+latency, now+latency+lookahead] 窗口内的音符排入引擎 */
   tick(): void {
     if (this._state !== 'playing' || this.song === null) return
+    if (this.practiceEnabled) {
+      this.tickPractice()
+      return
+    }
     const now = this.host.now()
     const pos = now - this.offset
     const from = pos + LATENCY_SEC
@@ -186,6 +284,49 @@ export class Transport {
     }
   }
 
+  /** 练习模式调度：到达下一和弦起点时冻结位置并回调等待，不排入引擎 */
+  private tickPractice(): void {
+    if (this.waitingChord !== null) return
+    const notes = this.notes
+    const now = this.host.now()
+    const pos = now - this.offset
+    if (this.nextIndex >= notes.length) {
+      if (pos >= this._duration) {
+        this.pausedAt = this._duration
+        this.stopTicker()
+        this.setState('paused')
+      }
+      return
+    }
+    const first = notes[this.nextIndex]
+    if (pos >= first.start) {
+      const chord: PracticeChord = { start: first.start, notes: this.collectChord(first.start) }
+      this.waitingChord = chord
+      // 冻结：位置精确停在和弦起点（音符条底贴在判定线上）
+      this.offset = now - chord.start
+      this.practiceChordCb?.(chord)
+    }
+  }
+
+  /** 收集 [start, start + CHORD_EPSILON_SEC] 内的整组音符（nextIndex 总在组首） */
+  private collectChord(start: number): Note[] {
+    const group: Note[] = []
+    let i = this.nextIndex
+    const until = start + CHORD_EPSILON_SEC
+    while (i < this.notes.length && this.notes[i].start <= until) {
+      group.push(this.notes[i])
+      i++
+    }
+    return group
+  }
+
+  /** 取消练习等待并通知订阅者（无等待时为空操作） */
+  private cancelWaiting(): void {
+    if (this.waitingChord === null) return
+    this.waitingChord = null
+    this.practiceChordCb?.(null)
+  }
+
   private startTicker(): void {
     if (this.intervalId !== undefined) return
     this.intervalId = this.host.setInterval(() => this.tick(), TICK_MS)
@@ -198,13 +339,31 @@ export class Transport {
     }
   }
 
+  /** 按当前模式定位音符指针：练习模式用 start 指针（等待从当前位置起的第一组音符） */
+  private setPointer(position: number): void {
+    if (this.practiceEnabled) this.setNotePointerStart(position)
+    else this.setNotePointer(position)
+  }
+
+  /** end 指针：二分第一个 end > position 的音符（正常调度，不重排已开始的音符） */
   private setNotePointer(position: number): void {
-    // 二分：第一个 end > position 的音符
     let lo = 0
     let hi = this.notes.length
     while (lo < hi) {
       const mid = (lo + hi) >> 1
       if (this.notes[mid].end <= position) lo = mid + 1
+      else hi = mid
+    }
+    this.nextIndex = lo
+  }
+
+  /** start 指针：二分第一个 start >= position 的音符（练习模式，进入时放弃已开始的音符） */
+  private setNotePointerStart(position: number): void {
+    let lo = 0
+    let hi = this.notes.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (this.notes[mid].start < position) lo = mid + 1
       else hi = mid
     }
     this.nextIndex = lo

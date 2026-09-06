@@ -11,8 +11,24 @@ import { LibraryView } from './ui/library-view'
 import type { ScoreView } from './ui/score-view'
 import { Store } from './ui/store'
 import type { AppState, ViewMode } from './ui/state'
+import { nextViewMode } from './ui/state'
 import { TransportView } from './ui/transport-view'
 import { WaterfallView } from './ui/waterfall-view'
+
+/** URL query 中保存“当前打开文件名”的键（刷新/切换工具后据此恢复选中文件） */
+const FILE_QUERY_KEY = 'file'
+
+function readFileQueryName(): string | null {
+  return new URLSearchParams(window.location.search).get(FILE_QUERY_KEY)
+}
+
+/** 写入/清除 URL query 中的文件名（replaceState，不新增历史记录、保留工具路径与其它参数） */
+function writeFileQueryName(name: string | null): void {
+  const url = new URL(window.location.href)
+  if (name === null) url.searchParams.delete(FILE_QUERY_KEY)
+  else url.searchParams.set(FILE_QUERY_KEY, name)
+  window.history.replaceState(null, '', url.pathname + url.search + url.hash)
+}
 
 /** 组装 MIDI 播放器工具：存储/解析/播放/视图接线（设计文档 §3 总体架构）。返回卸载函数。 */
 export async function createApp(host: HTMLElement): Promise<() => void> {
@@ -55,12 +71,7 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
   const scorePlaceholder = el(
     'div',
     { class: 'score score--placeholder' },
-    el(
-      'div',
-      { class: 'score__empty' },
-      el('div', { class: 'score__empty-art' }, '𝄞'),
-      el('div', {}, '选择左侧的曲目后，这里会显示参考谱'),
-    ),
+    el('div', { class: 'score__empty' }, el('div', { class: 'score__empty-art' }, '𝄞')),
   )
   stage.append(scorePlaceholder)
 
@@ -98,15 +109,7 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
         scoreView?.clear()
         practiceController.setTracks([])
         store.update({ currentFile: null, song: null, score: null })
-      }
-    },
-    onReimport: async (files, id) => {
-      const file = files[0]
-      if (file === undefined) return
-      await library.replaceFile(id, file)
-      await refreshFiles()
-      if (store.get().currentFile?.id === id) {
-        await selectFile(id)
+        writeFileQueryName(null)
       }
     },
     onCollapse: () => setSidebarCollapsed(true),
@@ -125,9 +128,10 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
       transport.setVolume(v)
       store.update({ volume: v })
     },
-    onViewMode: (mode) => {
-      store.update({ view: mode })
-      applyViewMode(mode)
+    onViewToggle: (panel) => {
+      const next = nextViewMode(store.get().view, panel)
+      store.update({ view: next })
+      applyViewMode(next)
     },
     onExpandSidebar: () => setSidebarCollapsed(false),
     onMidiToggle: () => practiceController.toggleMidi(),
@@ -262,6 +266,7 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
       sv.setScore(score)
       transportView.setDuration(song.duration)
       store.update({ currentFile: { id, name: item.name }, song, score, notice: null })
+      writeFileQueryName(item.name)
     } catch (err) {
       store.update({ notice: `解析失败：${err instanceof Error ? err.message : String(err)}` })
     }
@@ -306,6 +311,13 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
   applyViewMode(store.get().view)
   transportView.setVolume(store.get().volume)
   await refreshFiles()
+
+  // 刷新后恢复上次打开的文件：从 URL query 读取文件名并在文件库中匹配
+  const restoredName = readFileQueryName()
+  if (restoredName !== null) {
+    const item = store.get().files.find((f) => f.name === restoredName)
+    if (item !== undefined) await selectFile(item.id)
+  }
 
   // ---------- 卸载：工具切换时释放资源 ----------
   return () => {

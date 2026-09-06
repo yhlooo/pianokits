@@ -33,6 +33,11 @@ export function attachDebugMenu(
     menu.classList.toggle('is-open')
   })
 
+  // 触控端无 hover：点击外部空白收起下拉（桌面 hover 由 CSS 控制，不受影响）
+  document.addEventListener('pointerdown', (e) => {
+    if (!menu.contains(e.target as Node)) menu.classList.remove('is-open')
+  })
+
   header.append(menu)
 
   return {

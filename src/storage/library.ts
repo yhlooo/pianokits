@@ -10,7 +10,7 @@ export interface LibraryItem {
 
 /**
  * 文件库（方案 B：仅存内容副本到 IndexedDB，设计文档 §5.3、§6.1）。
- * 快照语义：原文件在磁盘上的修改不影响列表内容，用户可"重新导入"更新。
+ * 快照语义：原文件在磁盘上的修改不影响列表内容。
  */
 export class FileLibrary {
   async importFiles(files: File[]): Promise<LibraryItem[]> {
@@ -50,18 +50,6 @@ export class FileLibrary {
     const record = await getFileRecord(id)
     if (record === null) throw new Error('文件不存在，可能已被删除')
     return record.bytes
-  }
-
-  /** 重新导入：保留条目 id，更新快照内容 */
-  async replaceFile(id: string, file: File): Promise<void> {
-    const bytes = await file.arrayBuffer()
-    await putFileRecord({
-      id,
-      name: file.name,
-      size: file.size,
-      importedAt: Date.now(),
-      bytes,
-    })
   }
 
   async remove(id: string): Promise<void> {

@@ -129,19 +129,8 @@ export class ScoreView implements View {
       'div',
       { class: 'score__empty' },
       el('div', { class: 'score__empty-art' }, '𝄞'),
-      el('div', {}, '选择左侧的曲目后，这里会显示参考谱'),
     )
-    this.el = el(
-      'div',
-      { class: 'score' },
-      el(
-        'div',
-        { class: 'score__notice' },
-        '自动记谱，仅供跟随参考 · 量化到十六分音符网格 · 按音轨分谱表',
-      ),
-      this.scrollEl,
-      this.emptyEl,
-    )
+    this.el = el('div', { class: 'score' }, this.scrollEl, this.emptyEl)
 
     this.resizeObserver = new ResizeObserver(() => {
       if (this.score !== null) this.rebuild()

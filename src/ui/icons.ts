@@ -94,10 +94,6 @@ export const volumeIcon = (): SVGSVGElement =>
 /** 导入（描边：加号） */
 export const plusIcon = (): SVGSVGElement => svg(['M10 4.5v11M4.5 10h11'])
 
-/** 重新导入（描边：回转箭头） */
-export const refreshIcon = (): SVGSVGElement =>
-  svg(['M15.8 10a5.8 5.8 0 1 1-1.7-4.1', 'M15.9 3.4v2.7h-2.7'])
-
 /** 关闭/删除（描边：×） */
 export const xIcon = (): SVGSVGElement => svg(['M5.5 5.5l9 9M14.5 5.5l-9 9'])
 
@@ -149,6 +145,41 @@ export const practiceIcon = (): SVGSVGElement =>
 
 /** 连接等待（约 270° 圆弧，配合 CSS 旋转动画使用） */
 export const spinnerIcon = (): SVGSVGElement => svg(['M10 3a7 7 0 1 1 -7 7'])
+
+/** 瀑布流（三根自左上向右下坠落的音符条，实心） */
+export function waterfallIcon(): SVGSVGElement {
+  const el = document.createElementNS(SVG_NS, 'svg')
+  el.setAttribute('width', '20')
+  el.setAttribute('height', '20')
+  el.setAttribute('viewBox', '0 0 20 20')
+  el.setAttribute('aria-hidden', 'true')
+  const bars: Array<[number, number]> = [
+    [3.5, 2.5],
+    [8.5, 6.5],
+    [13.5, 10.5],
+  ]
+  for (const [x, y] of bars) {
+    const r = document.createElementNS(SVG_NS, 'rect')
+    r.setAttribute('x', String(x))
+    r.setAttribute('y', String(y))
+    r.setAttribute('width', '3')
+    r.setAttribute('height', '6')
+    r.setAttribute('rx', '1.5')
+    r.setAttribute('fill', 'currentColor')
+    el.append(r)
+  }
+  return el
+}
+
+/** 乐谱（五线谱，描边） */
+export const scoreIcon = (): SVGSVGElement =>
+  svg(['M3 4.5h14', 'M3 7.5h14', 'M3 10.5h14', 'M3 13.5h14', 'M3 16.5h14'])
+
+/** 展开/收起三角：向下（默认折叠态，点击展开） */
+export const chevronDownIcon = (): SVGSVGElement => svg(['M5 8l5 5 5-5'])
+
+/** 展开/收起三角：向上（展开态，点击收起） */
+export const chevronUpIcon = (): SVGSVGElement => svg(['M5 12l5-5 5 5'])
 
 /** 空状态装饰：一排琴键剪影（64×24 视窗，currentColor 平涂） */
 export function keysArtIcon(): SVGSVGElement {

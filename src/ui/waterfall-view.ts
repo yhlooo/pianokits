@@ -256,13 +256,6 @@ export class WaterfallView implements View {
     this.drawJudgmentGlow(w, noteAreaH)
     // 底部键盘是共享 DOM 组件，这里只同步它的点亮状态
     this.applyKeyLights()
-
-    if (this.notes.length === 0) {
-      ctx.fillStyle = '#807d76'
-      ctx.font = '14px system-ui, sans-serif'
-      ctx.textAlign = 'center'
-      ctx.fillText('导入并选择一个 MIDI 文件后，瀑布流会显示在这里', w / 2, noteAreaH / 2)
-    }
   }
 
   /** 音区参考线：每个 C 音位置 1px 发丝竖线 */

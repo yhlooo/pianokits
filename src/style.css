@@ -458,36 +458,23 @@ input[type='range']::-moz-range-thumb {
   color: var(--text-2);
 }
 
-/* 分段控件（视图切换） */
-.view-switch {
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  margin-left: 8px;
-  background: rgba(0, 0, 0, 0.28);
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-}
-
-.view-switch__btn {
-  height: 26px;
-  padding: 0 12px;
-  font-size: 0.8125rem;
-  background: transparent;
-  border: none;
-  border-radius: 8px;
+/* 视图开关（瀑布 / 乐谱）：两个图标按钮并排放在 MIDI/练习图标旁，开启用亮度表示 */
+.transport__view {
+  /* 关闭：弱亮度（与常规图标按钮区分） */
   color: var(--text-2);
 }
 
-.view-switch__btn:hover {
-  color: var(--text-0);
-  background: transparent;
+.transport__view:hover {
+  color: var(--text-1);
 }
 
-.view-switch__btn.is-active {
+.transport__view.is-on {
+  /* 开启：全亮度 */
   color: var(--text-0);
-  background: var(--bg-3);
-  box-shadow: var(--shadow-card);
+}
+
+.transport__view.is-on:hover {
+  color: var(--text-0);
 }
 
 /* MIDI 连接 / 练习模式按钮（播放坞右下角，设计文档 20260906-midi-keyboard-and-practice.md §4.1） */
@@ -560,9 +547,16 @@ input[type='range']::-moz-range-thumb {
   box-shadow: var(--shadow-toast);
 }
 
-/* 悬停（含从按钮移入菜单途中）与键盘聚焦时保持展开 */
-.transport__practice-wrap:hover .transport__practice-menu,
-.transport__practice-wrap:focus-within .transport__practice-menu {
+/* 桌面端（有 hover）：悬停（含从按钮移入菜单途中）与键盘聚焦时展开 */
+@media (hover: hover) and (pointer: fine) {
+  .transport__practice-wrap:hover .transport__practice-menu,
+  .transport__practice-wrap:focus-within .transport__practice-menu {
+    display: flex;
+  }
+}
+
+/* 触控端（无 hover）：点击练习按钮切换 .is-open 展开/收起 */
+.transport__practice-wrap.is-open .transport__practice-menu {
   display: flex;
 }
 
@@ -754,7 +748,7 @@ input[type='range']::-moz-range-thumb {
   min-height: 0;
 }
 
-/* ---------- 文件库 ---------- */
+/* ---------- 音乐库 ---------- */
 .library {
   background: var(--bg-1);
   border-right: 1px solid var(--line);
@@ -864,8 +858,12 @@ input[type='range']::-moz-range-thumb {
   transition: background-color var(--dur-fast) var(--ease-out);
 }
 
-.library__item:hover {
-  background: var(--bg-2);
+/* 仅桌面端（有 hover）才显示 hover 底：触控端无 hover，若保留 :hover 样式，
+   首次点击会被浏览器当作 hover 消费，需再点一次才能触发选中 */
+@media (hover: hover) and (pointer: fine) {
+  .library__item:hover {
+    background: var(--bg-2);
+  }
 }
 
 /* 选中态：抬升底 + 左侧 2px 琥珀竖条 */
@@ -907,8 +905,7 @@ input[type='range']::-moz-range-thumb {
 }
 
 /* 行内动作：仅 hover 淡入 */
-.library__item-del,
-.library__item-re {
+.library__item-del {
   flex: none;
   width: 26px;
   height: 26px;
@@ -921,10 +918,14 @@ input[type='range']::-moz-range-thumb {
     background-color var(--dur-fast) var(--ease-out);
 }
 
-.library__item:hover .library__item-del,
-.library__item:hover .library__item-re,
-.library__item.is-selected .library__item-del,
-.library__item.is-selected .library__item-re {
+/* 删除按钮仅在桌面 hover 该行时淡入（触控端常显，见下方 @media (hover: none)） */
+@media (hover: hover) and (pointer: fine) {
+  .library__item:hover .library__item-del {
+    opacity: 1;
+  }
+}
+
+.library__item.is-selected .library__item-del {
   opacity: 1;
 }
 
@@ -933,9 +934,11 @@ input[type='range']::-moz-range-thumb {
   background: rgba(224, 105, 94, 0.12);
 }
 
-.library__item-re:hover {
-  color: var(--text-0);
-  background: var(--bg-3);
+/* 触控端无 hover，删除按钮常显（否则无法触发） */
+@media (hover: none) {
+  .library__item-del {
+    opacity: 1;
+  }
 }
 
 /* ---------- 舞台 ---------- */
@@ -978,7 +981,9 @@ input[type='range']::-moz-range-thumb {
   min-width: 0;
   min-height: 0;
   background: var(--bg-0);
-  border-radius: var(--r-lg);
+  /* 仅圆上两角：下边缘是内嵌钢琴键盘，其圆角由键盘自身按“白键宽 × 0.5”等比给出，
+     若容器下角用固定 --r-lg 圆角会与键盘总宽度失去固定比例（缩放时圆角大小不变） */
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
   overflow: hidden;
 }
 
@@ -996,8 +1001,9 @@ input[type='range']::-moz-range-thumb {
   touch-action: none;
 }
 
-/* 瀑布流内嵌键盘：与「MIDI 键盘」调试页共用 .piano 组件，仅去掉卡片细线框/圆角/投影并
+/* 瀑布流内嵌键盘：与「MIDI 键盘」调试页共用 .piano 组件，仅去掉卡片细线框/投影并
    贴底；高度由 JS 按总宽度 × 0.122 设置（与调试页 aspect-ratio 同一比例）；
+   下边缘圆角沿用 .piano 的“白键宽 × 0.5”等比圆角（上角为零），随键盘总宽度缩放；
    点击/拖拽穿透到画布 */
 .waterfall .piano {
   position: absolute;
@@ -1005,7 +1011,8 @@ input[type='range']::-moz-range-thumb {
   right: 0;
   bottom: 0;
   outline: none;
-  border-radius: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
   box-shadow: none;
   pointer-events: none;
 }
@@ -1023,15 +1030,6 @@ input[type='range']::-moz-range-thumb {
 
 .stage--score .score {
   border-radius: 0;
-}
-
-/* 行内小字 caption（不再是分隔带） */
-.score__notice {
-  flex: none;
-  padding: 4px 8px;
-  font-size: 0.6875rem;
-  color: var(--text-2);
-  text-align: center;
 }
 
 .score__scroll {
@@ -1135,7 +1133,13 @@ input[type='range']::-moz-range-thumb {
   z-index: 30;
 }
 
-.debug-menu:hover .debug-menu__dropdown,
+/* 桌面端 hover 展开；触控/键盘经 .is-open（点击触发）展开 */
+@media (hover: hover) and (pointer: fine) {
+  .debug-menu:hover .debug-menu__dropdown {
+    display: flex;
+  }
+}
+
 .debug-menu.is-open .debug-menu__dropdown {
   display: flex;
 }
@@ -1181,6 +1185,29 @@ input[type='range']::-moz-range-thumb {
 .midi-debug__status {
   font-size: 0.875rem;
   color: var(--text-1);
+}
+
+/* 状态行：状态文本 + 右侧折叠/展开三角按钮（诊断面板开关） */
+.midi-debug__status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.midi-debug__diag-toggle {
+  width: 22px;
+  height: 22px;
+  color: var(--text-2);
+}
+
+.midi-debug__diag-toggle:hover {
+  color: var(--text-0);
+  background: transparent;
+}
+
+/* 诊断面板默认折叠：hidden 属性覆盖 display: grid */
+.midi-debug__diag[hidden] {
+  display: none;
 }
 
 .midi-debug__devices {

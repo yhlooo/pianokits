@@ -1,15 +1,19 @@
 import type { LibraryItem } from '../storage/library'
 import { formatSize } from '../storage/library'
 import { el } from './dom'
-import { keysArtIcon, plusIcon, refreshIcon, sidebarIcon, xIcon } from './icons'
+import { keysArtIcon, plusIcon, sidebarIcon, xIcon } from './icons'
 import type { View } from './store'
 
 export interface LibraryViewCallbacks {
   onImport(files: File[]): void | Promise<void>
   onSelect(id: string): void | Promise<void>
   onRemove(id: string): void | Promise<void>
-  onReimport(files: File[], id: string): void | Promise<void>
   onCollapse(): void
+}
+
+/** 列表展示用文件名：去掉 .mid / .midi 后缀（大小写不敏感） */
+function displayName(name: string): string {
+  return name.replace(/\.(mid|midi)$/i, '')
 }
 
 /** 相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前 / YYYY/M/D */
@@ -26,15 +30,13 @@ export function formatRelativeTime(timestamp: number): string {
   return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
 }
 
-/** 文件库侧栏：标题行（导入为图标按钮）+ 持久化列表（hover 动作）+ 空状态 + 拖放导入 */
+/** 音乐库侧栏：标题行（导入为图标按钮）+ 持久化列表（hover 动作）+ 空状态 + 拖放导入 */
 export class LibraryView implements View {
   readonly el: HTMLElement
   private readonly fileInput: HTMLInputElement
-  private readonly reimportInput: HTMLInputElement
   private readonly listEl: HTMLUListElement
   private readonly cbs: LibraryViewCallbacks
   private selectedId: string | null = null
-  private pendingReimportId: string | null = null
 
   constructor(cbs: LibraryViewCallbacks) {
     this.cbs = cbs
@@ -49,20 +51,6 @@ export class LibraryView implements View {
       const files = Array.from(this.fileInput.files ?? [])
       this.fileInput.value = ''
       if (files.length > 0) void cbs.onImport(files)
-    })
-
-    this.reimportInput = el('input', {
-      type: 'file',
-      accept: '.mid,.midi,audio/midi,audio/x-midi',
-      multiple: false,
-      class: 'hidden-input',
-    })
-    this.reimportInput.addEventListener('change', () => {
-      const files = Array.from(this.reimportInput.files ?? [])
-      this.reimportInput.value = ''
-      const id = this.pendingReimportId
-      this.pendingReimportId = null
-      if (files.length > 0 && id !== null) void cbs.onReimport(files, id)
     })
 
     this.listEl = el('ul', { class: 'library__list' })
@@ -88,13 +76,12 @@ export class LibraryView implements View {
       el(
         'div',
         { class: 'library__head' },
-        el('h2', { class: 'library__title' }, '文件库'),
+        el('h2', { class: 'library__title' }, '音乐库'),
         importBtn,
       ),
       this.listEl,
       el('div', { class: 'library__foot' }, collapseBtn),
       this.fileInput,
-      this.reimportInput,
     )
 
     // 拖放导入：整个侧栏兼作拖放区
@@ -131,25 +118,22 @@ export class LibraryView implements View {
           { class: 'library__empty' },
           art,
           el('p', { class: 'library__empty-title' }, '还没有曲目'),
-          el(
-            'p',
-            { class: 'library__empty-hint' },
-            '导入 MIDI 文件开始播放，文件保存在浏览器本地（IndexedDB），刷新后仍在；也可以直接把 .mid 文件拖进侧栏',
-          ),
+          el('p', { class: 'library__empty-hint' }, '导入或拖入 MIDI 文件(.mid) 开始播放'),
           emptyImport,
         ),
       )
       return
     }
     for (const item of files) {
+      const name = displayName(item.name)
       const li = el('li', {
         class: 'library__item' + (item.id === this.selectedId ? ' is-selected' : ''),
         dataset: { id: item.id },
-        title: item.name,
+        title: name,
       })
       const body = el('div', { class: 'library__item-body' })
       body.append(
-        el('div', { class: 'library__item-name' }, item.name),
+        el('div', { class: 'library__item-name' }, name),
         el(
           'div',
           { class: 'library__item-meta' },
@@ -157,20 +141,13 @@ export class LibraryView implements View {
         ),
       )
       li.append(body)
-      const re = el('button', { class: 'icon-btn library__item-re', title: '重新导入更新快照' })
-      re.append(refreshIcon())
-      re.addEventListener('click', (e) => {
-        e.stopPropagation()
-        this.pendingReimportId = item.id
-        this.reimportInput.click()
-      })
       const del = el('button', { class: 'icon-btn library__item-del', title: '删除' })
       del.append(xIcon())
       del.addEventListener('click', (e) => {
         e.stopPropagation()
         void this.cbs.onRemove(item.id)
       })
-      li.append(re, del)
+      li.append(del)
       li.addEventListener('click', () => {
         void this.cbs.onSelect(item.id)
       })

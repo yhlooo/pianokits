@@ -3,6 +3,7 @@ import { parseMidiMessage } from '../core/midi/input'
 import { midiNoteName } from '../core/midi/note-name'
 import { CONNECT_TIMEOUT_MS } from '../core/midi/connection'
 import { el } from '../ui/dom'
+import { chevronDownIcon, chevronUpIcon } from '../ui/icons'
 import { BLACK_PCS, WHITE_INDEX, buildPiano } from '../ui/piano-keyboard'
 
 // ---------- 大谱表（自绘 SVG）坐标 ----------
@@ -455,11 +456,26 @@ function setDiag(row: DiagRow, text: string, tone: DiagTone = 'neutral'): void {
  */
 export function mountMidiKeyboard(host: HTMLElement): () => void {
   const statusEl = el('div', { class: 'midi-debug__status' })
-  const diagEl = el('dl', { class: 'midi-debug__diag' })
+  // 连接诊断面板（安全上下文 / API / 权限 / 连接阶段）：默认折叠，由状态行右侧三角开关展开
+  const diagEl = el('dl', { class: 'midi-debug__diag', hidden: true })
   const rowSecure = addDiagRow(diagEl, '安全上下文')
   const rowApi = addDiagRow(diagEl, 'Web MIDI API')
   const rowPerm = addDiagRow(diagEl, 'MIDI 权限')
   const rowPhase = addDiagRow(diagEl, '连接阶段')
+  const diagToggle = el('button', {
+    class: 'icon-btn midi-debug__diag-toggle',
+    title: '展开详情',
+    'aria-expanded': 'false',
+  })
+  diagToggle.append(chevronDownIcon())
+  diagToggle.addEventListener('click', () => {
+    const collapsed = diagEl.hidden
+    diagEl.hidden = !collapsed
+    diagToggle.replaceChildren(collapsed ? chevronUpIcon() : chevronDownIcon())
+    diagToggle.title = collapsed ? '收起详情' : '展开详情'
+    diagToggle.setAttribute('aria-expanded', String(collapsed))
+  })
+  const statusRow = el('div', { class: 'midi-debug__status-row' }, statusEl, diagToggle)
   const hintEl = el('div', { class: 'midi-debug__hint', hidden: true })
   const retryEl = el('button', { class: 'midi-debug__retry', hidden: true }, '重试连接')
   retryEl.addEventListener('click', start)
@@ -467,12 +483,12 @@ export function mountMidiKeyboard(host: HTMLElement): () => void {
   const keysEl = el('div', { class: 'midi-debug__keys' })
   const piano = buildPiano()
   const score = buildScore()
-  // 自上而下：状态行 → 诊断面板 → 排查提示 → 重试 → 设备列表 → 五线谱 → 音高符号 → 钢琴键盘
+  // 自上而下：状态行（含折叠开关）→ 诊断面板 → 排查提示 → 重试 → 设备列表 → 五线谱 → 音高符号 → 钢琴键盘
   const stageEl = el('div', { class: 'midi-debug__stage' }, score.el, keysEl, piano.el)
   const innerEl = el(
     'div',
     { class: 'midi-debug__inner' },
-    statusEl,
+    statusRow,
     diagEl,
     hintEl,
     retryEl,

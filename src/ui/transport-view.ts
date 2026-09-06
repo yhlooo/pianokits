@@ -6,13 +6,15 @@ import {
   pauseIcon,
   playIcon,
   practiceIcon,
+  scoreIcon,
   sidebarIcon,
   spinnerIcon,
   stopIcon,
   volumeIcon,
+  waterfallIcon,
 } from './icons'
 import type { View } from './store'
-import type { ViewMode } from './state'
+import type { ViewMode, ViewPanel } from './state'
 import { trackColor } from './track-colors'
 
 export interface TransportViewCallbacks {
@@ -21,7 +23,8 @@ export interface TransportViewCallbacks {
   onStop(): void
   onSeek(seconds: number): void
   onVolume(volume: number): void
-  onViewMode(mode: ViewMode): void
+  /** 点击“瀑布/乐谱”开关：切换对应面板（两个开关不能都关闭） */
+  onViewToggle(panel: ViewPanel): void
   onExpandSidebar(): void
   /** 点击钢琴图标：连接 / 断开 MIDI 键盘 */
   onMidiToggle(): void
@@ -34,8 +37,8 @@ export interface TransportViewCallbacks {
 const RING_R = 15
 const RING_C = 2 * Math.PI * RING_R
 
-/** 底部播放坞：上沿通栏进度条 + 控制行（播放/暂停/停止、时间、音量、视图分段切换）；
- *  顶部只保留外壳栏，不放任何控制按钮 */
+/** 底部播放坞：上沿通栏进度条 + 控制行（播放/暂停/停止、时间、音量、瀑布/乐谱视图开关、
+ *  MIDI 连接、练习模式）；顶部只保留外壳栏，不放任何控制按钮 */
 export class TransportView implements View {
   /** 播放坞根元素（由 app.ts 挂在内容区底部，侧栏右侧） */
   readonly el: HTMLElement
@@ -46,7 +49,8 @@ export class TransportView implements View {
   private readonly seekEl: HTMLInputElement
   private readonly timeEl: HTMLSpanElement
   private readonly volumeEl: HTMLInputElement
-  private readonly modeBtns: Map<ViewMode, HTMLButtonElement>
+  private readonly waterfallBtn: HTMLButtonElement
+  private readonly scoreBtn: HTMLButtonElement
   private readonly midiBtn: HTMLButtonElement
   private readonly practiceBtn: HTMLButtonElement
   private readonly practiceMenuList: HTMLDivElement
@@ -63,6 +67,11 @@ export class TransportView implements View {
   /** 最近一次分轨练习 UI 状态（标题与菜单行同步用） */
   private practiceUi: PracticeUiState | null = null
   private midiConnected = false
+  /** 触控设备（无 hover）：点击练习按钮改为展开/收起菜单，而非开关全部轨 */
+  private readonly touchMode = window.matchMedia('(hover: none)').matches
+  /** 练习按钮 + 菜单的包装器（触控下点击展开/收起菜单用） */
+  private readonly practiceWrap: HTMLElement
+  private closePracticeOnOutside: ((e: Event) => void) | null = null
 
   constructor(cbs: TransportViewCallbacks) {
     this.cbs = cbs
@@ -137,15 +146,23 @@ export class TransportView implements View {
     const volumeLabel = el('span', { class: 'transport__volume-label', title: '音量' })
     volumeLabel.append(volumeIcon())
 
-    this.modeBtns = new Map()
-    const modeBar = el('div', { class: 'view-switch' })
-    for (const mode of ['split', 'waterfall', 'score'] as ViewMode[]) {
-      const label = mode === 'split' ? '分屏' : mode === 'waterfall' ? '瀑布流' : '五线谱'
-      const btn = el('button', { class: 'view-switch__btn', dataset: { mode } }, label)
-      btn.addEventListener('click', () => cbs.onViewMode(mode))
-      this.modeBtns.set(mode, btn)
-      modeBar.append(btn)
-    }
+    // 视图开关：瀑布 / 乐谱两个图标开关（开启用亮度表示），并排放在 MIDI/练习图标旁；
+    // 开启组合决定视图——瀑布+乐谱=分屏、仅瀑布=瀑布流、仅乐谱=五线谱，二者不能同时关闭
+    this.waterfallBtn = el('button', {
+      class: 'icon-btn transport__view',
+      title: '瀑布流',
+      'aria-pressed': 'false',
+    })
+    this.waterfallBtn.append(waterfallIcon())
+    this.waterfallBtn.addEventListener('click', () => cbs.onViewToggle('waterfall'))
+
+    this.scoreBtn = el('button', {
+      class: 'icon-btn transport__view',
+      title: '乐谱',
+      'aria-pressed': 'false',
+    })
+    this.scoreBtn.append(scoreIcon())
+    this.scoreBtn.addEventListener('click', () => cbs.onViewToggle('score'))
 
     // MIDI 键盘连接：右下角钢琴图标（连接/断开，状态经 setMidiStatus 同步）
     this.midiBtn = el('button', { class: 'icon-btn transport__midi', title: '连接 MIDI 键盘' })
@@ -153,14 +170,18 @@ export class TransportView implements View {
     this.midiBtn.addEventListener('click', () => cbs.onMidiToggle())
 
     // 练习模式：连接 MIDI 键盘后才可用，未连接置灰禁用；
-    // 悬浮在按钮上时其上方展开分轨练习菜单（菜单是包装器子元素，移入菜单不收起）
+    // 桌面端（有 hover）悬浮展开分轨练习菜单、点击开关全部轨；触控端无 hover，
+    // 点击练习按钮改为展开菜单、再点收起（点击菜单行开关单轨，点外部空白收起）
     this.practiceBtn = el('button', {
       class: 'icon-btn transport__practice',
       title: '练习模式（需先连接 MIDI 键盘）',
     })
     this.practiceBtn.disabled = true
     this.practiceBtn.append(practiceIcon())
-    this.practiceBtn.addEventListener('click', () => cbs.onPracticeToggle())
+    this.practiceBtn.addEventListener('click', () => {
+      if (this.touchMode) this.togglePracticeMenu()
+      else cbs.onPracticeToggle()
+    })
 
     this.practiceMenuList = el('div', { class: 'transport__practice-menu__list' })
     this.practiceMenuEmpty = el(
@@ -175,7 +196,7 @@ export class TransportView implements View {
       this.practiceMenuList,
       this.practiceMenuEmpty,
     )
-    const practiceWrap = el(
+    this.practiceWrap = el(
       'div',
       { class: 'transport__practice-wrap' },
       this.practiceBtn,
@@ -197,11 +218,31 @@ export class TransportView implements View {
         el('div', { class: 'transport__spacer' }),
         volumeLabel,
         this.volumeEl,
-        modeBar,
+        this.waterfallBtn,
+        this.scoreBtn,
         this.midiBtn,
-        practiceWrap,
+        this.practiceWrap,
       ),
     )
+  }
+
+  /** 触控端：点击练习按钮展开/收起菜单；展开时监听外部点击，点空白处收起 */
+  private togglePracticeMenu(): void {
+    if (this.practiceWrap.classList.contains('is-open')) {
+      this.practiceWrap.classList.remove('is-open')
+      if (this.closePracticeOnOutside !== null) {
+        document.removeEventListener('pointerdown', this.closePracticeOnOutside)
+        this.closePracticeOnOutside = null
+      }
+      return
+    }
+    this.practiceWrap.classList.add('is-open')
+    this.closePracticeOnOutside = (e) => {
+      if (!this.practiceWrap.contains(e.target as Node)) {
+        this.practiceWrap.classList.remove('is-open')
+      }
+    }
+    document.addEventListener('pointerdown', this.closePracticeOnOutside)
   }
 
   private positionFromSlider(): number {
@@ -253,9 +294,12 @@ export class TransportView implements View {
   }
 
   setViewMode(mode: ViewMode): void {
-    for (const [m, btn] of this.modeBtns) {
-      btn.classList.toggle('is-active', m === mode)
-    }
+    const waterfallOn = mode === 'split' || mode === 'waterfall'
+    const scoreOn = mode === 'split' || mode === 'score'
+    this.waterfallBtn.classList.toggle('is-on', waterfallOn)
+    this.scoreBtn.classList.toggle('is-on', scoreOn)
+    this.waterfallBtn.setAttribute('aria-pressed', String(waterfallOn))
+    this.scoreBtn.setAttribute('aria-pressed', String(scoreOn))
   }
 
   /**

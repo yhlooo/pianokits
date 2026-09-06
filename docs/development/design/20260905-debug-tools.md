@@ -1,7 +1,7 @@
 # 设计：调试工具集与 MIDI 键盘调试工具
 
 - 日期：2026-09-05
-- 状态：**正式生效（与实现一致）**。2026-09-05 初版实现（浮动面板形态）；同日按“每个调试工具一个页面，跟正常工具一样”调整后与实现一致；同日引入工具路由（见 `20260905-tool-routing.md`），调试工具获得独立 URI `/midi-keyboard`（与常规工具在 URI 上不作区分）；同日移除 `?debug=1` 调试开关，调试工具改为始终加载并显示。2026-09-06 增加连接诊断面板、连接超时提示与重试（§4.3），配合研究结论 `docs/development/research/20260906-web-midi-connect-hang.md`。
+- 状态：**正式生效（与实现一致）**。2026-09-05 初版实现（浮动面板形态）；同日按“每个调试工具一个页面，跟正常工具一样”调整后与实现一致；同日引入工具路由（见 `20260905-tool-routing.md`），调试工具获得独立 URI `/midi-keyboard`（与常规工具在 URI 上不作区分）；同日移除 `?debug=1` 调试开关，调试工具改为始终加载并显示。2026-09-06 增加连接诊断面板、连接超时提示与重试（§4.3），配合研究结论 `docs/development/research/20260906-web-midi-connect-hang.md`；同日诊断面板改为默认折叠、由状态行右侧三角开关展开。
 - 关联调查结论：`docs/development/research/20260905-web-midi-input.md`（下称 **R-MIDI**）
 - 参考：`docs/development/reference/midi/webmidi-api.md`
 
@@ -24,9 +24,10 @@ USB MIDI 键盘，按键时实时显示对应音名（例如按下 C4 显示 `C4
   （谱面只反映当前按住状态，不记录音符历史）。
 - 调试工具激活时：“调试”按钮呈现激活态、常规工具页签取消激活；反之亦然。
 - 无设备 / 浏览器不支持 Web MIDI / 用户拒绝授权时，页面给出明确的状态提示（不静默失败）。
-- 连接请求 5s 未返回时状态行显示“连接超时”并出现“重试连接”按钮；页面始终显示连接诊断面板
-  （安全上下文 / Web MIDI API 可用性 / midi 权限状态 / 连接阶段实时耗时），帮助定位连接问题
-  （见 §4.3，成因分析见 `docs/development/research/20260906-web-midi-connect-hang.md`）。
+- 连接请求 5s 未返回时状态行显示“连接超时”并出现“重试连接”按钮；页面提供可折叠的连接诊断面板
+  （默认折叠，状态行右侧三角展开：安全上下文 / Web MIDI API 可用性 / midi 权限状态 / 连接阶段
+  实时耗时），帮助定位连接问题（见 §4.3，成因分析见
+  `docs/development/research/20260906-web-midi-connect-hang.md`）。
 - 切换到其它工具时，释放 Web MIDI 事件监听等资源。
 
 ### 1.3 非目标
@@ -140,8 +141,9 @@ export function sortedHeldPitches(held: ReadonlyMap<number, number>): number[]
 
 1. 状态行：`连接中…` / `已连接 · N 台输入` / `未检测到 MIDI 设备` / `当前浏览器不支持 Web MIDI` /
    `MIDI 授权被拒绝` / `连接超时`（5s 未返回）/ `MIDI 连接失败：{message}`（异常时展示可读文案，
-   失败附错误名与消息）。
-2. 连接诊断面板（状态行之下，muted 卡片、两列 dl：标签 + 值）——**始终显示**，用于定位连接问题：
+   失败附错误名与消息）；状态行右侧是**折叠/展开三角按钮**（向上/向下），控制下方诊断面板显隐。
+2. 连接诊断面板（状态行之下，muted 卡片、两列 dl：标签 + 值）——**默认折叠**，由状态行右侧三角
+   按钮展开/收起，用于定位连接问题：
    - **安全上下文**：`window.isSecureContext`（否时提示非 HTTPS/localhost 无法使用 Web MIDI）；
    - **Web MIDI API**：`typeof navigator.requestMIDIAccess`（缺失时提示如 Safari 不支持）；
    - **MIDI 权限**：Permissions API `query({ name: 'midi' })` 的实时状态（已授权 / 待定 / 已拒绝 /

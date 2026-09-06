@@ -242,7 +242,7 @@ describe('Transport 练习模式', () => {
     return chords
   }
 
-  it('到达和弦起点时冻结位置并回调等待，不排入引擎', () => {
+  it('提前进入判定窗口回调；到达和弦起点时冻结位置，不排入引擎', () => {
     const engine = new FakeEngine()
     const host = new FakeHost()
     const t = new Transport(engine, host)
@@ -256,20 +256,67 @@ describe('Transport 练习模式', () => {
     )
     t.setPracticeTracks(new Set([0, 1, 2]))
     t.play()
-    host.advance(0.4)
     host.fireTicks()
-    expect(chords).toHaveLength(0)
-    expect(engine.scheduled).toHaveLength(0)
-    host.advance(0.2) // pos = 0.6 >= 0.5
-    host.fireTicks()
+    // 进入提前触发窗口（一个四分音符 @60bpm = 1s）：立即回调，但不冻结、不发声
     expect(chords).toHaveLength(1)
     expect(chords[0]?.start).toBeCloseTo(0.5)
     expect(chords[0]?.notes.map((n) => n.pitch)).toEqual([60, 64, 67])
-    // 位置冻结在和弦起点，之后时间流逝不推进
+    expect(engine.scheduled).toHaveLength(0)
+    expect(t.position).toBeCloseTo(0)
+    // 到达判定线（0.5）：位置冻结在和弦起点，之后时间流逝不推进
+    host.advance(0.55)
+    host.fireTicks()
     expect(t.position).toBeCloseTo(0.5)
     host.advance(2)
     host.fireTicks()
     expect(t.position).toBeCloseTo(0.5)
+  })
+
+  it('提前窗口内按键可提前放行：音符按按键时刻发声，位置追到和弦起点', () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    const chords = collectChords(t)
+    t.load(makeSong([{ pitch: 60, start: 0.5, end: 0.9 }]))
+    t.setPracticeTracks(new Set([0]))
+    t.play()
+    // 和弦 0.5 已进入提前窗口（回调），位置尚未到判定线
+    host.fireTicks()
+    expect(chords).toHaveLength(1)
+    expect(t.position).toBeCloseTo(0)
+    // 在 0.2 提前按键放行：音符在按键时刻发声
+    host.advance(0.2)
+    t.releaseChord()
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([60])
+    expect(engine.scheduled[0]?.time).toBeCloseTo(0.2)
+    expect(engine.scheduled[0]?.duration).toBeCloseTo(0.4)
+    // 放行后位置追到和弦起点 0.5
+    expect(t.position).toBeCloseTo(0.5)
+  })
+
+  it('按顺序触发：前一和弦放行后才回调下一和弦', () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    const chords = collectChords(t)
+    t.load(
+      makeSong([
+        { pitch: 60, start: 0.5, end: 0.9 },
+        { pitch: 62, start: 1.2, end: 1.5 },
+      ]),
+    )
+    t.setPracticeTracks(new Set([0, 1]))
+    t.play()
+    host.advance(0.6)
+    host.fireTicks()
+    // 第一个和弦已进入提前窗口并回调；第二个和弦尚未回调（顺序门控）
+    expect(chords).toHaveLength(1)
+    expect(chords[0]?.notes.map((n) => n.pitch)).toEqual([60])
+    // 放行第一个和弦后，第二个和弦才回调（已在其提前窗口内）
+    t.releaseChord()
+    host.fireTicks()
+    expect(chords).toHaveLength(2)
+    expect(chords[1]?.notes.map((n) => n.pitch)).toEqual([62])
   })
 
   it('releaseChord：以当前时间发声整组并推进到下一和弦', () => {
@@ -341,11 +388,12 @@ describe('Transport 练习模式', () => {
     t.play()
     host.advance(0.6)
     host.fireTicks()
-    expect(chords).toHaveLength(1)
+    expect(chords[0]?.notes.map((n) => n.pitch)).toEqual([60])
+    expect(t.position).toBeCloseTo(0.5)
+    // seek 到 1.0：取消当前等待（null）；1.2 已进入其提前窗口（0.2）→ 立即重新回调
     t.seek(1.0)
-    expect(chords).toEqual([chords[0], null]) // 等待被取消
-    host.advance(0.25) // pos = 1.25 >= 1.2
-    host.fireTicks()
+    expect(chords).toHaveLength(3)
+    expect(chords[1]).toBeNull()
     expect(chords[2]?.notes.map((n) => n.pitch)).toEqual([62])
   })
 

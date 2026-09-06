@@ -34,11 +34,11 @@ const LATENCY_SEC = 0.015
  */
 export const CHORD_EPSILON_SEC = 0.03
 
-/** 练习模式等待中的和弦（到达判定线、冻结播放位置直到放行） */
+/** 练习模式等待中的和弦（进入提前触发窗口后回调、到达判定线冻结直到放行） */
 export interface PracticeChord {
   /** 和弦起点（秒） */
   start: number
-  /** 组内全部门控轨音符（start ∈ [start, start + CHORD_EPSILON_SEC]；非门控轨音符照常排期，不参与判定） */
+  /** 组内全部门控轨音符（start ∈ [start, start + CHORD_EPSILON_SEC]；非门控轨音符不参与判定） */
   notes: Note[]
 }
 
@@ -253,8 +253,8 @@ export class Transport {
   }
 
   /**
-   * 订阅练习等待事件：播放位置到达门控和弦起点时回调该和弦（位置冻结在起点）；
-   * null 表示等待被取消（seek/停止/暂停/调整门控集合/退出练习等）。
+   * 订阅练习等待事件：播放位置进入门控和弦的提前触发窗口时回调该和弦（可提前按键），
+   * 位置到达和弦起点后冻结；null 表示等待被取消（seek/停止/暂停/调整门控集合/退出练习等）。
    */
   onPracticeChord(cb: PracticeChordListener): () => void {
     this.practiceChordCb = cb
@@ -264,8 +264,9 @@ export class Transport {
   }
 
   /**
-   * 放行当前等待的和弦：立即以当前时间发声（原始时值/力度），并回拨 offset 从和弦起点
-   * 继续推进。同 onset 的非门控音符由自由流在放行后的下一 tick 以同一时刻排期，随和弦一起发声。
+   * 放行当前等待的和弦：立即以当前时间发声（原始时值/力度），并把位置回拨/追到和弦起点后
+   * 继续推进（提前放行时位置前跳到和弦起点）。同 onset 的非门控音符由自由流在放行后的下一
+   * tick 以同一时刻排期，随和弦一起发声。
    */
   releaseChord(): void {
     if (this.gatedTracks.size === 0 || this.waitingChord === null) return
@@ -343,16 +344,19 @@ export class Transport {
   }
 
   /**
-   * 分轨练习调度：非门控轨按 lookahead 窗口排期（不越过下一个门控和弦）；门控轨到达和弦
-   * 起点时收集等待。等待期间整体冻结：非门控轨也不再排期（同 onset 的非门控音符随和弦
-   * 一起等待，放行后随和弦一起发声）。
+   * 分轨练习调度：非门控轨按 lookahead 窗口排期（不越过下一个门控和弦）；门控轨进入提前
+   * 触发窗口时先回调（允许提前按键），到达和弦起点时冻结播放位置。冻结后整体静默：非门控
+   * 轨也不再排期（同 onset 的非门控音符随和弦一起等待，放行后随和弦一起发声）。
    */
   private tickGated(): void {
     const now = this.host.now()
     const pos = now - this.offset
     if (this.waitingChord === null) {
       this.scheduleFree(pos)
-      this.tryCollectChord(now, pos)
+      this.tryPrimeChord(pos)
+    } else if (!this.waitingFrozen) {
+      this.scheduleFree(pos)
+      this.tryFreezeChord(now, pos)
     }
     if (pos >= this._duration && this.waitingChord === null) {
       this.pausedAt = this._duration
@@ -395,8 +399,12 @@ export class Transport {
     return i < this.notes.length ? this.notes[i].start : null
   }
 
-  /** 门控流：位置到达下一门控和弦起点时收集整组（仅门控轨音符）并回调等待 */
-  private tryCollectChord(now: number, pos: number): void {
+  /**
+   * 门控流：位置进入下一门控和弦的**提前触发窗口**（和弦起点前一个四分音符）时，收集整组
+   * （仅门控轨音符）并回调（让 gate 提前进入判定、可提前按键），但**不冻结位置**——音符
+   * 继续下坠，人可提前一个四分音符按键触发。
+   */
+  private tryPrimeChord(pos: number): void {
     const notes = this.notes
     // 从门控指针出发找到第一个门控轨音符（非门控音符永久跳过）
     let i = this.nextGated
@@ -407,7 +415,8 @@ export class Transport {
     }
     this.nextGated = i
     const first = notes[i]
-    if (pos < first.start) return
+    // 提前窗口：最多提前一个四分音符（按当前位置的拍速折算）
+    if (pos < first.start - this.earlyTriggerSeconds(first.start)) return
     // 收集 [start, start + CHORD_EPSILON_SEC] 内的整组门控轨音符
     const until = first.start + CHORD_EPSILON_SEC
     const group: Note[] = []
@@ -415,12 +424,28 @@ export class Transport {
       if (this.gatedTracks.has(notes[i].trackIndex)) group.push(notes[i])
       i++
     }
-    // 冻结在判定线（position 停在和弦起点，音符条底贴判定线）；同时回拨 offset，放行后
-    // 从和弦起点继续（同 onset 的非门控音符由自由流在放行后的 tick 以放行时刻补发）
     this.waitingChord = { start: first.start, notes: group }
-    this.waitingFrozen = true
-    this.offset = now - first.start
+    this.waitingFrozen = false
     this.practiceChordCb?.(this.waitingChord)
+  }
+
+  /** 冻结：位置到达已提前触发的门控和弦起点时，把播放位置停住（等待放行） */
+  private tryFreezeChord(now: number, pos: number): void {
+    if (this.waitingChord === null || this.waitingFrozen) return
+    if (pos < this.waitingChord.start) return
+    this.waitingFrozen = true
+    this.offset = now - this.waitingChord.start
+  }
+
+  /** 提前触发窗口时长（秒）：一个四分音符（按 at 处生效的拍速折算） */
+  private earlyTriggerSeconds(at: number): number {
+    const tempos = this.song?.tempos ?? []
+    let bpm = 120
+    for (const t of tempos) {
+      if (t.time <= at + 1e-6) bpm = t.bpm
+      else break
+    }
+    return 60 / Math.max(1, bpm)
   }
 
   /** 取消练习等待并通知订阅者（无等待时为空操作） */

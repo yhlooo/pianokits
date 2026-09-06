@@ -40,10 +40,14 @@ export class MidiOutputSink {
     // 原生侧按字节数组解析时崩溃（见研究文档 20260906-web-midi-ipad.md §7.1）。
     const on = [0x90, ev.pitch, velocity]
     const off = [0x80, ev.pitch, 0]
-    const ts = this.toTimestamp(ev.time)
+    // Note Off 时间按“音符结束时刻（time + duration）”单独换算，而非“Note On 时间戳 +
+    // duration”：练习放行的音符 time 即当前时刻（Note On 已过期、立即发送、无时间戳），
+    // 若据此把 Note Off 也立即发送，会把键盘音源上只响了一半的长音切断。
+    const onTs = this.toTimestamp(ev.time)
+    const offTs = this.toTimestamp(ev.time + ev.duration)
     for (const out of this.outputs) {
-      out.send(on, ts)
-      out.send(off, ts === undefined ? undefined : ts + ev.duration * 1000)
+      out.send(on, onTs)
+      out.send(off, offTs)
     }
   }
 

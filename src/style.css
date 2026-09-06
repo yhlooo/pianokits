@@ -77,6 +77,9 @@
 
 * {
   box-sizing: border-box;
+  /* 触控端：全局禁用“双击放大”手势（保留单指拖动/双指捏合缩放），
+     避免快速连点按钮/琴键时被浏览器误判为双击缩放 */
+  touch-action: manipulation;
 }
 
 body {
@@ -363,6 +366,15 @@ input[type='range']::-moz-range-thumb {
   flex: 1;
 }
 
+/* 左下控制按钮组（侧栏展开 + 播放 + 停止）：与右下工具组对称——左右各留 32px 内边距，
+   图标间距与右组一致（16px），使两端到屏幕边缘的留白对齐 */
+.transport__controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-left: 32px;
+}
+
 /* 右下工具按钮组（音量 + 瀑布/乐谱 + MIDI + 练习）：整体左移一个图标位置
    （margin-right 32px，避免练习按钮贴太靠屏幕角落），图标间距约 0.5 个图标（16px） */
 .transport__tools {
@@ -372,10 +384,8 @@ input[type='range']::-moz-range-thumb {
   margin-right: 32px;
 }
 
-/* 侧栏展开按钮：控制行最左、位置始终预留；展开态隐藏但保留占位，
-   与播放按钮之间多留 12px 间隔以示与播放功能无关 */
+/* 侧栏展开按钮：控制行最左、位置始终预留；展开态隐藏但保留占位 */
 .transport__sidebar-toggle {
-  margin-right: 12px;
   visibility: hidden;
 }
 

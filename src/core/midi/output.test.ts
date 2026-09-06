@@ -49,6 +49,21 @@ describe('MidiOutputSink 播放镜像', () => {
     sink.dispose()
   })
 
+  it('Note On 已过期但音符尚未结束：Note Off 仍按结束时刻排期（不被立即切断）', () => {
+    const out = new FakeOutput()
+    const sink = new MidiOutputSink({ currentTime: 10 })
+    sink.sync([out as unknown as MIDIOutput])
+    vi.spyOn(performance, 'now').mockReturnValue(10000)
+    // 起音 9.9（已过期 100ms）但时长 0.5 → 结束 10.4（未来 400ms）
+    sink.scheduleNote({ pitch: 64, velocity: 90, time: 9.9, duration: 0.5 })
+    expect(out.sent).toEqual([
+      { data: [0x90, 64, 90], ts: undefined },
+      { data: [0x80, 64, 0], ts: 10400 },
+    ])
+    vi.restoreAllMocks()
+    sink.dispose()
+  })
+
   it('力度钳制到 1~127', () => {
     const out = new FakeOutput()
     const sink = new MidiOutputSink({ currentTime: 0 })

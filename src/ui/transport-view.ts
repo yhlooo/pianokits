@@ -260,9 +260,7 @@ export class TransportView implements View {
       el(
         'header',
         { class: 'transport' },
-        this.expandBtn,
-        this.playBtn,
-        this.stopBtn,
+        el('div', { class: 'transport__controls' }, this.expandBtn, this.playBtn, this.stopBtn),
         this.timeEl,
         el('div', { class: 'transport__spacer' }),
         el(

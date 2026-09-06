@@ -83,13 +83,35 @@ export const stopIcon = (): SVGSVGElement =>
     true,
   )
 
+/** 视觉占比偏小的图标：按视窗中心整体放大几何、保持 1.5px 描边不变 */
+function scaleIcon(icon: SVGSVGElement, scale: number): SVGSVGElement {
+  const g = document.createElementNS(SVG_NS, 'g')
+  g.setAttribute('transform', `translate(10 10) scale(${scale}) translate(-10 -10)`)
+  for (const path of Array.from(icon.children)) {
+    path.setAttribute('vector-effect', 'non-scaling-stroke')
+    g.append(path)
+  }
+  icon.append(g)
+  return icon
+}
+
 /** 音量（描边：喇叭 + 声波） */
 export const volumeIcon = (): SVGSVGElement =>
-  svg([
-    'M4 8.2v3.6h2.6L10 14.6V5.4L6.6 8.2H4Z',
-    'M12.2 7.2a4 4 0 0 1 0 5.6',
-    'M14.2 5.2a6.8 6.8 0 0 1 0 9.6',
-  ])
+  scaleIcon(
+    svg([
+      'M4 8.2v3.6h2.6L10 14.6V5.4L6.6 8.2H4Z',
+      'M12.2 7.2a4 4 0 0 1 0 5.6',
+      'M14.2 5.2a6.8 6.8 0 0 1 0 9.6',
+    ]),
+    1.2,
+  )
+
+/** 静音（描边：喇叭 + ×） */
+export const volumeMutedIcon = (): SVGSVGElement =>
+  scaleIcon(
+    svg(['M4 8.2v3.6h2.6L10 14.6V5.4L6.6 8.2H4Z', 'M12.6 7.4l4.4 4.4M17 7.4l-4.4 4.4']),
+    1.2,
+  )
 
 /** 导入（描边：加号） */
 export const plusIcon = (): SVGSVGElement => svg(['M10 4.5v11M4.5 10h11'])

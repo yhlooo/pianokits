@@ -448,14 +448,86 @@ input[type='range']::-moz-range-thumb {
   text-align: center;
 }
 
-.transport__volume {
-  width: 84px;
+/* 音量：喇叭图标 + 上方竖向滑块弹层（PC hover 展开、点击静音；触控点击展开、音量 0 即静音） */
+.transport__volume-wrap {
+  position: relative;
+  display: inline-flex;
 }
 
-.transport__volume-label {
-  display: inline-flex;
-  align-items: center;
+/* 非静音：较亮（与播放/停止等图标一致）；静音：较弱一档 */
+.transport__volume-btn {
+  color: var(--text-1);
+}
+
+.transport__volume-btn.is-muted {
   color: var(--text-2);
+}
+
+.transport__volume-btn:hover {
+  color: var(--text-0);
+}
+
+.transport__volume-popup {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 124px;
+  padding: 12px 0;
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-toast);
+}
+
+/* 桥接弹层与喇叭按钮之间 6px 空隙：避免鼠标从按钮上移时离开 hover 区域、
+   尚未触及弹层就收起（弹层较高、空隙过大时尤其容易触发） */
+.transport__volume-popup::before {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: 6px;
+}
+
+/* 桌面端（有 hover）：悬停/聚焦时展开 */
+@media (hover: hover) and (pointer: fine) {
+  .transport__volume-wrap:hover .transport__volume-popup,
+  .transport__volume-wrap:focus-within .transport__volume-popup {
+    display: flex;
+  }
+}
+
+/* 触控端（无 hover）：点击喇叭切换 .is-open 展开/收起 */
+.transport__volume-wrap.is-open .transport__volume-popup {
+  display: flex;
+}
+
+/* 竖向音量滑块：横向滑块旋转 -90°（min=0 在底部、max=100 在顶部，已播段自下而上填充） */
+.transport__volume {
+  width: 100px;
+  transform: rotate(-90deg);
+}
+
+/* 音量弹层底色即 --bg-3，与默认未填充轨道同色导致“已过段上方轨道”不可见；
+   改用更亮的中性色作轨道，让未填充段在弹层上清晰可见 */
+.transport__volume::-webkit-slider-runnable-track {
+  background: linear-gradient(
+    to right,
+    var(--accent) 0%,
+    var(--accent) var(--fill, 0%),
+    rgba(255, 255, 255, 0.14) var(--fill, 0%)
+  );
+}
+
+.transport__volume::-moz-range-track {
+  background: rgba(255, 255, 255, 0.14);
 }
 
 /* 视图开关（瀑布 / 乐谱）：两个图标按钮并排放在 MIDI/练习图标旁，开启用亮度表示 */

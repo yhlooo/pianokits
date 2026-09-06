@@ -11,6 +11,7 @@ import {
   spinnerIcon,
   stopIcon,
   volumeIcon,
+  volumeMutedIcon,
   waterfallIcon,
 } from './icons'
 import type { View } from './store'
@@ -49,6 +50,14 @@ export class TransportView implements View {
   private readonly seekEl: HTMLInputElement
   private readonly timeEl: HTMLSpanElement
   private readonly volumeEl: HTMLInputElement
+  private readonly volumeBtn: HTMLButtonElement
+  private readonly volumePopup: HTMLElement
+  private readonly volumeWrap: HTMLElement
+  private closeVolumeOnOutside: ((e: Event) => void) | null = null
+  /** 拖动音量滑块中（用于鼠标移出时避免误收起） */
+  private draggingVolume = false
+  /** 上一次非零音量（0~1），PC 端静音后恢复用 */
+  private lastVolume = 0.8
   private readonly waterfallBtn: HTMLButtonElement
   private readonly scoreBtn: HTMLButtonElement
   private readonly midiBtn: HTMLButtonElement
@@ -135,16 +144,56 @@ export class TransportView implements View {
       min: '0',
       max: '100',
       value: '80',
-      title: '音量',
+      'aria-label': '音量',
     })
     this.volumeEl.addEventListener('input', () => {
+      const v = Number(this.volumeEl.value) / 100
+      if (v > 0) this.lastVolume = v
       this.updateVolumeFill()
-      cbs.onVolume(Number(this.volumeEl.value) / 100)
+      this.updateVolumeIcon(v === 0)
+      cbs.onVolume(v)
     })
     this.updateVolumeFill()
 
-    const volumeLabel = el('span', { class: 'transport__volume-label', title: '音量' })
-    volumeLabel.append(volumeIcon())
+    // 拖动会把指针隐式捕获到滑块上，pointerup/pointercancel 时复位标记，
+    // 供下方 pointerleave 判断是否仍处于拖动中
+    this.volumeEl.addEventListener('pointerdown', () => {
+      this.draggingVolume = true
+    })
+    this.volumeEl.addEventListener('pointerup', () => {
+      this.draggingVolume = false
+    })
+    this.volumeEl.addEventListener('pointercancel', () => {
+      this.draggingVolume = false
+    })
+
+    // 喇叭图标按钮：PC 端 hover 展开上方竖向滑块、点击切换静音；
+    // 触控端（无 hover）点击展开/收起滑块，音量调到 0 即静音（不做点击切换静音）
+    this.volumeBtn = el('button', { class: 'icon-btn transport__volume-btn', title: '音量' })
+    this.volumeBtn.append(volumeIcon())
+    this.volumeBtn.addEventListener('click', () => {
+      if (this.touchMode) this.toggleVolumePopup()
+      else this.toggleMute()
+    })
+
+    this.volumePopup = el('div', { class: 'transport__volume-popup' }, this.volumeEl)
+    this.volumeWrap = el(
+      'div',
+      { class: 'transport__volume-wrap' },
+      this.volumeBtn,
+      this.volumePopup,
+    )
+
+    // PC 端：拖动滑块会让滑块持续持有焦点，仅靠 :hover 移出后弹层仍会因
+    // :focus-within 保持显示；这里在鼠标移出（且非拖动中）时主动释放焦点，
+    // 让弹层正确收起（触控端由 toggleVolumePopup 管理，不在此处理）。
+    this.volumeWrap.addEventListener('pointerleave', () => {
+      if (this.touchMode || this.draggingVolume) return
+      const focused = document.activeElement
+      if (focused instanceof HTMLElement && this.volumeWrap.contains(focused)) {
+        focused.blur()
+      }
+    })
 
     // 视图开关：瀑布 / 乐谱两个图标开关（开启用亮度表示），并排放在 MIDI/练习图标旁；
     // 开启组合决定视图——瀑布+乐谱=分屏、仅瀑布=瀑布流、仅乐谱=五线谱，二者不能同时关闭
@@ -216,8 +265,7 @@ export class TransportView implements View {
         this.stopBtn,
         this.timeEl,
         el('div', { class: 'transport__spacer' }),
-        volumeLabel,
-        this.volumeEl,
+        this.volumeWrap,
         this.waterfallBtn,
         this.scoreBtn,
         this.midiBtn,
@@ -240,6 +288,10 @@ export class TransportView implements View {
     this.closePracticeOnOutside = (e) => {
       if (!this.practiceWrap.contains(e.target as Node)) {
         this.practiceWrap.classList.remove('is-open')
+        if (this.closePracticeOnOutside !== null) {
+          document.removeEventListener('pointerdown', this.closePracticeOnOutside)
+          this.closePracticeOnOutside = null
+        }
       }
     }
     document.addEventListener('pointerdown', this.closePracticeOnOutside)
@@ -255,6 +307,56 @@ export class TransportView implements View {
 
   private updateVolumeFill(): void {
     this.volumeEl.style.setProperty('--fill', `${this.volumeEl.value}%`)
+  }
+
+  /** 同步喇叭图标与 title（静音态显示 ×、变暗） */
+  private updateVolumeIcon(muted: boolean): void {
+    this.volumeBtn.replaceChildren(muted ? volumeMutedIcon() : volumeIcon())
+    this.volumeBtn.classList.toggle('is-muted', muted)
+    this.volumeBtn.title = muted ? '取消静音' : '音量'
+  }
+
+  /** 把 0~1 音量写到滑块并刷新填充与静音图标 */
+  private applyVolume(v: number): void {
+    this.volumeEl.value = String(Math.round(v * 100))
+    this.updateVolumeFill()
+    this.updateVolumeIcon(v === 0)
+  }
+
+  /** PC 端点击喇叭：静音 ↔ 恢复上一次非零音量 */
+  private toggleMute(): void {
+    const current = Number(this.volumeEl.value) / 100
+    if (current === 0) {
+      this.applyVolume(this.lastVolume)
+      this.cbs.onVolume(this.lastVolume)
+    } else {
+      this.lastVolume = current
+      this.applyVolume(0)
+      this.cbs.onVolume(0)
+    }
+  }
+
+  /** 触控端：点击喇叭展开/收起上方音量滑块；展开时监听外部点击收起 */
+  private toggleVolumePopup(): void {
+    if (this.volumeWrap.classList.contains('is-open')) {
+      this.volumeWrap.classList.remove('is-open')
+      if (this.closeVolumeOnOutside !== null) {
+        document.removeEventListener('pointerdown', this.closeVolumeOnOutside)
+        this.closeVolumeOnOutside = null
+      }
+      return
+    }
+    this.volumeWrap.classList.add('is-open')
+    this.closeVolumeOnOutside = (e) => {
+      if (!this.volumeWrap.contains(e.target as Node)) {
+        this.volumeWrap.classList.remove('is-open')
+        if (this.closeVolumeOnOutside !== null) {
+          document.removeEventListener('pointerdown', this.closeVolumeOnOutside)
+          this.closeVolumeOnOutside = null
+        }
+      }
+    }
+    document.addEventListener('pointerdown', this.closeVolumeOnOutside)
   }
 
   setState(state: TransportState): void {
@@ -291,6 +393,8 @@ export class TransportView implements View {
       this.volumeEl.value = String(Math.round(volume * 100))
       this.updateVolumeFill()
     }
+    if (volume > 0) this.lastVolume = volume
+    this.updateVolumeIcon(volume === 0)
   }
 
   setViewMode(mode: ViewMode): void {

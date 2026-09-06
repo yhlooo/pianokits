@@ -1,7 +1,7 @@
 # 设计：调试工具集与 MIDI 键盘调试工具
 
 - 日期：2026-09-05
-- 状态：**正式生效（与实现一致）**。2026-09-05 初版实现（浮动面板形态）；同日按“每个调试工具一个页面，跟正常工具一样”调整后与实现一致；同日引入工具路由（见 `20260905-tool-routing.md`），调试工具获得独立 URI `/midi-keyboard`（与常规工具在 URI 上不作区分）；同日移除 `?debug=1` 调试开关，调试工具改为始终加载并显示。
+- 状态：**正式生效（与实现一致）**。2026-09-05 初版实现（浮动面板形态）；同日按“每个调试工具一个页面，跟正常工具一样”调整后与实现一致；同日引入工具路由（见 `20260905-tool-routing.md`），调试工具获得独立 URI `/midi-keyboard`（与常规工具在 URI 上不作区分）；同日移除 `?debug=1` 调试开关，调试工具改为始终加载并显示。2026-09-06 增加连接诊断面板、连接超时提示与重试（§4.3），配合研究结论 `docs/development/research/20260906-web-midi-connect-hang.md`。
 - 关联调查结论：`docs/development/research/20260905-web-midi-input.md`（下称 **R-MIDI**）
 - 参考：`docs/development/reference/midi/webmidi-api.md`
 
@@ -24,6 +24,9 @@ USB MIDI 键盘，按键时实时显示对应音名（例如按下 C4 显示 `C4
   （谱面只反映当前按住状态，不记录音符历史）。
 - 调试工具激活时：“调试”按钮呈现激活态、常规工具页签取消激活；反之亦然。
 - 无设备 / 浏览器不支持 Web MIDI / 用户拒绝授权时，页面给出明确的状态提示（不静默失败）。
+- 连接请求 5s 未返回时状态行显示“连接超时”并出现“重试连接”按钮；页面始终显示连接诊断面板
+  （安全上下文 / Web MIDI API 可用性 / midi 权限状态 / 连接阶段实时耗时），帮助定位连接问题
+  （见 §4.3，成因分析见 `docs/development/research/20260906-web-midi-connect-hang.md`）。
 - 切换到其它工具时，释放 Web MIDI 事件监听等资源。
 
 ### 1.3 非目标
@@ -136,15 +139,31 @@ export function sortedHeldPitches(held: ReadonlyMap<number, number>): number[]
 自上而下（整页居中，内容超出时纵向滚动）：
 
 1. 状态行：`连接中…` / `已连接 · N 台输入` / `未检测到 MIDI 设备` / `当前浏览器不支持 Web MIDI` /
-   `MIDI 授权被拒绝`（异常时展示可读文案）。
-2. 设备列表：输入端口名称（`name` + `manufacturer`，chip 样式、可换行排布）。
-3. 大谱表（自绘 SVG，暖象牙纸卡片，高音谱号 + 低音谱号）：按住键在对应线/间显示实心符头
+   `MIDI 授权被拒绝` / `连接超时`（5s 未返回）/ `MIDI 连接失败：{message}`（异常时展示可读文案，
+   失败附错误名与消息）。
+2. 连接诊断面板（状态行之下，muted 卡片、两列 dl：标签 + 值）——**始终显示**，用于定位连接问题：
+   - **安全上下文**：`window.isSecureContext`（否时提示非 HTTPS/localhost 无法使用 Web MIDI）；
+   - **Web MIDI API**：`typeof navigator.requestMIDIAccess`（缺失时提示如 Safari 不支持）；
+   - **MIDI 权限**：Permissions API `query({ name: 'midi' })` 的实时状态（已授权 / 待定 / 已拒绝 /
+     查询失败），订阅 `PermissionStatus` 的 `change` 事件实时刷新；
+   - **连接阶段**：请求中实时显示耗时（200ms 刷新）并叠加权限状态提示（“等待用户应答授权提示”
+     / “已授权，等待浏览器返回设备列表”）；失败时显示异常名与消息（如 `NotAllowedError`）。
+     出现问题（等待授权 / 超时 / 被拒 / 不支持）时面板下方显示排查提示（检查地址栏授权提示、
+     `chrome://settings/content/midiDevices`、`chrome://device-log`、iframe 需 Permissions-Policy
+     允许 midi 等），超时与可重试失败时出现“重试连接”按钮；全部状态变化同时写入浏览器 Console
+     （前缀 `[midi-debug]`）。
+3. 连接尝试语义：复用共享服务的 5s 超时阈值（`CONNECT_TIMEOUT_MS`，见
+   `20260906-midi-keyboard-and-practice.md` §3.1）——超时先行提示“连接超时”但**不放弃在途
+   请求**（调试工具如实呈现最终状态，晚到的结果按真实状态更新）；重试时旧请求结果作废
+   （attempt 序号递增）。
+4. 设备列表：输入端口名称（`name` + `manufacturer`，chip 样式、可换行排布）。
+5. 大谱表（自绘 SVG，暖象牙纸卡片，高音谱号 + 低音谱号）：按住键在对应线/间显示实心符头
    （超出五线时补加线），抬起即消失——**只反映当前按住状态，不记录音符历史**。
-4. 音名 chips：**按住的所有键并显**（展示字体大字号、按音高升序排列、位置稳定、**各键同色**）；
+6. 音名 chips：**按住的所有键并显**（展示字体大字号、按音高升序排列、位置稳定、**各键同色**）；
    无按键时显示 `—` 占位。
-5. 88 键钢琴键盘（A0–C8）：按住的键以琥珀色点亮，抬起即熄灭。
+7. 88 键钢琴键盘（A0–C8）：按住的键以琥珀色点亮，抬起即熄灭。
 
-三处反馈（3/4/5）共用同一份按住键状态；其音高升序列表由纯函数 `sortedHeldPitches`
+三处反馈（5/6/7）共用同一份按住键状态；其音高升序列表由纯函数 `sortedHeldPitches`
 （`core/midi/held-keys.ts`）计算，与 DOM 渲染解耦、可单测。
 
 #### 4.3.1 大谱表排布要点

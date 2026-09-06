@@ -48,6 +48,19 @@ navigator.permissions.query({ name: 'midi', sysex: true }).then((result) => {
 })
 ```
 
+### 3.1 Permissions-Policy `midi` 指令（MDN，2026-09-06 摘录）
+
+来源：<https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Permissions-Policy/midi>
+
+> The HTTP Permissions-Policy header `midi` directive controls whether the current document is
+> allowed to use the Web MIDI API.
+>
+> Specifically, where a defined policy blocks use of this feature, `Navigator.requestMIDIAccess()`
+> calls will return a Promise that rejects with a DOMException of type `NotAllowedError`.
+
+- 语法：`Permissions-Policy: midi=<allowlist>;`
+- 默认 allowlist 为 `self`（默认不向跨域 iframe 开放）。
+
 ## 4. `Navigator.requestMIDIAccess()`（MDN）
 
 ### 4.1 语法

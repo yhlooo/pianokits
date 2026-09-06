@@ -996,6 +996,20 @@ input[type='range']::-moz-range-thumb {
   touch-action: none;
 }
 
+/* 瀑布流内嵌键盘：与「MIDI 键盘」调试页共用 .piano 组件，仅去掉卡片细线框/圆角/投影并
+   贴底；高度由 JS 按总宽度 × 0.122 设置（与调试页 aspect-ratio 同一比例）；
+   点击/拖拽穿透到画布 */
+.waterfall .piano {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  outline: none;
+  border-radius: 0;
+  box-shadow: none;
+  pointer-events: none;
+}
+
 /* ---------- 五线谱 ---------- */
 .score {
   min-width: 0;
@@ -1199,6 +1213,79 @@ input[type='range']::-moz-range-thumb {
   border-color: transparent;
 }
 
+/* 连接诊断面板：安全上下文 / API 可用性 / midi 权限 / 连接阶段（dt 标签 + dd 值两列网格） */
+.midi-debug__diag {
+  margin: 0;
+  width: 100%;
+  max-width: 640px;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+  text-align: left;
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+
+.midi-debug__diag dt {
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.midi-debug__diag dd {
+  margin: 0;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.midi-debug__diag dd[data-tone='ok'] {
+  color: var(--success);
+}
+
+.midi-debug__diag dd[data-tone='warn'] {
+  color: var(--accent);
+}
+
+.midi-debug__diag dd[data-tone='bad'] {
+  color: var(--danger);
+}
+
+/* 排查提示：出现问题（等待授权/超时/被拒/不支持）时显示排查建议 */
+.midi-debug__hint {
+  max-width: 640px;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: var(--text-1);
+}
+
+.midi-debug__hint[hidden] {
+  display: none;
+}
+
+/* 重试按钮：失败/超时后出现 */
+.midi-debug__retry {
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--text-0);
+  padding: 7px 18px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line-strong);
+  background: var(--bg-2);
+  cursor: pointer;
+}
+
+.midi-debug__retry:hover {
+  background: var(--bg-3);
+}
+
+.midi-debug__retry[hidden] {
+  display: none;
+}
+
 .midi-debug__stage {
   display: flex;
   flex-direction: column;
@@ -1239,27 +1326,48 @@ input[type='range']::-moz-range-thumb {
   font-variant-numeric: tabular-nums;
 }
 
-/* ---------- 88 键钢琴键盘 ---------- */
-.midi-debug__piano {
+/* ---------- 88 键钢琴键盘（「MIDI 键盘」调试页与瀑布流共用的 DOM 组件） ----------
+   比例：键盘高度 = 总宽度 × 0.122（aspect-ratio 随宽度自适应，拉伸/缩放时高度同步）；
+   白键 = 52 根绝对定位列（与黑键共用同一坐标公式），1px 键缝由 border-right 承担；
+   黑键宽 = 白键宽 × 1.3/2.3、高 = 键盘高 × 2/3，横向占位按组外扩（C# 2/3 在左白键、
+   D# 2/3 在右白键、F# 3/4 在左白键、G# 居中、A# 3/4 在右白键，见 piano-keyboard.ts）；
+   圆角与宽度成固定比例（键盘圆角 = 白键宽 × 0.5、黑键底角 = 黑键宽 × 1/4），不用固定像素 */
+.piano {
   position: relative;
   width: 100%;
-  height: 112px;
+  box-sizing: border-box;
+  /* 键盘几何比例（TS 里黑键定位复用同一变量）。用容器查询单位 cqw 把比例解析成
+     真实长度——百分比的 border-radius 会按元素自身宽高解析，无法表达“总宽度 × 比例”：
+     --key-w  = 白键宽 = 总宽度 / 52
+     --bkey-w = 黑键宽 = 白键宽 × 1.3 / 2.3 */
+  container-type: inline-size;
+  --key-w: calc(100cqw / 52);
+  --bkey-w: calc(var(--key-w) * 1.3 / 2.3);
+  /* 高度 = 宽度 × 0.122（宽度变化时高度自动跟随；瀑布流由 JS 按同比例设置显式高度，
+     显式 height 优先于 aspect-ratio） */
+  aspect-ratio: 1 / 0.122;
   background: #1a1816;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-md);
+  /* 调试页的 1px 细线框用 outline（不参与布局）：保证「高度 = 宽 × 0.122、
+     黑键高 = 2/3」两个比例严格成立（border 会吃掉 2px 内高） */
+  outline: 1px solid var(--line-strong);
+  /* 键盘圆角 = 白键宽 × 0.5；两轴取同值（纵向按自身高度换算）→ 正圆弧角，随宽度等比变化。
+     这里不能用 cqw（容器自身的属性按祖先容器解析），改用自身宽/高的百分比 */
+  border-radius: calc(100% / 52 * 0.5) / calc(100% / 52 * 0.5 * (1 / 0.122));
   box-shadow: var(--shadow-card);
   overflow: hidden;
 }
 
-.midi-debug__whites {
+.piano__whites {
   position: absolute;
   inset: 0;
-  display: flex;
 }
 
-.midi-debug__wkey {
-  flex: none;
-  width: calc(100% / 52);
+.piano__wkey {
+  position: absolute;
+  top: 0;
+  /* 左边缘由 TS 逐键设置（calc(var(--key-w) * 白键序)），与黑键共用同一坐标公式，
+     避免 flex 布局的亚像素累积取整造成黑键与白键分界线错位 */
+  width: var(--key-w);
   height: 100%;
   box-sizing: border-box;
   background: linear-gradient(#f4f1eb, #e3dfd7);
@@ -1267,31 +1375,32 @@ input[type='range']::-moz-range-thumb {
   transition: background var(--dur-fast) var(--ease-out);
 }
 
-.midi-debug__wkey:last-child {
+.piano__wkey:last-child {
   border-right: none;
 }
 
-.midi-debug__wkey.is-pressed {
+.piano__wkey.is-pressed {
   background: linear-gradient(#e4b871, #d9a45b);
 }
 
-.midi-debug__blacks {
+.piano__blacks {
   position: absolute;
   inset: 0;
 }
 
-.midi-debug__bkey {
+.piano__bkey {
   position: absolute;
   top: 0;
-  width: calc(100% / 52 * 0.6);
-  height: 62%;
+  width: var(--bkey-w);
+  /* 黑键高 = 键盘高 × 2/3；底角圆角 = 黑键宽 × 1/4（与宽度成比例，替代固定 3px） */
+  height: 66.6667%;
   background: linear-gradient(#2a2825, #141312);
-  border-radius: 0 0 3px 3px;
+  border-radius: 0 0 calc(var(--bkey-w) * 0.25) calc(var(--bkey-w) * 0.25);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
   transition: background var(--dur-fast) var(--ease-out);
 }
 
-.midi-debug__bkey.is-pressed {
+.piano__bkey.is-pressed {
   background: linear-gradient(#a8772e, #8a6126);
 }
 

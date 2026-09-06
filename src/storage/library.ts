@@ -1,4 +1,5 @@
 import { deleteFileRecord, getAllFileRecords, getFileRecord, putFileRecord } from './db'
+import { randomUUID } from './uuid'
 
 export interface LibraryItem {
   id: string
@@ -17,7 +18,7 @@ export class FileLibrary {
     for (const file of files) {
       const bytes = await file.arrayBuffer()
       const record = {
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         name: file.name,
         size: file.size,
         importedAt: Date.now(),

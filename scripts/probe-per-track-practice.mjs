@@ -128,7 +128,8 @@ const itemState = (i) =>
       disabled: el.disabled,
     }))
 
-/** 采样瀑布流音符条中部一个像素（载入后未播放：判定线在 0 秒，t=0.785 落在 0.5–0.9 音符条内） */
+/** 采样瀑布流音符条一个像素：在 pitch 列上扫描音符区取最亮像素（音符条恒为该列最亮，
+ *  排除底部 12px 判定光带），不依赖键盘高度/判定线的具体换算 */
 const sampleNote = (pitch) =>
   page.evaluate(
     ({ pitch }) => {
@@ -140,14 +141,17 @@ const sampleNote = (pitch) =>
       const MIN_PITCH = 21
       const PITCH_COUNT = 88
       const keyW = w / PITCH_COUNT
-      // 与视图一致的键盘高度换算（resize() 同款算法）
-      const keyboardH = Math.round(Math.max(44, Math.min(140, keyW * 6.3)))
+      // 与视图一致的键盘高度换算（resize() 同款算法：总宽度 × 0.122）
+      const keyboardH = Math.round(w * 0.122)
       const noteAreaH = h - keyboardH
-      const t = 0.785
-      const y = noteAreaH - t * 140
-      const x = (pitch - MIN_PITCH) * keyW + keyW * 0.5
-      const d = ctx.getImageData(Math.round(x * dpr), Math.round(y * dpr), 1, 1).data
-      return { r: d[0], g: d[1], b: d[2], x: Math.round(x), y: Math.round(y) }
+      const x = Math.round((pitch - MIN_PITCH) * keyW + keyW * 0.5)
+      let best = null
+      for (let y = 0; y < noteAreaH - 12; y++) {
+        const d = ctx.getImageData(Math.round(x * dpr), Math.round(y * dpr), 1, 1).data
+        const l = 0.2126 * d[0] + 0.7152 * d[1] + 0.0722 * d[2]
+        if (best === null || l > best.l) best = { l, r: d[0], g: d[1], b: d[2], y }
+      }
+      return { r: best.r, g: best.g, b: best.b, x, y: best.y }
     },
     { pitch },
   )

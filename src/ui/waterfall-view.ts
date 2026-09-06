@@ -1,27 +1,30 @@
 import type { Note } from '../core/model'
 import { el } from './dom'
+import {
+  BLACK_PCS,
+  KEYBOARD_H_RATIO,
+  MAX_PITCH,
+  MIN_PITCH,
+  buildPiano,
+  type PianoLit,
+  type PianoView,
+} from './piano-keyboard'
 import type { View } from './store'
-import { TRACK_COLORS, trackColor, type TrackColor } from './track-colors'
+import { TRACK_COLORS, trackColor } from './track-colors'
 
-const MIN_PITCH = 21 // A0
-const MAX_PITCH = 108 // C8
 const PITCH_COUNT = MAX_PITCH - MIN_PITCH + 1
-const BLACK_PCS = new Set([1, 3, 6, 8, 10])
-/** 键盘高度跟随键宽：真实白键宽长比约 1 : 6.3（23.6mm × 150mm），并设上下限 */
-const WHITE_KEY_ASPECT = 6.3
-const KEYBOARD_MIN_H = 44
-const KEYBOARD_MAX_H = 140
 const DEFAULT_PX_PER_SEC = 140
 /** 点亮键释放后的渐隐时长（ms） */
 const KEY_FADE_MS = 80
-/** 黑键几何（相对白键列宽）：左偏移、键宽、键长占键盘高比例 */
-const BLACK_KEY_INSET = 0.18
-const BLACK_KEY_WIDTH = 0.72
-const BLACK_KEY_HEIGHT = 0.62
+/** 练习反馈配色（设计文档 20260906-midi-keyboard-and-practice.md §4.2） */
+const HELD_RGB = [217, 164, 91] as const // 按住键琥珀 #d9a45b
+const WRONG_RGB = [224, 105, 94] as const // 按错键红 #e0695e
 /** 练习模式下非练习轨瀑布流的压暗系数（设计文档 20260906-midi-keyboard-and-practice.md §4.2）：
  *  亮度 0.6 / 不透明度 0.62——比正常暗淡一点、仍清晰可辨，突出正在练习的轨 */
 const PRACTICE_DIM_VF = 0.6
 const PRACTICE_DIM_ALPHA = 0.62
+
+type Rgb = readonly [number, number, number]
 
 export interface WaterfallViewCallbacks {
   onSeek(seconds: number): void
@@ -43,9 +46,24 @@ function rgba(c: readonly [number, number, number] | readonly number[], a: numbe
   return `rgba(${c[0]},${c[1]},${c[2]},${a})`
 }
 
+/** 按系数压暗 RGB 三元组（键盘点亮色用） */
+function shadeTuple(c: Rgb, f: number): Rgb {
+  return [Math.round(c[0] * f), Math.round(c[1] * f), Math.round(c[2] * f)]
+}
+
+/** c 以不透明度 t 叠在 over 之上（练习反馈叠于轨色点亮之上，与画布时代分层一致） */
+function overTuple(c: Rgb, over: Rgb, t: number): Rgb {
+  return [
+    Math.round(c[0] * t + over[0] * (1 - t)),
+    Math.round(c[1] * t + over[1] * (1 - t)),
+    Math.round(c[2] * t + over[2] * (1 - t)),
+  ]
+}
+
 /**
- * 钢琴瀑布流（自绘 Canvas 2D，设计文档 §6.4）：
- * 底部为 88 键钢琴键盘（判定线即键盘上沿，无中间判定线）；音符条自上而下坠落，
+ * 钢琴瀑布流（音符区自绘 Canvas 2D，设计文档 §6.4）：
+ * 底部为 88 键钢琴键盘（与「MIDI 键盘」调试页共用 DOM 组件；判定线即键盘上沿，
+ * 无中间判定线）；音符条自上而下坠落，
  * 落到琴键的瞬间即发声时刻（与音频调度共用同一时钟，天然对齐），发声期间琴键点亮。
  * 视觉（视觉风格指南 §6.4）：按轨五色循环（一轨一色，第 6 轨复用第 1 色）+ 力度→明度映射 + 音区参考线。
  * 交互：点击跳转、拖拽平移（联动进度条，松手后恢复跟随）、双击恢复跟随。
@@ -54,6 +72,7 @@ export class WaterfallView implements View {
   readonly el: HTMLElement
   private readonly canvas: HTMLCanvasElement
   private readonly ctx: CanvasRenderingContext2D
+  private readonly piano: PianoView
   private readonly cbs: WaterfallViewCallbacks
 
   private notes: Note[] = []
@@ -65,9 +84,8 @@ export class WaterfallView implements View {
   /** 画布顶边对应的时间（秒）；判定线时间 = viewTopSec - 音符区高度 / pxPerSecond */
   private viewTopSec = 0
   private dragStart: { y: number; viewTopSec: number; moved: boolean } | null = null
-  private keysOffscreen: HTMLCanvasElement | null = null
-  /** 键盘高度：随容器宽度按键宽比例换算（resize 时更新） */
-  private keyboardH = KEYBOARD_MIN_H
+  /** 键盘高度：= 总宽度 × 0.122（resize 时随宽度同步更新，不钳制） */
+  private keyboardH = 0
   private bgGradient: CanvasGradient | null = null
   /** 上一帧发声中的键：pitch → 轨号（渐隐时用于找回轨色） */
   private prevActive = new Map<number, number>()
@@ -85,7 +103,9 @@ export class WaterfallView implements View {
   constructor(cbs: WaterfallViewCallbacks) {
     this.cbs = cbs
     this.canvas = el('canvas', { class: 'waterfall__canvas' })
-    this.el = el('div', { class: 'waterfall' }, this.canvas)
+    // 底部键盘与「MIDI 键盘」调试页共用同一 DOM 组件（画布只负责音符区）
+    this.piano = buildPiano()
+    this.el = el('div', { class: 'waterfall' }, this.canvas, this.piano.el)
     const ctx = this.canvas.getContext('2d')
     if (ctx === null) throw new Error('canvas 2d context unavailable')
     this.ctx = ctx
@@ -194,15 +214,13 @@ export class WaterfallView implements View {
     const w = this.el.clientWidth
     const h = this.el.clientHeight
     if (w === 0 || h === 0) return
-    // 键宽随容器变化，键盘高度按真实白键宽长比换算（钳制上下限），保持琴键比例协调
-    const keyW = w / PITCH_COUNT
-    this.keyboardH = Math.round(
-      Math.max(KEYBOARD_MIN_H, Math.min(KEYBOARD_MAX_H, keyW * WHITE_KEY_ASPECT)),
-    )
+    // 键盘高度 = 总宽度 × 0.122（与调试页 aspect-ratio 同一比例）：宽度变化（拉伸/缩放）
+    // 时高度同步按比例改变；黑键高 = 键盘高 × 2/3 由共享 CSS 承担
+    this.keyboardH = Math.round(w * KEYBOARD_H_RATIO)
+    this.piano.el.style.height = `${this.keyboardH}px`
     this.canvas.width = Math.round(w * dpr)
     this.canvas.height = Math.round(h * dpr)
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    this.keysOffscreen = null
     // 背景微渐变缓存：自上而下 #121110 → #161514
     const g = this.ctx.createLinearGradient(0, 0, 0, h)
     g.addColorStop(0, '#121110')
@@ -216,7 +234,6 @@ export class WaterfallView implements View {
     if (w === 0 || h === 0) return
     const ctx = this.ctx
     const noteAreaH = h - this.keyboardH
-    const keyboardTop = noteAreaH
 
     // 背景（微渐变，替代纯色）
     if (this.bgGradient !== null) {
@@ -237,9 +254,8 @@ export class WaterfallView implements View {
     this.drawLaneGuides(w, noteAreaH)
     this.drawNotes(w, noteAreaH, yAt)
     this.drawJudgmentGlow(w, noteAreaH)
-    this.drawKeyboard(w, noteAreaH)
-    this.drawActiveKeys(w, keyboardTop)
-    this.drawKeyFeedback(w, keyboardTop)
+    // 底部键盘是共享 DOM 组件，这里只同步它的点亮状态
+    this.applyKeyLights()
 
     if (this.notes.length === 0) {
       ctx.fillStyle = '#807d76'
@@ -271,55 +287,73 @@ export class WaterfallView implements View {
     ctx.fillRect(0, noteAreaH - 10, w, 10)
   }
 
-  /** 底部 88 键键盘（离屏缓存）；象牙白键 / 乌木黑键材质 */
-  private drawKeyboard(w: number, noteAreaH: number): void {
-    const dpr = window.devicePixelRatio || 1
-    if (this.keysOffscreen === null) {
-      const off = document.createElement('canvas')
-      off.width = Math.round(w * dpr)
-      off.height = Math.round(this.keyboardH * dpr)
-      const octx = off.getContext('2d')
-      if (octx !== null) {
-        octx.setTransform(dpr, 0, 0, dpr, 0, 0)
-        const keyW = w / PITCH_COUNT
-        // 白键：象牙微渐变
-        const ivory = octx.createLinearGradient(0, 0, 0, this.keyboardH)
-        ivory.addColorStop(0, '#f4f1eb')
-        ivory.addColorStop(1, '#e3dfd7')
-        for (let i = 0; i < PITCH_COUNT; i++) {
-          const x = i * keyW
-          octx.fillStyle = ivory
-          octx.fillRect(x, 0, keyW, this.keyboardH)
-          octx.strokeStyle = 'rgba(0,0,0,0.25)'
-          octx.lineWidth = 0.5
-          octx.strokeRect(x + 0.5, 0.5, keyW - 1, this.keyboardH - 1)
-        }
-        // 白键键底阴影线
-        octx.fillStyle = 'rgba(0,0,0,0.16)'
-        octx.fillRect(0, this.keyboardH - 1, w, 1)
-        // 黑键（叠画在白键上）：乌木渐变 + 顶边高光
-        const ebony = octx.createLinearGradient(0, 0, 0, this.keyboardH * 0.62)
-        ebony.addColorStop(0, '#2a2825')
-        ebony.addColorStop(1, '#141312')
-        for (let i = 0; i < PITCH_COUNT; i++) {
-          const pc = (MIN_PITCH + i) % 12
-          if (!BLACK_PCS.has(pc)) continue
-          const x = i * keyW
-          const bx = x - keyW * BLACK_KEY_INSET
-          const bw = keyW * BLACK_KEY_WIDTH
-          const bh = this.keyboardH * BLACK_KEY_HEIGHT
-          octx.fillStyle = ebony
-          octx.fillRect(bx, 0, bw, bh)
-          octx.strokeStyle = 'rgba(0,0,0,0.6)'
-          octx.lineWidth = 0.5
-          octx.strokeRect(bx, 0, bw, bh)
-          octx.fillStyle = 'rgba(255,255,255,0.08)'
-          octx.fillRect(bx, 0, bw, 1)
-        }
-      }
-      this.keysOffscreen = off
+  /**
+   * 键盘点亮（共享 DOM 钢琴）：发声键按音符轨色点亮 + 同色光晕（同键多音符取最近
+   * onset），释放后 80ms 渐隐；练习模式下非练习轨点亮随瀑布流一起压暗；
+   * 练习反馈（按住键琥珀、按错键红 + 光晕）叠在轨色点亮之上（与画布时代分层一致）。
+   */
+  private applyKeyLights(): void {
+    // 当前发声中的键：pitch → 轨号（notes 按 start 排序，同键后写的覆盖 → 最近 onset 胜出）
+    const active = new Map<number, number>()
+    for (const n of this.notes) {
+      if (n.start > this.playhead) break
+      if (this.playhead < n.end) active.set(n.pitch, n.trackIndex)
     }
-    this.ctx.drawImage(this.keysOffscreen, 0, noteAreaH, w, this.keyboardH)
+    // 记录释放时刻（用于渐隐，连同轨号以便渐隐时沿用轨色）
+    const now = performance.now()
+    for (const [p, track] of this.prevActive) {
+      if (!active.has(p)) this.releasedAt.set(p, { track, at: now })
+    }
+    for (const p of active.keys()) this.releasedAt.delete(p)
+    this.prevActive = new Map(active)
+    for (const [p, v] of this.releasedAt) {
+      if (now - v.at > KEY_FADE_MS) this.releasedAt.delete(p)
+    }
+
+    const lit = new Map<number, PianoLit>()
+    const put = (pitch: number, color: Rgb, alpha: number, glow: number): void => {
+      if (pitch < MIN_PITCH || pitch > MAX_PITCH) return
+      lit.set(pitch, { color, alpha, glow })
+    }
+    const isDimmed = (track: number): boolean =>
+      this.practiceTracks !== null && !this.practiceTracks.has(track)
+
+    // 轨色点亮：非练习轨按亮度 0.55 / 光晕 0.3 压暗（与瀑布流音符条压暗一致）
+    for (const [p, track] of active) {
+      const top = TRACK_COLORS[track % TRACK_COLORS.length][0]
+      put(p, shadeTuple(top, isDimmed(track) ? 0.55 : 1), 1, isDimmed(track) ? 0.3 : 0.85)
+    }
+    for (const [p, v] of this.releasedAt) {
+      const top = TRACK_COLORS[v.track % TRACK_COLORS.length][0]
+      put(
+        p,
+        shadeTuple(top, isDimmed(v.track) ? 0.55 : 1),
+        1 - (now - v.at) / KEY_FADE_MS,
+        isDimmed(v.track) ? 0.3 : 0.85,
+      )
+    }
+
+    // 练习反馈叠在轨色点亮之上：按住键琥珀半透明（55%）、按错键红（92%）+ 光晕
+    const fb = this.keyFeedback
+    if (fb !== null) {
+      for (const p of fb.held) {
+        if (fb.wrong.has(p)) continue
+        const cur = lit.get(p)
+        if (cur === undefined) put(p, HELD_RGB, 0.55, 0)
+        else lit.set(p, { ...cur, color: overTuple(HELD_RGB, cur.color, 0.55) })
+      }
+      for (const p of fb.wrong) {
+        const cur = lit.get(p)
+        if (cur === undefined) put(p, WRONG_RGB, 0.92, 0.9)
+        else
+          lit.set(p, {
+            ...cur,
+            color: overTuple(WRONG_RGB, cur.color, 0.92),
+            glow: Math.max(cur.glow ?? 0, 0.9),
+          })
+      }
+    }
+    this.piano.setLit(lit)
   }
 
   /** 音符条：按轨五色循环（一轨一色），力度调制明度与透明度，顶部 1px 高光 */
@@ -382,115 +416,6 @@ export class WaterfallView implements View {
       }
       ctx.globalAlpha = 1
     }
-  }
-
-  /** 发声中的琴键点亮（颜色跟随音符轨色，同键多音符取最近 onset；释放后 80ms 渐隐；
-   *  练习模式下非练习轨点亮随瀑布流一起压暗） */
-  private drawActiveKeys(w: number, keyboardTop: number): void {
-    const ctx = this.ctx
-    const keyW = w / PITCH_COUNT
-    // 当前发声中的键：pitch → 轨号（notes 按 start 排序，同键后写的覆盖 → 最近 onset 胜出）
-    const active = new Map<number, number>()
-    for (const n of this.notes) {
-      if (n.start > this.playhead) break
-      if (this.playhead < n.end) active.set(n.pitch, n.trackIndex)
-    }
-    // 记录释放时刻（用于渐隐，连同轨号以便渐隐时沿用轨色）
-    const now = performance.now()
-    for (const [p, track] of this.prevActive) {
-      if (!active.has(p)) this.releasedAt.set(p, { track, at: now })
-    }
-    for (const p of active.keys()) this.releasedAt.delete(p)
-    this.prevActive = new Map(active)
-    for (const [p, v] of this.releasedAt) {
-      if (now - v.at > KEY_FADE_MS) this.releasedAt.delete(p)
-    }
-
-    const drawKey = (pitch: number, alpha: number): void => {
-      if (pitch < MIN_PITCH || pitch > MAX_PITCH) return
-      const col = pitch - MIN_PITCH
-      const black = BLACK_PCS.has(pitch % 12)
-      ctx.globalAlpha = alpha
-      if (black) {
-        // 与离屏键盘黑键几何一致，完整覆盖
-        ctx.fillRect(
-          col * keyW - keyW * BLACK_KEY_INSET,
-          keyboardTop,
-          keyW * BLACK_KEY_WIDTH,
-          this.keyboardH * BLACK_KEY_HEIGHT,
-        )
-      } else {
-        // 完整覆盖白键（含描边），不留缝隙
-        ctx.fillRect(col * keyW, keyboardTop, keyW, this.keyboardH)
-      }
-      ctx.globalAlpha = 1
-    }
-
-    // 按轨色 × 是否压暗分批绘制（批次数 ≤ 色板大小 5 × 2，每批一次 fillStyle/shadow 设置）
-    const isDimmed = (track: number): boolean =>
-      this.practiceTracks !== null && !this.practiceTracks.has(track)
-    const byColor = new Map<number, [number, number][]>()
-    const addEntry = (colorIndex: number, dimmed: boolean, entry: [number, number]): void => {
-      const key = colorIndex * 2 + (dimmed ? 1 : 0)
-      let list = byColor.get(key)
-      if (list === undefined) {
-        list = []
-        byColor.set(key, list)
-      }
-      list.push(entry)
-    }
-    for (const [p, track] of active) addEntry(track % TRACK_COLORS.length, isDimmed(track), [p, 1])
-    for (const [p, v] of this.releasedAt) {
-      const alpha = 1 - (now - v.at) / KEY_FADE_MS
-      addEntry(v.track % TRACK_COLORS.length, isDimmed(v.track), [p, alpha])
-    }
-    const paint = (entries: [number, number][], color: TrackColor, dimmed: boolean): void => {
-      ctx.shadowColor = rgba(color[0], dimmed ? 0.3 : 0.85)
-      ctx.shadowBlur = dimmed ? 6 : 10
-      ctx.fillStyle = shade(color[0], dimmed ? 0.55 : 1)
-      for (const [p, alpha] of entries) drawKey(p, alpha)
-      ctx.shadowBlur = 0
-    }
-    for (const [key, entries] of byColor) {
-      paint(entries, TRACK_COLORS[key >> 1], (key & 1) === 1)
-    }
-  }
-
-  /** 练习模式键盘反馈：按住键琥珀点亮、按错键红色 + 光晕（画在轨色点亮之上） */
-  private drawKeyFeedback(w: number, keyboardTop: number): void {
-    const fb = this.keyFeedback
-    if (fb === null) return
-    const ctx = this.ctx
-    const keyW = w / PITCH_COUNT
-    const fillKey = (pitch: number): void => {
-      if (pitch < MIN_PITCH || pitch > MAX_PITCH) return
-      const col = pitch - MIN_PITCH
-      const black = BLACK_PCS.has(pitch % 12)
-      if (black) {
-        ctx.fillRect(
-          col * keyW - keyW * BLACK_KEY_INSET,
-          keyboardTop,
-          keyW * BLACK_KEY_WIDTH,
-          this.keyboardH * BLACK_KEY_HEIGHT,
-        )
-      } else {
-        ctx.fillRect(col * keyW, keyboardTop, keyW, this.keyboardH)
-      }
-    }
-    // 按住键（不含按错键）：琥珀半透明点亮
-    ctx.globalAlpha = 0.55
-    ctx.fillStyle = '#d9a45b'
-    for (const p of fb.held) {
-      if (!fb.wrong.has(p)) fillKey(p)
-    }
-    // 按错键：语义危险红 + 同色光晕，最上层
-    ctx.shadowColor = 'rgba(224,105,94,0.9)'
-    ctx.shadowBlur = 12
-    ctx.globalAlpha = 0.92
-    ctx.fillStyle = '#e0695e'
-    for (const p of fb.wrong) fillKey(p)
-    ctx.shadowBlur = 0
-    ctx.globalAlpha = 1
   }
 
   private roundRect(x: number, y: number, w: number, h: number, r: number): void {

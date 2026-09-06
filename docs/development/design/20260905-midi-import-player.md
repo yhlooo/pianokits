@@ -192,7 +192,7 @@ interface NotatedEvent {
 ### 5.3 IndexedDB 结构（storage/db.ts）
 
 - 数据库 `pianokits`，版本 1；
-- 对象仓库 `files`（keyPath `id`，uuid）：`{ id, name, size, importedAt, bytes: ArrayBuffer }`；
+- 对象仓库 `files`（keyPath `id`，uuid；id 经 `storage/uuid.ts` 的 `randomUUID()` 生成——安全上下文用原生 `crypto.randomUUID`，非安全上下文用 `crypto.getRandomValues` 构造 v4 兜底，见研究文档 [20260906-crypto-randomuuid-secure-context.md](../research/20260906-crypto-randomuuid-secure-context.md)）：`{ id, name, size, importedAt, bytes: ArrayBuffer }`；
 - 对象仓库 `settings`（keyPath `key`，M1 可选）：音量、瀑布流缩放、视图布局等。
 
 **读取**：点击条目直接读 `bytes` 快照，无任何权限流程。快照语义是方案 B 的已知取舍：原文件在磁盘上的后续修改不影响列表内容，用户可点"重新导入"更新。导入后顺带调 `navigator.storage.persist()` 降低驱逐风险（Safari 有 7 天无交互主动驱逐）。

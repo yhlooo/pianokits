@@ -143,11 +143,13 @@ try {
     problems.push(`外壳结构异常: ${JSON.stringify(shellStats)}`)
   }
 
-  // 1. 五线谱 SVG 内容量（音符/谱表元素）
+  // 1. 五线谱 SVG 内容量（音符/谱表元素；含 text：本冒烟曲目 8 个音符经 VexFlow
+  //    渲染约 55 个 path/rect/text，阈值 50 兜底）
   const svgStats = await page.evaluate(() => {
     const svgs = document.querySelectorAll('.score__system svg')
     let paths = 0
-    for (const svg of svgs) paths += svg.querySelectorAll('path, rect, polygon, ellipse').length
+    for (const svg of svgs)
+      paths += svg.querySelectorAll('path, rect, polygon, ellipse, text').length
     return { systems: svgs.length, elements: paths }
   })
   console.log('SVG 统计:', JSON.stringify(svgStats))
@@ -155,8 +157,8 @@ try {
     problems.push(`五线谱 SVG 元素过少: ${JSON.stringify(svgStats)}`)
   }
 
-  // 2. 瀑布流画布：底部键盘条已绘制（判定线在底部），且音符区有下落的音符条
-  //    （回归守卫：时间→纵坐标映射曾反转导致音符条全部不可见，而键盘始终在画）
+  // 2. 瀑布流画布：音符区有下落的音符条（判定线在底部键盘上沿）
+  //    （回归守卫：时间→纵坐标映射曾反转导致音符条全部不可见）
   const canvasStats = await page.evaluate(() => {
     const canvas = document.querySelector('.waterfall__canvas')
     const ctx = canvas.getContext('2d')
@@ -164,7 +166,6 @@ try {
     const h = canvas.height
     const w = canvas.width
     let nonBg = 0
-    let keyboardSamples = 0
     let noteAreaSamples = 0
     for (let y = 0; y < h; y += 4) {
       for (let x = 0; x < w; x += 4) {
@@ -172,18 +173,28 @@ try {
         const isBg = data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0
         if (!isBg) {
           nonBg++
-          if (y > h - 96) keyboardSamples++
-          else noteAreaSamples++
+          if (y < h - 96) noteAreaSamples++
         }
       }
     }
-    return { w, h, nonBgSamples: nonBg, keyboardSamples, noteAreaSamples }
+    return { w, h, nonBgSamples: nonBg, noteAreaSamples }
   })
   console.log('瀑布流画布:', JSON.stringify(canvasStats))
   if (canvasStats.nonBgSamples < 100) problems.push('瀑布流画布几乎空白')
-  if (canvasStats.keyboardSamples < 50)
-    problems.push('瀑布流底部键盘未绘制（判定线应在底部键盘处）')
   if (canvasStats.noteAreaSamples < 50) problems.push('瀑布流音符区无内容（音符条未绘制）')
+
+  // 2b. 底部钢琴键盘：与「MIDI 键盘」调试页共用的 DOM 组件（52 白键 + 36 黑键）
+  const pianoStats = await page.evaluate(() => {
+    const piano = document.querySelector('.waterfall .piano')
+    if (piano === null) return null
+    return {
+      whites: piano.querySelectorAll('.piano__wkey').length,
+      blacks: piano.querySelectorAll('.piano__bkey').length,
+    }
+  })
+  console.log('瀑布流键盘:', JSON.stringify(pianoStats))
+  if (pianoStats === null || pianoStats.whites !== 52 || pianoStats.blacks !== 36)
+    problems.push('瀑布流底部 DOM 键盘缺失或键数不对（应为 52 白 + 36 黑）')
 
   // 3. 采样全部来自本地镜像，且升号（♯）映射生效
   const sharpRequests = sampleRequests.filter((u) => u.includes('%E2%99%AF'))

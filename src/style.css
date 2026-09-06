@@ -126,9 +126,13 @@ button {
     border-color var(--dur-fast) var(--ease-out);
 }
 
-button:hover {
-  color: var(--text-0);
-  border-color: var(--accent);
+/* 仅桌面端（有 hover）应用 hover 提亮：触控端无 hover，若保留 :hover 样式，
+   首次点击会被浏览器当作 hover 消费，需再点一次才触发 click（sticky hover） */
+@media (hover: hover) and (pointer: fine) {
+  button:hover {
+    color: var(--text-0);
+    border-color: var(--accent);
+  }
 }
 
 button:active {
@@ -153,12 +157,18 @@ input[type='range']:focus-visible {
   border-color: transparent;
   border-radius: var(--r-md);
   color: var(--text-1);
+  /* 触控端：禁用手势缩放/双击缩放对单击的干扰，确保单击立即触发 */
+  touch-action: manipulation;
 }
 
-.icon-btn:hover {
-  background: var(--bg-2);
-  color: var(--text-0);
-  border-color: transparent;
+/* 仅桌面端（有 hover）才显示 hover 底：触控端无 hover，若保留 :hover 样式，
+   首次点击会被浏览器当作 hover 消费，需再点一次才能触发（同 .library__item） */
+@media (hover: hover) and (pointer: fine) {
+  .icon-btn:hover {
+    background: var(--bg-2);
+    color: var(--text-0);
+    border-color: transparent;
+  }
 }
 
 .icon-btn svg {
@@ -353,6 +363,15 @@ input[type='range']::-moz-range-thumb {
   flex: 1;
 }
 
+/* 右下工具按钮组（音量 + 瀑布/乐谱 + MIDI + 练习）：整体左移一个图标位置
+   （margin-right 32px，避免练习按钮贴太靠屏幕角落），图标间距约 0.5 个图标（16px） */
+.transport__tools {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-right: 32px;
+}
+
 /* 侧栏展开按钮：控制行最左、位置始终预留；展开态隐藏但保留占位，
    与播放按钮之间多留 12px 间隔以示与播放功能无关 */
 .transport__sidebar-toggle {
@@ -463,8 +482,10 @@ input[type='range']::-moz-range-thumb {
   color: var(--text-2);
 }
 
-.transport__volume-btn:hover {
-  color: var(--text-0);
+@media (hover: hover) and (pointer: fine) {
+  .transport__volume-btn:hover {
+    color: var(--text-0);
+  }
 }
 
 .transport__volume-popup {
@@ -536,28 +557,32 @@ input[type='range']::-moz-range-thumb {
   color: var(--text-2);
 }
 
-.transport__view:hover {
-  color: var(--text-1);
-}
-
 .transport__view.is-on {
   /* 开启：全亮度 */
   color: var(--text-0);
 }
 
-.transport__view.is-on:hover {
-  color: var(--text-0);
+/* 仅桌面端（有 hover）应用 hover 提亮；触控端不应用，避免首次点击被当作 hover 消费 */
+@media (hover: hover) and (pointer: fine) {
+  .transport__view:hover {
+    color: var(--text-1);
+  }
+
+  .transport__view.is-on:hover {
+    color: var(--text-0);
+  }
 }
 
 /* MIDI 连接 / 练习模式按钮（播放坞右下角，设计文档 20260906-midi-keyboard-and-practice.md §4.1） */
 .transport__midi {
-  margin-left: 8px;
   /* 未连接：暗色（比常规图标按钮更弱一档） */
   color: var(--text-2);
 }
 
-.transport__midi:hover {
-  color: var(--text-0);
+@media (hover: hover) and (pointer: fine) {
+  .transport__midi:hover {
+    color: var(--text-0);
+  }
 }
 
 /* 连接尝试中：旋转等待图标 */
@@ -579,10 +604,12 @@ input[type='range']::-moz-range-thumb {
   border-color: transparent;
 }
 
-.icon-btn.is-connected:hover,
-.icon-btn.is-active:hover {
-  background: var(--accent-soft);
-  color: var(--accent-hover);
+@media (hover: hover) and (pointer: fine) {
+  .icon-btn.is-connected:hover,
+  .icon-btn.is-active:hover {
+    background: var(--accent-soft);
+    color: var(--accent-hover);
+  }
 }
 
 /* 禁用（练习模式未连接 MIDI 键盘时置灰） */
@@ -671,10 +698,13 @@ input[type='range']::-moz-range-thumb {
   cursor: pointer;
 }
 
-.transport__practice-item:hover {
-  background: var(--bg-2);
-  color: var(--text-0);
-  border-color: transparent;
+/* 仅桌面端（有 hover）显示 hover 底：触控端无 hover，避免菜单行首次点击被当作 hover 消费 */
+@media (hover: hover) and (pointer: fine) {
+  .transport__practice-item:hover {
+    background: var(--bg-2);
+    color: var(--text-0);
+    border-color: transparent;
+  }
 }
 
 /* 颜色图例：对应瀑布流该轨渐变色的色块 */

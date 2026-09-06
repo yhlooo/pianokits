@@ -7,7 +7,7 @@ class FakeOutput {
   sent: Array<{ data: number[]; ts: number | undefined }> = []
   clearCount = 0
 
-  send(data: Uint8Array, ts?: number): void {
+  send(data: number[], ts?: number): void {
     this.sent.push({ data: [...data], ts })
   }
 
@@ -28,6 +28,9 @@ describe('MidiOutputSink 播放镜像', () => {
       { data: [0x90, 60, 100], ts: 10500 },
       { data: [0x80, 60, 0], ts: 10900 },
     ])
+    // 必须是普通 number[]（不是 Uint8Array）：shim 的 send() 对 Uint8Array 会经 JSON
+    // 序列化成对象 {"0":…}，原生侧解析崩溃。toEqual 不区分两者，故显式断言。
+    expect(Array.isArray(out.sent[0].data)).toBe(true)
     vi.restoreAllMocks()
     sink.dispose()
   })

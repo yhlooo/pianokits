@@ -34,8 +34,12 @@ export class MidiOutputSink {
   scheduleNote(ev: ScheduledNote): void {
     if (this.outputs.length === 0) return
     const velocity = Math.max(1, Math.min(127, Math.round(ev.velocity)))
-    const on = Uint8Array.from([0x90, ev.pitch, velocity])
-    const off = Uint8Array.from([0x80, ev.pitch, 0])
+    // 一律用普通 number[]（而非 Uint8Array）：原生 Chrome 两者皆可，但 Web MIDI Browser
+    // 等 shim 的 send() 里 data.map(Number) 对 Uint8Array 仍返回 Uint8Array，经
+    // window.webkit.messageHandlers 的 JSON 序列化后变成 {"0":…}（对象）而非数组，
+    // 原生侧按字节数组解析时崩溃（见研究文档 20260906-web-midi-ipad.md §7.1）。
+    const on = [0x90, ev.pitch, velocity]
+    const off = [0x80, ev.pitch, 0]
     const ts = this.toTimestamp(ev.time)
     for (const out of this.outputs) {
       out.send(on, ts)
@@ -48,10 +52,10 @@ export class MidiOutputSink {
     for (const out of this.outputs) {
       if (typeof out.clear === 'function') out.clear()
       for (let ch = 0; ch < ALL_CHANNELS; ch++) {
-        out.send(Uint8Array.from([0xb0 | ch, 123, 0]))
+        out.send([0xb0 | ch, 123, 0])
       }
       for (let ch = 0; ch < ALL_CHANNELS; ch++) {
-        out.send(Uint8Array.from([0xb0 | ch, 120, 0]))
+        out.send([0xb0 | ch, 120, 0])
       }
     }
   }

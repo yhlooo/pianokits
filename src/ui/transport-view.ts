@@ -265,11 +265,15 @@ export class TransportView implements View {
         this.stopBtn,
         this.timeEl,
         el('div', { class: 'transport__spacer' }),
-        this.volumeWrap,
-        this.waterfallBtn,
-        this.scoreBtn,
-        this.midiBtn,
-        this.practiceWrap,
+        el(
+          'div',
+          { class: 'transport__tools' },
+          this.volumeWrap,
+          this.waterfallBtn,
+          this.scoreBtn,
+          this.midiBtn,
+          this.practiceWrap,
+        ),
       ),
     )
   }

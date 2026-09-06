@@ -77,7 +77,6 @@ export class WaterfallView implements View {
   private readonly cbs: WaterfallViewCallbacks
 
   private notes: Note[] = []
-  private noteEnds: number[] = []
   private playhead = 0
   private playing = false
   private follow = true
@@ -163,7 +162,6 @@ export class WaterfallView implements View {
 
   setNotes(notes: Note[]): void {
     this.notes = [...notes].sort((a, b) => a.start - b.start)
-    this.noteEnds = this.notes.map((n) => n.end)
     // 初始视窗：判定线（键盘上沿）对齐 0 秒，未来音符自键盘向上排布
     this.viewTopSec = this.noteAreaHeight() / this.pxPerSecond
     this.playhead = 0
@@ -175,7 +173,6 @@ export class WaterfallView implements View {
 
   clear(): void {
     this.notes = []
-    this.noteEnds = []
     this.playhead = 0
     this.viewTopSec = 0
     this.prevActive.clear()
@@ -356,20 +353,10 @@ export class WaterfallView implements View {
    */
   private drawNotes(w: number, noteAreaH: number, yAt: (t: number) => number): void {
     if (this.notes.length === 0) return
-    // 可见窗口：[判定线时间, 画布顶边时间] = [viewTopSec - noteAreaH/pps, viewTopSec]
-    const tKey = this.viewTopSec - noteAreaH / this.pxPerSecond
-
-    // 二分：第一个 end > tKey 的音符
-    let lo = 0
-    let hi = this.noteEnds.length
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1
-      if (this.noteEnds[mid] <= tKey) lo = mid + 1
-      else hi = mid
-    }
-
+    // notes 按 start 排序，但 end 并不单调（长音符可被后面先起的短音符“夹住”），
+    // 不能对 end 二分；从 0 逐条扫描，已结束的音符由下方 topEdge >= noteAreaH 的裁剪跳过。
     const ctx = this.ctx
-    for (let i = lo; i < this.notes.length; i++) {
+    for (let i = 0; i < this.notes.length; i++) {
       const n = this.notes[i]
       if (n.start > this.viewTopSec + 0.5) break
       if (n.pitch < MIN_PITCH || n.pitch > MAX_PITCH) continue

@@ -72,18 +72,17 @@ export class Transport {
   private volume = 1
   /**
    * 分轨练习门控集合（轨道 index，设计文档 20260906-midi-keyboard-and-practice.md §3.3）：
-   * 空集 = 关闭练习；集合内的轨到达判定线时等待琴键放行，集合外的轨照常排期播放。
+   * 空集 = 关闭练习；集合内的轨到达判定线时等待琴键放行（冻结整个播放），集合外的轨
+   * 与门控和弦同 onset 时随和弦一起等待/放行，其余照常排期播放。
    */
   private gatedTracks = new Set<number>()
-  /** 全部音符都属于门控轨：等待时冻结播放位置（音符条底贴在判定线上）；否则位置照常推进 */
-  private allNotesGated = false
   /** 练习模式等待中的和弦（仅含门控轨音符）；null = 未等待 */
   private waitingChord: PracticeChord | null = null
-  /** 当前等待的和弦是否冻结了播放位置（冻结时放行才回拨 offset 从和弦起点继续） */
+  /** 当前等待的和弦是否冻结视觉位置（position 恒停在和弦起点，音符条底贴判定线） */
   private waitingFrozen = false
   /** 门控流指针：第一个尚未处理的门控轨音符（和弦收集与放行推进） */
   private nextGated = 0
-  /** 自由流指针：第一个尚未排期的非门控轨音符（照常按 lookahead 窗口排期） */
+  /** 自由流指针：第一个尚未排期的非门控轨音符（只排期到下一个门控和弦之前） */
   private nextFree = 0
   private practiceChordCb: PracticeChordListener | null = null
   /** MIDI 输出镜像（可选）：与引擎同步排期的外部音源（无输出端口时为 null） */
@@ -102,11 +101,11 @@ export class Transport {
     return this._duration
   }
 
-  /** 实时位置（秒）：播放中按音频时钟计算，暂停时取暂停位置；全轨门控练习等待时冻结在和弦起点 */
+  /** 实时位置（秒）：播放中按音频时钟计算，暂停时取暂停位置；练习等待时冻结在和弦起点 */
   get position(): number {
     if (this._state === 'playing') {
       // 冻结中的和弦：位置恒为和弦起点（不随时钟推进，也不受时长钳制）；
-      // 部分门控等待：位置照常推进（非门控轨持续发声）
+      // 等待期间整个播放冻结，放行后从和弦起点继续推进
       if (this.waitingChord !== null && this.waitingFrozen) return this.waitingChord.start
       return Math.min(this._duration, Math.max(0, this.host.now() - this.offset))
     }
@@ -157,7 +156,6 @@ export class Transport {
     this.nextGated = 0
     this.nextFree = 0
     this.consumed = new Uint8Array(this.notes.length)
-    this.allNotesGated = this.notes.every((n) => this.gatedTracks.has(n.trackIndex))
     this.setState('ready')
   }
 
@@ -243,7 +241,6 @@ export class Transport {
     const next = new Set(tracks)
     if (this.sameSet(this.gatedTracks, next)) return
     this.gatedTracks = next
-    this.allNotesGated = this.notes.every((n) => next.has(n.trackIndex))
     if (next.size === 0) {
       // 退出：取消等待，正常流从第一个未排期音符继续（已排期的自由轨音符不重复发声）
       this.cancelWaiting()
@@ -256,7 +253,7 @@ export class Transport {
   }
 
   /**
-   * 订阅练习等待事件：播放位置到达门控和弦起点时回调该和弦（全轨门控时位置冻结在起点）；
+   * 订阅练习等待事件：播放位置到达门控和弦起点时回调该和弦（位置冻结在起点）；
    * null 表示等待被取消（seek/停止/暂停/调整门控集合/退出练习等）。
    */
   onPracticeChord(cb: PracticeChordListener): () => void {
@@ -266,7 +263,10 @@ export class Transport {
     }
   }
 
-  /** 放行当前等待的和弦：立即以当前时间发声（原始时值/力度）；冻结等待时位置从和弦起点继续推进 */
+  /**
+   * 放行当前等待的和弦：立即以当前时间发声（原始时值/力度），并回拨 offset 从和弦起点
+   * 继续推进。同 onset 的非门控音符由自由流在放行后的下一 tick 以同一时刻排期，随和弦一起发声。
+   */
   releaseChord(): void {
     if (this.gatedTracks.size === 0 || this.waitingChord === null) return
     const chord = this.waitingChord
@@ -290,7 +290,9 @@ export class Transport {
     // 门控流越过整组（组内非门控音符由自由流独立排期，无需处理）
     this.nextGated = mark
     this.waitingChord = null
-    if (this.waitingFrozen) this.offset = now - chord.start
+    // 回拨 offset 从和弦起点继续：同 onset 的非门控音符由自由流在下一 tick 排期，
+    // 发声时刻 = now（与门控和弦一起播放）；后续音符相对放行时刻继续推进
+    this.offset = now - chord.start
     this.waitingFrozen = false
   }
 
@@ -340,12 +342,18 @@ export class Transport {
     }
   }
 
-  /** 分轨练习调度：非门控轨照常按 lookahead 窗口排期；门控轨到达和弦起点时收集等待 */
+  /**
+   * 分轨练习调度：非门控轨按 lookahead 窗口排期（不越过下一个门控和弦）；门控轨到达和弦
+   * 起点时收集等待。等待期间整体冻结：非门控轨也不再排期（同 onset 的非门控音符随和弦
+   * 一起等待，放行后随和弦一起发声）。
+   */
   private tickGated(): void {
     const now = this.host.now()
     const pos = now - this.offset
-    this.scheduleFree(pos)
-    if (this.waitingChord === null) this.tryCollectChord(now, pos)
+    if (this.waitingChord === null) {
+      this.scheduleFree(pos)
+      this.tryCollectChord(now, pos)
+    }
     if (pos >= this._duration && this.waitingChord === null) {
       this.pausedAt = this._duration
       this.stopTicker()
@@ -353,12 +361,18 @@ export class Transport {
     }
   }
 
-  /** 自由流：非门控轨音符按正常 lookahead 窗口排期（不受门控等待影响） */
+  /**
+   * 自由流：非门控轨音符按 lookahead 窗口排期，但**不越过下一个门控和弦起点**——
+   * 与门控和弦同 onset 的非门控音符不由自由流提前排期，而是在放行后的 tick 以放行时刻
+   * 排期（与门控和弦一起发声）。
+   */
   private scheduleFree(pos: number): void {
     const notes = this.notes
     const from = pos + LATENCY_SEC
     const until = pos + LOOKAHEAD_SEC
-    while (this.nextFree < notes.length && notes[this.nextFree].start < until) {
+    const gatedStart = this.nextGatedStart()
+    const limit = gatedStart === null ? until : Math.min(until, gatedStart)
+    while (this.nextFree < notes.length && notes[this.nextFree].start < limit) {
       const i = this.nextFree
       const n = notes[i]
       this.nextFree = i + 1
@@ -372,6 +386,13 @@ export class Transport {
       })
       this.consumed[i] = 1
     }
+  }
+
+  /** 下一个门控轨音符的起点（从门控指针出发跳过非门控音符）；无则 null */
+  private nextGatedStart(): number | null {
+    let i = this.nextGated
+    while (i < this.notes.length && !this.gatedTracks.has(this.notes[i].trackIndex)) i++
+    return i < this.notes.length ? this.notes[i].start : null
   }
 
   /** 门控流：位置到达下一门控和弦起点时收集整组（仅门控轨音符）并回调等待 */
@@ -394,11 +415,11 @@ export class Transport {
       if (this.gatedTracks.has(notes[i].trackIndex)) group.push(notes[i])
       i++
     }
-    // 全轨门控：冻结位置（音符条底贴在判定线上）；部分门控：位置照常推进
-    const frozen = this.allNotesGated
+    // 冻结在判定线（position 停在和弦起点，音符条底贴判定线）；同时回拨 offset，放行后
+    // 从和弦起点继续（同 onset 的非门控音符由自由流在放行后的 tick 以放行时刻补发）
     this.waitingChord = { start: first.start, notes: group }
-    this.waitingFrozen = frozen
-    if (frozen) this.offset = now - first.start
+    this.waitingFrozen = true
+    this.offset = now - first.start
     this.practiceChordCb?.(this.waitingChord)
   }
 
@@ -440,13 +461,17 @@ export class Transport {
     else this.setNotePointer(position)
   }
 
-  /** end 指针：二分第一个 end > position 的音符（正常调度，不重排已开始的音符）；重定位时清空已排期标记 */
+  /**
+   * start 指针：二分第一个 start >= position 的音符（notes 按 start 排序，end 并不单调，
+   * 不能对 end 二分）。跳过已开始的音符（不重排），与练习模式「第一个 start ≥ 当前位置」一致；
+   * 重定位时清空已排期标记。
+   */
   private setNotePointer(position: number): void {
     let lo = 0
     let hi = this.notes.length
     while (lo < hi) {
       const mid = (lo + hi) >> 1
-      if (this.notes[mid].end <= position) lo = mid + 1
+      if (this.notes[mid].start < position) lo = mid + 1
       else hi = mid
     }
     this.nextIndex = lo

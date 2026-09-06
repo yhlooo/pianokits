@@ -110,10 +110,10 @@ iPad 安装 beacio（iOSWebBLE）Safari 扩展后，网页可用 Web Bluetooth�
 核心接缝不变：`MidiConnection` 与 `MidiOutputSink` 之上的所有代码（practice、transport、
 UI）无需感知底层接入方式。
 
-## 7. Web MIDI Browser 卡在“连接中”的成因（补充）
+## 7. Web MIDI Browser 兼容性缺陷与修复（补充）
 
 结合用户反馈、官方示例页 `startpage105.html` 与桥接源码（WebMIDIAPIShimForiOS 的
-`WebMIDIAPIPolyfill.js`）实测确认，方案 A（Web MIDI Browser）有三个具体表现：
+`WebMIDIAPIPolyfill.js`）实测确认，方案 A（Web MIDI Browser）有以下具体表现：
 
 1. **端口表不可迭代（连接卡住的根因，已修复）**：shim 的 `MIDIAccess.inputs/outputs` 不是原生
    `MIDIInputMap/MIDIOutputMap`，而是只有 `size`/`forEach`/`get`/`has` 的伪 Map，其 `values()`
@@ -122,11 +122,17 @@ UI）无需感知底层接入方式。
    `sync()` 中断、页面永远停在“连接中…”。已改为 `forEach` 遍历（`src/core/midi/connection.ts`、
    `src/debug/midi-keyboard.ts`），对原生与 shim 均兼容；并在 `connection.test.ts` 增加
    「shim 端口表（无 Symbol.iterator）也能连上」回归用例。
-2. **`requestMIDIAccess` 返回非原生 Promise**：shim 的 `requestMIDIAccess` 返回自定义 Promise
+2. **`MIDIOutput.send()` 只接受普通 `number[]`（断开闪退的根因，已修复）**：shim 的 `send()`
+   内 `data.map(Number)` 对 `Uint8Array` 仍返回 `Uint8Array`，经 `window.webkit.messageHandlers`
+   的 JSON 序列化后变成对象 `{"0":…}` 而非字节数组，原生侧按数组解析时崩溃（用户反馈的
+   “连接后点击断开闪退”即此路径：断开时 `allNotesOff()` 逐端口 `clear()` + 32 条 CC 消息）。
+   官方示例页 `send([0x90, 60, 0x40], …)` 传的是普通数组。已把 `src/core/midi/output.ts` 的
+   `scheduleNote`/`allNotesOff` 全部改为普通 `number[]`（原生 Chrome 两者皆可，不损失兼容）。
+3. **`requestMIDIAccess` 返回非原生 Promise**：shim 的 `requestMIDIAccess` 返回自定义 Promise
    （只实现 `then`），要等 App 原生侧（Core MIDI 桥）经 `_callback_onReady` 回调才 resolve。
    若 App 原生桥不返回（键盘未连接 / 未被 App 识别、或 App 异常），请求仍会长期挂起——这一层
    在 App 内部，网页侧以超时提示兜底。
-3. **Permissions API 无法查询 midi 权限**：shim 不注入 `navigator.permissions`，WebKit 的
+4. **Permissions API 无法查询 midi 权限**：shim 不注入 `navigator.permissions`，WebKit 的
    Permissions API 对 `query({ name: 'midi' })` 抛 `NotSupportedError`（个别实现抛 `TypeError`）。
    这是平台限制，与连接是否成功无关，诊断面板显示为中性信息而非错误。
 

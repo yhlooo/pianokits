@@ -101,6 +101,9 @@ export const refreshIcon = (): SVGSVGElement =>
 /** 关闭/删除（描边：×） */
 export const xIcon = (): SVGSVGElement => svg(['M5.5 5.5l9 9M14.5 5.5l-9 9'])
 
+/** 侧栏切换（类似 FontAwesome sidebar：面板轮廓 + 左侧窄栏分隔线）；折叠/展开共用同一图标 */
+export const sidebarIcon = (): SVGSVGElement => svg(['M2.5 3.5h15v13h-15z', 'M7 3.5v13'])
+
 /** 空状态装饰：一排琴键剪影（64×24 视窗，currentColor 平涂） */
 export function keysArtIcon(): SVGSVGElement {
   const el = document.createElementNS(SVG_NS, 'svg')

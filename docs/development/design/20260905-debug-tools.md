@@ -1,7 +1,7 @@
 # 设计：调试工具集与 MIDI 键盘调试工具
 
 - 日期：2026-09-05
-- 状态：**正式生效（与实现一致）**。2026-09-05 初版实现（浮动面板形态）；同日按“每个调试工具一个页面，跟正常工具一样”调整后与实现一致；同日引入工具路由（见 `20260905-tool-routing.md`），调试工具获得独立 URI `/midi-keyboard`（与常规工具在 URI 上不作区分）。
+- 状态：**正式生效（与实现一致）**。2026-09-05 初版实现（浮动面板形态）；同日按“每个调试工具一个页面，跟正常工具一样”调整后与实现一致；同日引入工具路由（见 `20260905-tool-routing.md`），调试工具获得独立 URI `/midi-keyboard`（与常规工具在 URI 上不作区分）；同日移除 `?debug=1` 调试开关，调试工具改为始终加载并显示。
 - 关联调查结论：`docs/development/research/20260905-web-midi-input.md`（下称 **R-MIDI**）
 - 参考：`docs/development/reference/midi/webmidi-api.md`
 
@@ -15,7 +15,7 @@ USB MIDI 键盘，按键时实时显示对应音名（例如按下 C4 显示 `C4
 
 ### 1.2 验收标准（可测试）
 
-- URL 含 `?debug=1` 时，外壳顶栏右侧出现“调试”按钮；不含时完全不出现、不引入调试代码。
+- 外壳顶栏右侧始终出现“调试”按钮。
 - 悬浮在“调试”上显示下拉菜单，菜单含“MIDI 键盘”一项。
 - 点击“MIDI 键盘”后，内容区切换到该调试工具的页面（与正常工具切换页签一致）；连接键盘后
   按键，页面显示音名（`C4`/`C#4` 等）；**多个键同时按住时，同时显示多个音名**，且各键同色
@@ -39,7 +39,7 @@ USB MIDI 键盘，按键时实时显示对应音名（例如按下 C4 显示 `C4
 | 1   | 设备接入     | 原生 Web MIDI API，`navigator.requestMIDIAccess({ sysex: false })`                        | 零依赖、只需读按键；Safari 不支持需显式降级                           | R-MIDI §1、§5 |
 | 2   | 消息解析     | 自研纯函数 `parseMidiMessage`（解码 Note On/Off，velocity 0 归为离键）                    | 无库依赖、可单测；Web MIDI 每条事件是完整消息，无需 running status    | R-MIDI §4     |
 | 3   | 音名         | 独立纯函数 `midiNoteName(pitch)`，黑键用升号（`C#4`）                                     | 调试需要与调号无关的无歧义命名；不复用记谱语境下的 `spellPitch`       | R-MIDI §1、§4 |
-| 4   | 调试开关     | URL query `?debug=1` 驱动，仅当开启时才 import 调试工具模块                               | 生产路径零开销；调试模块整体懒加载                                    | 见 §3         |
+| 4   | 调试工具加载 | 调试工具模块随外壳启动即 import（`debug/menu`、`debug/tools`），不再有 query 开关         | 调试工具始终可用；具体工具仍按需懒加载                                | 见 §3         |
 | 5   | 调试 UI 形态 | 顶栏右侧“调试”按钮 + hover 下拉；**调试工具与正常工具一样挂载到内容区，一个工具一个页面** | 与正常工具体验一致、有整页空间展示；激活态与页签互斥                  | §4            |
 | 6   | 调试工具接口 | **直接复用主 `Tool` 接口**，调试工具注册表即 `Tool[]`                                     | 挂载机制完全一致；外壳统一处理主/调试工具切换，无需平行的面板管理逻辑 | §3            |
 
@@ -50,7 +50,7 @@ USB MIDI 键盘，按键时实时显示对应音名（例如按下 C4 显示 `C4
 ```
 外壳（shell.ts）—— 主/调试工具统一挂载到内容区（同一时间只挂载一个）
   ├─ 顶栏页签（src/tools.ts）      常规工具：点击页签 → mount(host)
-  └─ isDebugEnabled() 为真时 attachDebugMenu(header, debugTools, onSelect)
+  └─ attachDebugMenu(header, debugTools, onSelect)   （应用启动时始终挂载）
         ├─ debug/menu.ts       调试按钮 + hover 下拉；点击项回调 onSelect，由外壳挂载
         └─ debug/tools.ts      调试工具注册表（Tool[]，懒加载具体工具）
               └─ debug/midi-keyboard.ts   “MIDI 键盘”工具（Web MIDI 接入 + 页面 UI）
@@ -66,8 +66,8 @@ core 层（纯逻辑，可单测，与 UI 解耦）
 - 主工具与调试工具**共用内容区 host 与卸载路径**：切换前先卸载上一个（无论主/调试）；
   激活态互斥——常规工具激活时“调试”按钮无指示条，调试工具激活时页签全部取消激活、
   “调试”按钮出现底部琥珀指示条（与页签同款）。
-- 调试**工具**模块（`debug/menu`、`debug/tools`、`debug/midi-keyboard`）**只在 debug 开启时被 import**，
-  保证非调试路径不加载；仅 `debug/flag` 的三行开关谓词被静态引入（无副作用、体积可忽略）。
+- 调试**工具**模块（`debug/menu`、`debug/tools`）随外壳启动即被 import，保证“调试”菜单始终可用；
+  具体工具（`debug/midi-keyboard`）仍按需懒加载（首次打开时才拉取 Web MIDI 接入代码）。
 
 ### 3.3 接口
 
@@ -92,11 +92,6 @@ export function attachDebugMenu(
   tools: readonly Tool[],
   onSelect: (id: string) => void,
 ): DebugMenuHandle
-```
-
-```ts
-// debug/flag.ts —— 允许注入 search 以便测试
-export function isDebugEnabled(search = window.location.search): boolean
 ```
 
 ```ts
@@ -133,7 +128,7 @@ export function sortedHeldPitches(held: ReadonlyMap<number, number>): number[]
 - 点击下拉项后，外壳把该调试工具挂载到内容区 `host`：先卸载上一个工具（主/调试皆可），
   页面即该调试工具的内容；再点同一项或切换到页签，走同一卸载路径释放资源。
 - 调试工具不新增顶栏页签——入口只有“调试”下拉，但内容区形态与正常工具完全相同。
-- 调试工具同样拥有独立 URI（`/midi-keyboard`）：点击下拉项会把地址栏切到该路径（保留 `?debug=1`），
+- 调试工具同样拥有独立 URI（`/midi-keyboard`）：点击下拉项会把地址栏切到该路径（保留 query/hash），
   刷新/后退/前进按路径恢复；URI 上不区分调试工具与常规工具，见 `20260905-tool-routing.md`。
 
 ### 4.3 “MIDI 键盘”页面内容

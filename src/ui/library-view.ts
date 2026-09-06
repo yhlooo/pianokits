@@ -1,7 +1,7 @@
 import type { LibraryItem } from '../storage/library'
 import { formatSize } from '../storage/library'
 import { el } from './dom'
-import { keysArtIcon, plusIcon, refreshIcon, xIcon } from './icons'
+import { keysArtIcon, plusIcon, refreshIcon, sidebarIcon, xIcon } from './icons'
 import type { View } from './store'
 
 export interface LibraryViewCallbacks {
@@ -9,6 +9,7 @@ export interface LibraryViewCallbacks {
   onSelect(id: string): void | Promise<void>
   onRemove(id: string): void | Promise<void>
   onReimport(files: File[], id: string): void | Promise<void>
+  onCollapse(): void
 }
 
 /** 相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前 / YYYY/M/D */
@@ -73,6 +74,14 @@ export class LibraryView implements View {
     importBtn.append(plusIcon())
     importBtn.addEventListener('click', () => this.fileInput.click())
 
+    // 侧栏左下角的收起按钮：点击后整栏隐藏，由播放坞最左的展开按钮恢复（共用同一侧栏图标）
+    const collapseBtn = el('button', {
+      class: 'icon-btn library__collapse',
+      title: '收起侧栏',
+    })
+    collapseBtn.append(sidebarIcon())
+    collapseBtn.addEventListener('click', () => this.cbs.onCollapse())
+
     this.el = el(
       'aside',
       { class: 'library' },
@@ -83,6 +92,7 @@ export class LibraryView implements View {
         importBtn,
       ),
       this.listEl,
+      el('div', { class: 'library__foot' }, collapseBtn),
       this.fileInput,
       this.reimportInput,
     )

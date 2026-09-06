@@ -1,4 +1,3 @@
-import { isDebugEnabled } from './debug/flag'
 import { appBasePath, buildToolPath, consumeRedirectPath, parseToolRoute } from './router'
 import { el } from './ui/dom'
 import { logoIcon } from './ui/icons'
@@ -18,7 +17,7 @@ interface ResolvedTool {
  * 同一时间只挂载一个工具；切换时先调用上一个工具的卸载函数释放资源。
  * 每个工具页面拥有独立 URI（`/{工具 id}`，如 `/midi-player`、`/midi-keyboard`），
  * 切换/刷新通过 History API 保持页面；调试工具与常规工具在 URI 上不作区分。
- * 调试工具（?debug=1 时经“调试”下拉进入）同样挂载到内容区，一个工具一个页面。
+ * 调试工具（经顶栏“调试”下拉进入）同样挂载到内容区，一个工具一个页面。
  */
 export function createShell(root: HTMLElement): void {
   const basePath = appBasePath()
@@ -31,7 +30,7 @@ export function createShell(root: HTMLElement): void {
   let unmount: (() => void) | null = null
   /** 当前激活的工具（常规或调试），无则 null */
   let active: { id: string; kind: 'regular' | 'debug' } | null = null
-  /** 调试工具注册表：仅 debug 开启并完成懒加载后填充 */
+  /** 调试工具注册表：完成懒加载后填充 */
   let debugTools: Tool[] = []
   let debugMenu: DebugMenuHandle | null = null
 
@@ -115,15 +114,13 @@ export function createShell(root: HTMLElement): void {
   async function bootstrap(): Promise<void> {
     // GitHub Pages 404 回退：先把暂存的路径恢复到地址栏，再据此路由
     consumeRedirectPath()
-    // 调试菜单：仅当 URL 含 ?debug=1 时懒加载菜单与调试工具代码
-    if (isDebugEnabled()) {
-      const [{ attachDebugMenu }, { debugTools: dt }] = await Promise.all([
-        import('./debug/menu'),
-        import('./debug/tools'),
-      ])
-      debugTools = dt
-      debugMenu = attachDebugMenu(header, dt, (id) => navigateTo(id))
-    }
+    // 调试菜单：懒加载菜单与调试工具代码后挂载到顶栏
+    const [{ attachDebugMenu }, { debugTools: dt }] = await Promise.all([
+      import('./debug/menu'),
+      import('./debug/tools'),
+    ])
+    debugTools = dt
+    debugMenu = attachDebugMenu(header, dt, (id) => navigateTo(id))
     await routeFromLocation(true)
   }
 

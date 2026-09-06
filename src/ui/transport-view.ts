@@ -1,6 +1,6 @@
 import type { TransportState } from '../core/transport'
 import { el, formatTime } from './dom'
-import { pauseIcon, playIcon, stopIcon, volumeIcon } from './icons'
+import { pauseIcon, playIcon, sidebarIcon, stopIcon, volumeIcon } from './icons'
 import type { View } from './store'
 import type { ViewMode } from './state'
 
@@ -11,6 +11,7 @@ export interface TransportViewCallbacks {
   onSeek(seconds: number): void
   onVolume(volume: number): void
   onViewMode(mode: ViewMode): void
+  onExpandSidebar(): void
 }
 
 const RING_R = 15
@@ -21,6 +22,7 @@ const RING_C = 2 * Math.PI * RING_R
 export class TransportView implements View {
   /** 播放坞根元素（由 app.ts 挂在内容区底部，侧栏右侧） */
   readonly el: HTMLElement
+  private readonly expandBtn: HTMLButtonElement
   private readonly playBtn: HTMLButtonElement
   private readonly stopBtn: HTMLButtonElement
   private readonly seekEl: HTMLInputElement
@@ -33,6 +35,15 @@ export class TransportView implements View {
   private duration = 0
 
   constructor(cbs: TransportViewCallbacks) {
+    // 侧栏展开按钮：固定在控制行最左、位置始终预留；展开态隐藏但保留占位，
+    // 折叠后显示，避免出现时把播放/停止等按钮往右推。与侧栏内收起按钮共用同一侧栏图标。
+    this.expandBtn = el('button', {
+      class: 'icon-btn transport__sidebar-toggle',
+      title: '展开侧栏',
+    })
+    this.expandBtn.append(sidebarIcon())
+    this.expandBtn.addEventListener('click', () => cbs.onExpandSidebar())
+
     this.playBtn = el('button', { class: 'icon-btn transport__play', title: '播放/暂停' })
     this.playBtn.append(playIcon())
     this.playBtn.addEventListener('click', () => {
@@ -113,6 +124,7 @@ export class TransportView implements View {
       el(
         'header',
         { class: 'transport' },
+        this.expandBtn,
         this.playBtn,
         this.stopBtn,
         this.timeEl,
@@ -176,5 +188,10 @@ export class TransportView implements View {
     for (const [m, btn] of this.modeBtns) {
       btn.classList.toggle('is-active', m === mode)
     }
+  }
+
+  /** 同步侧栏折叠态：折叠时显示最左的展开按钮（其位置始终预留，不挤压其它控件） */
+  setSidebarCollapsed(collapsed: boolean): void {
+    this.expandBtn.classList.toggle('is-visible', collapsed)
   }
 }

@@ -74,6 +74,15 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
     return scoreViewPromise
   }
 
+  // ---------- 侧栏折叠 ----------
+  // 主区域提前创建（子元素随后 append），供折叠回调引用；折叠后整栏隐藏、不留外露部分，
+  // 展开按钮固定在播放坞最左并始终预留位置。
+  const mainEl = el('main', { class: 'main' })
+  const setSidebarCollapsed = (collapsed: boolean): void => {
+    mainEl.classList.toggle('is-collapsed', collapsed)
+    transportView.setSidebarCollapsed(collapsed)
+  }
+
   const libraryView = new LibraryView({
     onImport: async (files) => {
       await importFiles(files)
@@ -98,6 +107,7 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
         await selectFile(id)
       }
     },
+    onCollapse: () => setSidebarCollapsed(true),
   })
 
   const transportView = new TransportView({
@@ -117,6 +127,7 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
       store.update({ view: mode })
       applyViewMode(mode)
     },
+    onExpandSidebar: () => setSidebarCollapsed(false),
   })
 
   // 通知胶囊：文本 + 关闭按钮，6 秒自动消退
@@ -136,7 +147,8 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
 
   // 内容列：舞台在上，播放坞（进度条 + 控制行）钉在页面最底部（侧栏通高到底）
   const contentCol = el('div', { class: 'content' }, stage, transportView.el)
-  host.append(noticeEl, el('main', { class: 'main' }, libraryView.el, contentCol))
+  mainEl.append(libraryView.el, contentCol)
+  host.append(noticeEl, mainEl)
 
   function applyViewMode(mode: ViewMode): void {
     stage.classList.remove('stage--split', 'stage--waterfall', 'stage--score')

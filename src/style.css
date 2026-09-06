@@ -353,6 +353,17 @@ input[type='range']::-moz-range-thumb {
   flex: 1;
 }
 
+/* 侧栏展开按钮：控制行最左、位置始终预留；展开态隐藏但保留占位，
+   与播放按钮之间多留 12px 间隔以示与播放功能无关 */
+.transport__sidebar-toggle {
+  margin-right: 12px;
+  visibility: hidden;
+}
+
+.transport__sidebar-toggle.is-visible {
+  visibility: visible;
+}
+
 /* 进度条：贴播放坞上沿，3px 轨道，拇指平时隐藏、悬停/拖拽时浮现 */
 .seekbar {
   height: var(--seekbar-h);
@@ -526,6 +537,18 @@ input[type='range']::-moz-range-thumb {
   grid-template-columns: 264px 1fr;
 }
 
+/* 侧栏折叠：首列收为 0，侧栏彻底隐藏（不留边框/内边距等外露部分） */
+.main.is-collapsed {
+  grid-template-columns: 0 1fr;
+}
+
+.main.is-collapsed .library {
+  min-width: 0;
+  overflow: hidden;
+  border-right: none;
+  padding: 0;
+}
+
 /* 内容列：舞台占满剩余高度，进度条钉在列底（页面最底部） */
 .content {
   min-width: 0;
@@ -577,6 +600,22 @@ input[type='range']::-moz-range-thumb {
 
 .library__import:hover {
   color: var(--accent-hover);
+}
+
+/* 侧栏底部脚注行：折叠按钮靠左下角 */
+.library__foot {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.library__collapse {
+  width: 28px;
+  height: 28px;
+  color: var(--text-2);
+}
+
+.library__collapse:hover {
+  color: var(--text-0);
 }
 
 .library__list {
@@ -830,7 +869,7 @@ input[type='range']::-moz-range-thumb {
   line-height: 1;
 }
 
-/* ---------- 调试菜单与浮动面板（仅 ?debug=1 时挂载） ---------- */
+/* ---------- 调试菜单与浮动面板 ---------- */
 .debug-menu {
   position: relative;
   margin-left: auto;

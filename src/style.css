@@ -855,6 +855,8 @@ input[type='range']::-moz-range-thumb {
   padding: 8px 10px;
   border-radius: var(--r-md);
   cursor: pointer;
+  /* 触控端：禁用手势缩放/双击缩放对单击的干扰，确保单击立即触发 */
+  touch-action: manipulation;
   transition: background-color var(--dur-fast) var(--ease-out);
 }
 

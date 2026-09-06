@@ -107,14 +107,14 @@ export function midiKeyboardIcon(): SVGSVGElement {
   el.setAttribute('height', '20')
   el.setAttribute('viewBox', '0 0 20 20')
   el.setAttribute('aria-hidden', 'true')
-  // 白键：三枚描边圆角键
-  for (const x of [3.5, 7.5, 11.5]) {
+  // 白键：三枚描边圆角键，铺满画布主体（与其它 20×20 图标同一视觉占比）
+  for (const x of [2.75, 7.25, 11.75]) {
     const r = document.createElementNS(SVG_NS, 'rect')
     r.setAttribute('x', String(x))
-    r.setAttribute('y', '6.5')
-    r.setAttribute('width', '4')
-    r.setAttribute('height', '9.5')
-    r.setAttribute('rx', '1')
+    r.setAttribute('y', '3')
+    r.setAttribute('width', '4.5')
+    r.setAttribute('height', '13.5')
+    r.setAttribute('rx', '1.2')
     r.setAttribute('fill', 'none')
     r.setAttribute('stroke', 'currentColor')
     r.setAttribute('stroke-width', '1.5')
@@ -122,25 +122,24 @@ export function midiKeyboardIcon(): SVGSVGElement {
     el.append(r)
   }
   // 黑键：两枚实心短键，落在白键接缝上
-  for (const x of [6.4, 10.4]) {
+  for (const x of [6, 10.5]) {
     const r = document.createElementNS(SVG_NS, 'rect')
     r.setAttribute('x', String(x))
-    r.setAttribute('y', '6.5')
-    r.setAttribute('width', '2.2')
-    r.setAttribute('height', '6')
-    r.setAttribute('rx', '0.8')
+    r.setAttribute('y', '3')
+    r.setAttribute('width', '2.5')
+    r.setAttribute('height', '8')
+    r.setAttribute('rx', '0.9')
     r.setAttribute('fill', 'currentColor')
     el.append(r)
   }
   return el
 }
 
-/** 练习模式（靶心：外环 + 内环 + 四向刻度） */
+/** 练习模式（打开的书：左右两页在书脊处相接） */
 export const practiceIcon = (): SVGSVGElement =>
   svg([
-    'M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0',
-    'M7 10a3 3 0 1 0 6 0a3 3 0 1 0 -6 0',
-    'M10 1.5v2.5M10 16v2.5M1.5 10h2.5M16 10h2.5',
+    'M1.5 2.5h5.5a4 4 0 0 1 4 4V17a3 3 0 0 0-3-3H1.5z',
+    'M18.5 2.5H13a4 4 0 0 0-4 4V17a3 3 0 0 1 3-3h6.5z',
   ])
 
 /** 连接等待（约 270° 圆弧，配合 CSS 旋转动画使用） */

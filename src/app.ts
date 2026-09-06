@@ -226,8 +226,10 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
 
   store.subscribe(() => {
     const st = store.get()
-    libraryView.setFiles(st.files)
+    // 先同步选中 id、再渲染列表：setFiles 依赖 this.selectedId 决定 is-selected，
+    // 顺序颠倒会导致黄色选中条滞后一次点击才跟上
     libraryView.setSelected(st.currentFile?.id ?? null)
+    libraryView.setFiles(st.files)
     if (st.notice !== null) {
       noticeText.textContent = st.notice
       noticeEl.classList.add('is-visible')

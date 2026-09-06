@@ -157,5 +157,9 @@ export class LibraryView implements View {
 
   setSelected(id: string | null): void {
     this.selectedId = id
+    // 立即把选中态落到现有 DOM，避免依赖后续 setFiles 重渲染才生效（否则会滞后一次点击）
+    for (const li of this.listEl.querySelectorAll<HTMLElement>('.library__item')) {
+      li.classList.toggle('is-selected', li.dataset.id === id)
+    }
   }
 }

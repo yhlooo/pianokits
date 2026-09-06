@@ -91,13 +91,40 @@ describe('ChordGate 练习匹配', () => {
     expect(g.note(on(99))).toBe(false)
   })
 
-  it('松掉一个和弦键后不满足，重新按下再次触发', () => {
+  it('松掉一个和弦键后不满足，重新按下补全剩余键才触发', () => {
     const g = new ChordGate()
     g.setChord(CHORD)
     g.note(on(60))
     g.note(on(64))
-    g.note(on(67))
-    expect(g.note(off(64))).toBe(false)
-    expect(g.note(on(64))).toBe(true)
+    expect(g.note(off(64))).toBe(false) // 松开 64：和弦不全
+    expect(g.note(on(64))).toBe(false) // 重新按下 64：仍缺 67
+    expect(g.note(on(67))).toBe(true) // 按齐 67 触发
+  })
+
+  it('连续同音音符：放行后按住不放不会再次触发，抬起重按才触发', () => {
+    const g = new ChordGate()
+    g.setChord(new Set([60]))
+    expect(g.note(on(60))).toBe(true) // 第一个同音音符触发（放行时消费该音高的按下）
+    g.setChord(null) // 放行后清空等待
+    expect(g.setChord(new Set([60]))).toBe(false) // 键仍按住但未重新按下 → 不立即触发
+    expect(g.note(off(60))).toBe(false) // 抬起：不满足
+    expect(g.note(on(60))).toBe(true) // 重新按下：再次触发
+  })
+
+  it('连续相同和弦：放行后必须抬起重新按下每个键才再次触发', () => {
+    const g = new ChordGate()
+    g.setChord(CHORD)
+    g.note(on(60))
+    g.note(on(64))
+    expect(g.note(on(67))).toBe(true) // 第一次触发
+    g.setChord(null)
+    expect(g.setChord(CHORD)).toBe(false) // 三键都仍按住，但均未重新按下 → 不立即触发
+    expect(g.note(on(60))).toBe(false) // 仅重按 60，64/67 仍未重按 → 不触发
+    g.note(off(60))
+    g.note(off(64))
+    g.note(off(67))
+    g.note(on(60))
+    g.note(on(64))
+    expect(g.note(on(67))).toBe(true) // 全部重新按下后触发
   })
 })

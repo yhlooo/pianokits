@@ -38,7 +38,7 @@ export const CHORD_EPSILON_SEC = 0.03
 export interface PracticeChord {
   /** 和弦起点（秒） */
   start: number
-  /** 组内全部音符（start ∈ [start, start + CHORD_EPSILON_SEC]） */
+  /** 组内全部门控轨音符（start ∈ [start, start + CHORD_EPSILON_SEC]；非门控轨音符照常排期，不参与判定） */
   notes: Note[]
 }
 
@@ -59,15 +59,32 @@ export class Transport {
   private offset = 0
   private pausedAt = 0
   private nextIndex = 0
+  /**
+   * 每个音符是否已排期/放行（分轨练习退出时合并双流指针用）：
+   * 门控期间自由流排期、放行和弦都会打标；退出练习后正常流跳过已打标音符，
+   * 避免与自由流重复发声。任何指针重定位（load/seek/stop/换引擎/调整门控集合）都会清空。
+   */
+  private consumed = new Uint8Array(0)
   private intervalId: number | undefined
   private listeners = new Set<StateListener>()
   private _state: TransportState = 'empty'
   private _duration = 0
   private volume = 1
-  /** 练习模式开关（见设计文档 20260906-midi-keyboard-and-practice.md §3.3） */
-  private practiceEnabled = false
-  /** 练习模式等待中的和弦；null = 未等待 */
+  /**
+   * 分轨练习门控集合（轨道 index，设计文档 20260906-midi-keyboard-and-practice.md §3.3）：
+   * 空集 = 关闭练习；集合内的轨到达判定线时等待琴键放行，集合外的轨照常排期播放。
+   */
+  private gatedTracks = new Set<number>()
+  /** 全部音符都属于门控轨：等待时冻结播放位置（音符条底贴在判定线上）；否则位置照常推进 */
+  private allNotesGated = false
+  /** 练习模式等待中的和弦（仅含门控轨音符）；null = 未等待 */
   private waitingChord: PracticeChord | null = null
+  /** 当前等待的和弦是否冻结了播放位置（冻结时放行才回拨 offset 从和弦起点继续） */
+  private waitingFrozen = false
+  /** 门控流指针：第一个尚未处理的门控轨音符（和弦收集与放行推进） */
+  private nextGated = 0
+  /** 自由流指针：第一个尚未排期的非门控轨音符（照常按 lookahead 窗口排期） */
+  private nextFree = 0
   private practiceChordCb: PracticeChordListener | null = null
   /** MIDI 输出镜像（可选）：与引擎同步排期的外部音源（无输出端口时为 null） */
   private midiOut: MidiOutputSink | null = null
@@ -85,11 +102,12 @@ export class Transport {
     return this._duration
   }
 
-  /** 实时位置（秒）：播放中按音频时钟计算，暂停时取暂停位置；练习等待时冻结在和弦起点 */
+  /** 实时位置（秒）：播放中按音频时钟计算，暂停时取暂停位置；全轨门控练习等待时冻结在和弦起点 */
   get position(): number {
     if (this._state === 'playing') {
-      // 等待中的和弦：位置恒为和弦起点（不随时钟推进，也不受时长钳制）
-      if (this.waitingChord !== null) return this.waitingChord.start
+      // 冻结中的和弦：位置恒为和弦起点（不随时钟推进，也不受时长钳制）；
+      // 部分门控等待：位置照常推进（非门控轨持续发声）
+      if (this.waitingChord !== null && this.waitingFrozen) return this.waitingChord.start
       return Math.min(this._duration, Math.max(0, this.host.now() - this.offset))
     }
     return this.pausedAt
@@ -136,6 +154,10 @@ export class Transport {
     this.pausedAt = 0
     this.offset = this.host.now()
     this.nextIndex = 0
+    this.nextGated = 0
+    this.nextFree = 0
+    this.consumed = new Uint8Array(this.notes.length)
+    this.allNotesGated = this.notes.every((n) => this.gatedTracks.has(n.trackIndex))
     this.setState('ready')
   }
 
@@ -169,7 +191,7 @@ export class Transport {
     this.stopTicker()
     this.silenceAll()
     this.cancelWaiting()
-    this.nextIndex = 0
+    this.setPointer(0)
     this.setState('paused')
   }
 
@@ -205,30 +227,37 @@ export class Transport {
     this.midiOut = sink
   }
 
-  get practiceMode(): boolean {
-    return this.practiceEnabled
+  /** 当前门控轨集合（副本）；空集 = 练习关闭 */
+  get practiceTracks(): ReadonlySet<number> {
+    return new Set(this.gatedTracks)
   }
 
   /**
-   * 开关练习模式（设计文档 20260906-midi-keyboard-and-practice.md §3.3）。
-   * 进入：清掉 lookahead 已排期与发声中的音符，指针改为“第一个 start ≥ 当前位置”；
-   * 退出：等待中的和弦按正常调度立即发声并继续（指针天然指向该和弦起点）。
+   * 设置分轨练习门控集合（设计文档 20260906-midi-keyboard-and-practice.md §3.3）：
+   * - 进入/调整集合：清掉已排期与发声中的音符，取消当前等待，两个流指针按
+   *   “第一个 start ≥ 当前位置”重定位（放弃已开始的音符，同全局练习进入语义）；
+   * - 清空集合（退出）：取消等待，正常流指针按当前位置重定位，等待中的和弦
+   *   按正常调度立即发声并继续。
    */
-  setPracticeMode(on: boolean): void {
-    if (this.practiceEnabled === on) return
-    this.practiceEnabled = on
-    if (on) {
+  setPracticeTracks(tracks: ReadonlySet<number>): void {
+    const next = new Set(tracks)
+    if (this.sameSet(this.gatedTracks, next)) return
+    this.gatedTracks = next
+    this.allNotesGated = this.notes.every((n) => next.has(n.trackIndex))
+    if (next.size === 0) {
+      // 退出：取消等待，正常流从第一个未排期音符继续（已排期的自由轨音符不重复发声）
+      this.cancelWaiting()
+      this.nextIndex = this.firstUnconsumed()
+    } else {
       this.silenceAll()
       this.cancelWaiting()
-      if (this.song !== null) this.setNotePointerStart(this.position)
-    } else {
-      this.cancelWaiting()
+      this.setPracticePointers(this.position)
     }
   }
 
   /**
-   * 订阅练习等待事件：播放位置到达和弦起点时回调该和弦（位置冻结在起点）；
-   * null 表示等待被取消（seek/停止/暂停/退出练习等）。
+   * 订阅练习等待事件：播放位置到达门控和弦起点时回调该和弦（全轨门控时位置冻结在起点）；
+   * null 表示等待被取消（seek/停止/暂停/调整门控集合/退出练习等）。
    */
   onPracticeChord(cb: PracticeChordListener): () => void {
     this.practiceChordCb = cb
@@ -237,11 +266,18 @@ export class Transport {
     }
   }
 
-  /** 放行当前等待的和弦：立即以当前时间发声（原始时值/力度），位置从和弦起点继续推进 */
+  /** 放行当前等待的和弦：立即以当前时间发声（原始时值/力度）；冻结等待时位置从和弦起点继续推进 */
   releaseChord(): void {
-    if (!this.practiceEnabled || this.waitingChord === null) return
+    if (this.gatedTracks.size === 0 || this.waitingChord === null) return
     const chord = this.waitingChord
     const now = this.host.now()
+    // 放行的音符打上已排期标记：退出练习后正常流不重复发声
+    let mark = this.nextGated
+    const markUntil = chord.start + CHORD_EPSILON_SEC
+    while (mark < this.notes.length && this.notes[mark].start <= markUntil) {
+      if (this.gatedTracks.has(this.notes[mark].trackIndex)) this.consumed[mark] = 1
+      mark++
+    }
     for (const n of chord.notes) {
       if (n.end <= chord.start) continue
       this.scheduleToBoth({
@@ -251,12 +287,11 @@ export class Transport {
         duration: n.end - n.start,
       })
     }
-    let i = this.nextIndex
-    const until = chord.start + CHORD_EPSILON_SEC
-    while (i < this.notes.length && this.notes[i].start <= until) i++
-    this.nextIndex = i
+    // 门控流越过整组（组内非门控音符由自由流独立排期，无需处理）
+    this.nextGated = mark
     this.waitingChord = null
-    this.offset = now - chord.start
+    if (this.waitingFrozen) this.offset = now - chord.start
+    this.waitingFrozen = false
   }
 
   dispose(): void {
@@ -265,14 +300,15 @@ export class Transport {
     this.listeners.clear()
     this.practiceChordCb = null
     this.waitingChord = null
+    this.waitingFrozen = false
     this.setState('empty')
   }
 
   /** 定时器回调：把 [now+latency, now+latency+lookahead] 窗口内的音符排入引擎 */
   tick(): void {
     if (this._state !== 'playing' || this.song === null) return
-    if (this.practiceEnabled) {
-      this.tickPractice()
+    if (this.gatedTracks.size > 0) {
+      this.tickGated()
       return
     }
     const now = this.host.now()
@@ -282,8 +318,10 @@ export class Transport {
     const notes = this.notes
 
     while (this.nextIndex < notes.length && notes[this.nextIndex].start < until) {
-      const n = notes[this.nextIndex]
-      this.nextIndex++
+      const i = this.nextIndex
+      const n = notes[i]
+      this.nextIndex = i + 1
+      if (this.consumed[i] === 1) continue // 退出分轨练习时已排期的音符
       if (n.end <= from) continue
       const atTime = this.offset + n.start
       this.scheduleToBoth({
@@ -292,6 +330,7 @@ export class Transport {
         time: atTime,
         duration: n.end - n.start,
       })
+      this.consumed[i] = 1
     }
 
     if (pos >= this._duration) {
@@ -301,46 +340,73 @@ export class Transport {
     }
   }
 
-  /** 练习模式调度：到达下一和弦起点时冻结位置并回调等待，不排入引擎 */
-  private tickPractice(): void {
-    if (this.waitingChord !== null) return
-    const notes = this.notes
+  /** 分轨练习调度：非门控轨照常按 lookahead 窗口排期；门控轨到达和弦起点时收集等待 */
+  private tickGated(): void {
     const now = this.host.now()
     const pos = now - this.offset
-    if (this.nextIndex >= notes.length) {
-      if (pos >= this._duration) {
-        this.pausedAt = this._duration
-        this.stopTicker()
-        this.setState('paused')
-      }
-      return
-    }
-    const first = notes[this.nextIndex]
-    if (pos >= first.start) {
-      const chord: PracticeChord = { start: first.start, notes: this.collectChord(first.start) }
-      this.waitingChord = chord
-      // 冻结：位置精确停在和弦起点（音符条底贴在判定线上）
-      this.offset = now - chord.start
-      this.practiceChordCb?.(chord)
+    this.scheduleFree(pos)
+    if (this.waitingChord === null) this.tryCollectChord(now, pos)
+    if (pos >= this._duration && this.waitingChord === null) {
+      this.pausedAt = this._duration
+      this.stopTicker()
+      this.setState('paused')
     }
   }
 
-  /** 收集 [start, start + CHORD_EPSILON_SEC] 内的整组音符（nextIndex 总在组首） */
-  private collectChord(start: number): Note[] {
+  /** 自由流：非门控轨音符按正常 lookahead 窗口排期（不受门控等待影响） */
+  private scheduleFree(pos: number): void {
+    const notes = this.notes
+    const from = pos + LATENCY_SEC
+    const until = pos + LOOKAHEAD_SEC
+    while (this.nextFree < notes.length && notes[this.nextFree].start < until) {
+      const i = this.nextFree
+      const n = notes[i]
+      this.nextFree = i + 1
+      if (this.gatedTracks.has(n.trackIndex)) continue // 门控轨留给门控流
+      if (n.end <= from) continue
+      this.scheduleToBoth({
+        pitch: n.pitch,
+        velocity: n.velocity,
+        time: this.offset + n.start,
+        duration: n.end - n.start,
+      })
+      this.consumed[i] = 1
+    }
+  }
+
+  /** 门控流：位置到达下一门控和弦起点时收集整组（仅门控轨音符）并回调等待 */
+  private tryCollectChord(now: number, pos: number): void {
+    const notes = this.notes
+    // 从门控指针出发找到第一个门控轨音符（非门控音符永久跳过）
+    let i = this.nextGated
+    while (i < notes.length && !this.gatedTracks.has(notes[i].trackIndex)) i++
+    if (i >= notes.length) {
+      this.nextGated = notes.length
+      return
+    }
+    this.nextGated = i
+    const first = notes[i]
+    if (pos < first.start) return
+    // 收集 [start, start + CHORD_EPSILON_SEC] 内的整组门控轨音符
+    const until = first.start + CHORD_EPSILON_SEC
     const group: Note[] = []
-    let i = this.nextIndex
-    const until = start + CHORD_EPSILON_SEC
-    while (i < this.notes.length && this.notes[i].start <= until) {
-      group.push(this.notes[i])
+    while (i < notes.length && notes[i].start <= until) {
+      if (this.gatedTracks.has(notes[i].trackIndex)) group.push(notes[i])
       i++
     }
-    return group
+    // 全轨门控：冻结位置（音符条底贴在判定线上）；部分门控：位置照常推进
+    const frozen = this.allNotesGated
+    this.waitingChord = { start: first.start, notes: group }
+    this.waitingFrozen = frozen
+    if (frozen) this.offset = now - first.start
+    this.practiceChordCb?.(this.waitingChord)
   }
 
   /** 取消练习等待并通知订阅者（无等待时为空操作） */
   private cancelWaiting(): void {
     if (this.waitingChord === null) return
     this.waitingChord = null
+    this.waitingFrozen = false
     this.practiceChordCb?.(null)
   }
 
@@ -368,13 +434,13 @@ export class Transport {
     }
   }
 
-  /** 按当前模式定位音符指针：练习模式用 start 指针（等待从当前位置起的第一组音符） */
+  /** 按当前模式定位音符指针：门控模式用双流 start 指针（等待从当前位置起的第一组音符） */
   private setPointer(position: number): void {
-    if (this.practiceEnabled) this.setNotePointerStart(position)
+    if (this.gatedTracks.size > 0) this.setPracticePointers(position)
     else this.setNotePointer(position)
   }
 
-  /** end 指针：二分第一个 end > position 的音符（正常调度，不重排已开始的音符） */
+  /** end 指针：二分第一个 end > position 的音符（正常调度，不重排已开始的音符）；重定位时清空已排期标记 */
   private setNotePointer(position: number): void {
     let lo = 0
     let hi = this.notes.length
@@ -384,18 +450,41 @@ export class Transport {
       else hi = mid
     }
     this.nextIndex = lo
+    this.consumed.fill(0)
   }
 
-  /** start 指针：二分第一个 start >= position 的音符（练习模式，进入时放弃已开始的音符） */
-  private setNotePointerStart(position: number): void {
-    let lo = 0
-    let hi = this.notes.length
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1
-      if (this.notes[mid].start < position) lo = mid + 1
-      else hi = mid
+  /** 门控模式双流指针：各自定位到第一个 start ≥ position 的门控轨 / 非门控轨音符（进入时放弃已开始的音符） */
+  private setPracticePointers(position: number): void {
+    this.nextGated = this.firstOf((n) => this.gatedTracks.has(n.trackIndex), position)
+    this.nextFree = this.firstOf((n) => !this.gatedTracks.has(n.trackIndex), position)
+    this.consumed.fill(0)
+  }
+
+  /** 第一个未排期音符的下标（退出分轨练习时正常流起点）；无则 notes.length */
+  private firstUnconsumed(): number {
+    let i = 0
+    while (i < this.notes.length && this.consumed[i] === 1) i++
+    return i
+  }
+
+  /** 第一个满足谓词且 start ≥ position 的音符下标；无则 notes.length */
+  private firstOf(pred: (n: Note) => boolean, position: number): number {
+    let i = 0
+    while (i < this.notes.length) {
+      const n = this.notes[i]
+      if (pred(n) && n.start >= position) break
+      i++
     }
-    this.nextIndex = lo
+    return i
+  }
+
+  /** 两个轨号集合内容一致（避免无变化时重复进入/退出） */
+  private sameSet(a: ReadonlySet<number>, b: ReadonlySet<number>): boolean {
+    if (a.size !== b.size) return false
+    for (const x of a) {
+      if (!b.has(x)) return false
+    }
+    return true
   }
 
   private setState(state: TransportState): void {

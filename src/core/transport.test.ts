@@ -75,6 +75,22 @@ function makeSong(notes: Array<{ pitch: number; start: number; end: number }>): 
   }
 }
 
+/** 显式指定轨号（分轨练习用例） */
+function makeSongT(
+  notes: Array<{ pitch: number; start: number; end: number; trackIndex: number }>,
+): Song {
+  return {
+    ppq: 480,
+    duration: notes.reduce((m, n) => Math.max(m, n.end), 0),
+    tempos: [{ time: 0, bpm: 60 }],
+    timeSignatures: [{ time: 0, numerator: 4, denominator: 4 }],
+    keySignatures: [],
+    tracks: [],
+    notes: notes.map((n) => ({ ...n, velocity: 100 })),
+    sustainEvents: [],
+  }
+}
+
 describe('Transport 调度器', () => {
   it('播放时把 lookahead 窗口内的音符排入引擎（含 latency 补偿）', () => {
     const engine = new FakeEngine()
@@ -216,7 +232,7 @@ describe('Transport 练习模式', () => {
         { pitch: 67, start: 0.5, end: 0.9 },
       ]),
     )
-    t.setPracticeMode(true)
+    t.setPracticeTracks(new Set([0, 1, 2]))
     t.play()
     host.advance(0.4)
     host.fireTicks()
@@ -246,7 +262,7 @@ describe('Transport 练习模式', () => {
         { pitch: 62, start: 1.2, end: 1.5 },
       ]),
     )
-    t.setPracticeMode(true)
+    t.setPracticeTracks(new Set([0, 1, 2]))
     t.play()
     host.advance(0.55)
     host.fireTicks()
@@ -276,7 +292,7 @@ describe('Transport 练习模式', () => {
         { pitch: 65, start: 1.1, end: 1.5 },
       ]),
     )
-    t.setPracticeMode(true)
+    t.setPracticeTracks(new Set([0, 1, 2]))
     t.play()
     host.advance(1.05)
     host.fireTicks()
@@ -299,7 +315,7 @@ describe('Transport 练习模式', () => {
         { pitch: 62, start: 1.2, end: 1.5 },
       ]),
     )
-    t.setPracticeMode(true)
+    t.setPracticeTracks(new Set([0, 1]))
     t.play()
     host.advance(0.6)
     host.fireTicks()
@@ -317,7 +333,7 @@ describe('Transport 练习模式', () => {
     const t = new Transport(engine, host)
     const chords = collectChords(t)
     t.load(makeSong([{ pitch: 60, start: 0.5, end: 1.2 }]))
-    t.setPracticeMode(true)
+    t.setPracticeTracks(new Set([0]))
     t.play()
     host.advance(0.55)
     host.fireTicks()
@@ -338,12 +354,12 @@ describe('Transport 练习模式', () => {
     const t = new Transport(engine, host)
     const chords = collectChords(t)
     t.load(makeSong([{ pitch: 60, start: 0.5, end: 0.9 }]))
-    t.setPracticeMode(true)
+    t.setPracticeTracks(new Set([0]))
     t.play()
     host.advance(0.55)
     host.fireTicks()
     expect(engine.scheduled).toHaveLength(0)
-    t.setPracticeMode(false)
+    t.setPracticeTracks(new Set())
     expect(chords).toHaveLength(2)
     expect(chords[1]).toBeNull()
     host.fireTicks()
@@ -367,7 +383,7 @@ describe('Transport 练习模式', () => {
     host.fireTicks() // 正常调度 0.05
     expect(engine.scheduled).toHaveLength(1)
     host.advance(0.2)
-    t.setPracticeMode(true)
+    t.setPracticeTracks(new Set([0, 1]))
     expect(engine.allNotesOffCount).toBeGreaterThanOrEqual(2)
     host.fireTicks()
     host.advance(0.25) // pos = 0.45 >= 0.4
@@ -381,7 +397,7 @@ describe('Transport 练习模式', () => {
     const host = new FakeHost()
     const t = new Transport(engine, host)
     t.load(makeSong([{ pitch: 60, start: 0.1, end: 0.4 }]))
-    t.setPracticeMode(true)
+    t.setPracticeTracks(new Set([0]))
     t.play()
     host.advance(0.15)
     host.fireTicks()
@@ -391,6 +407,146 @@ describe('Transport 练习模式', () => {
     expect(t.state).toBe('paused')
     expect(t.position).toBeCloseTo(0.4)
     expect(host.activeTimers).toBe(0)
+  })
+})
+
+describe('Transport 分轨练习（部分门控）', () => {
+  function collectChords(t: Transport): Array<PracticeChord | null> {
+    const chords: Array<PracticeChord | null> = []
+    t.onPracticeChord((c) => chords.push(c))
+    return chords
+  }
+
+  it('部分门控：非门控轨照常排期，门控轨等待；位置不冻结', () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    const chords = collectChords(t)
+    t.load(
+      makeSongT([
+        { pitch: 60, start: 0.5, end: 0.9, trackIndex: 0 }, // 门控
+        { pitch: 62, start: 0.5, end: 0.9, trackIndex: 1 }, // 自由
+        { pitch: 65, start: 0.7, end: 1.0, trackIndex: 1 }, // 自由
+      ]),
+    )
+    t.setPracticeTracks(new Set([0]))
+    t.play()
+    host.advance(0.55)
+    host.fireTicks()
+    // 自由轨按正常 lookahead 排期；门控轨进入等待
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([62])
+    expect(chords).toHaveLength(1)
+    expect(chords[0]?.notes.map((n) => n.pitch)).toEqual([60])
+    // 位置不冻结：随时间推进
+    expect(t.position).toBeCloseTo(0.55)
+    host.advance(0.2) // pos = 0.75
+    host.fireTicks()
+    expect(t.position).toBeCloseTo(0.75)
+    // 等待期间后续自由音符继续排期
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([62, 65])
+    // 放行：以放行时刻发声，位置不回拨
+    t.releaseChord()
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([62, 65, 60])
+    expect(engine.scheduled.at(-1)?.time).toBeCloseTo(0.75)
+    expect(t.position).toBeCloseTo(0.75)
+  })
+
+  it('混合和弦：等待组只含门控轨音符，同起点的自由音符照常排期', () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    const chords = collectChords(t)
+    t.load(
+      makeSongT([
+        { pitch: 60, start: 0.5, end: 0.9, trackIndex: 0 },
+        { pitch: 64, start: 0.5, end: 0.9, trackIndex: 0 },
+        { pitch: 67, start: 0.51, end: 0.9, trackIndex: 1 },
+      ]),
+    )
+    t.setPracticeTracks(new Set([0]))
+    t.play()
+    host.advance(0.55)
+    host.fireTicks()
+    expect(chords[0]?.notes.map((n) => n.pitch)).toEqual([60, 64])
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([67])
+    // 放行只发声门控组；自由音符已在排期中，不重复
+    t.releaseChord()
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([67, 60, 64])
+  })
+
+  it('调整门控集合：取消当前等待并按新集合从当前位置重新收集', () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    const chords = collectChords(t)
+    t.load(
+      makeSongT([
+        { pitch: 60, start: 0.5, end: 0.9, trackIndex: 0 },
+        { pitch: 64, start: 0.5, end: 0.9, trackIndex: 1 },
+      ]),
+    )
+    t.setPracticeTracks(new Set([0, 1])) // 全门控：冻结
+    t.play()
+    host.advance(0.55)
+    host.fireTicks()
+    expect(chords[0]?.notes.map((n) => n.pitch)).toEqual([60, 64])
+    t.setPracticeTracks(new Set([0])) // 缩小集合：取消等待（位置冻结在 0.5）
+    expect(chords).toEqual([chords[0], null])
+    host.fireTicks()
+    // 从 0.5 重新收集：仅门控轨
+    expect(chords[2]?.notes.map((n) => n.pitch)).toEqual([60])
+    // 部分门控：不再冻结
+    host.advance(0.1)
+    host.fireTicks()
+    expect(t.position).toBeCloseTo(0.6)
+  })
+
+  it('部分门控：放行最后一组后播到结尾自动停止', () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    t.load(makeSongT([{ pitch: 60, start: 0.5, end: 0.8, trackIndex: 0 }]))
+    t.setPracticeTracks(new Set([0]))
+    t.play()
+    host.advance(0.55)
+    host.fireTicks()
+    expect(t.state).toBe('playing')
+    t.releaseChord()
+    host.advance(0.5) // pos = 1.05 >= duration 0.8
+    host.fireTicks()
+    expect(t.state).toBe('paused')
+    expect(t.position).toBeCloseTo(0.8)
+    expect(host.activeTimers).toBe(0)
+  })
+
+  it('清空门控集合（退出）：等待中的和弦按正常调度立即发声', () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    const chords = collectChords(t)
+    t.load(
+      makeSongT([
+        { pitch: 60, start: 0.5, end: 0.9, trackIndex: 0 },
+        { pitch: 62, start: 1.2, end: 1.5, trackIndex: 0 },
+        { pitch: 65, start: 0.6, end: 1.0, trackIndex: 1 },
+      ]),
+    )
+    t.setPracticeTracks(new Set([0]))
+    t.play()
+    host.advance(0.55)
+    host.fireTicks()
+    // 等待中：自由轨 0.6 已进排期窗口正常排期，门控轨不发声
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([65])
+    expect(chords[0]?.notes.map((n) => n.pitch)).toEqual([60])
+    t.setPracticeTracks(new Set())
+    expect(chords).toHaveLength(2)
+    expect(chords[1]).toBeNull()
+    host.fireTicks()
+    // 退出后正常调度：等待中的和弦立即发声，已排期的自由轨音符不重复
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([65, 60])
+    host.advance(0.7) // pos = 1.25 >= 1.2
+    host.fireTicks()
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([65, 60, 62])
   })
 })
 
@@ -483,13 +639,35 @@ describe('Transport MIDI 输出镜像', () => {
         { pitch: 64, start: 0.5, end: 0.9 },
       ]),
     )
-    t.setPracticeMode(true)
+    t.setPracticeTracks(new Set([0, 1]))
     t.play()
     host.advance(0.55)
     host.fireTicks()
     expect(sink.scheduled).toHaveLength(0) // 等待中不发声也不镜像
     t.releaseChord()
     expect(engine.scheduled.map((n) => n.pitch)).toEqual([60, 64])
+    expect(sink.scheduled).toEqual(engine.scheduled)
+  })
+
+  it('部分门控：自由轨排期与门控轨放行都镜像到输出', () => {
+    const engine = new FakeEngine()
+    const sink = new FakeSink()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    t.setMidiOutput(sink)
+    t.load(
+      makeSongT([
+        { pitch: 60, start: 0.5, end: 0.9, trackIndex: 0 },
+        { pitch: 62, start: 0.5, end: 0.9, trackIndex: 1 },
+      ]),
+    )
+    t.setPracticeTracks(new Set([0]))
+    t.play()
+    host.advance(0.55)
+    host.fireTicks()
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([62])
+    t.releaseChord()
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([62, 60])
     expect(sink.scheduled).toEqual(engine.scheduled)
   })
 })

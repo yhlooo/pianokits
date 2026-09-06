@@ -1,4 +1,4 @@
-import type { MidiUiState } from '../core/practice'
+import type { MidiUiState, PracticeUiState } from '../core/practice'
 import type { TransportState } from '../core/transport'
 import { el, formatTime } from './dom'
 import {
@@ -13,6 +13,7 @@ import {
 } from './icons'
 import type { View } from './store'
 import type { ViewMode } from './state'
+import { trackColor } from './track-colors'
 
 export interface TransportViewCallbacks {
   onPlay(): void
@@ -24,8 +25,10 @@ export interface TransportViewCallbacks {
   onExpandSidebar(): void
   /** 点击钢琴图标：连接 / 断开 MIDI 键盘 */
   onMidiToggle(): void
-  /** 点击练习图标：开关练习模式 */
+  /** 点击练习图标：非全开（含全关）→ 全部开启；全开 → 全部关闭 */
   onPracticeToggle(): void
+  /** 点击悬浮菜单中的某轨：开关该轨练习（可多选） */
+  onPracticeTrack(index: number): void
 }
 
 const RING_R = 15
@@ -36,6 +39,7 @@ const RING_C = 2 * Math.PI * RING_R
 export class TransportView implements View {
   /** 播放坞根元素（由 app.ts 挂在内容区底部，侧栏右侧） */
   readonly el: HTMLElement
+  private readonly cbs: TransportViewCallbacks
   private readonly expandBtn: HTMLButtonElement
   private readonly playBtn: HTMLButtonElement
   private readonly stopBtn: HTMLButtonElement
@@ -45,13 +49,23 @@ export class TransportView implements View {
   private readonly modeBtns: Map<ViewMode, HTMLButtonElement>
   private readonly midiBtn: HTMLButtonElement
   private readonly practiceBtn: HTMLButtonElement
+  private readonly practiceMenuList: HTMLDivElement
+  private readonly practiceMenuEmpty: HTMLDivElement
+  /** 轨号 → 菜单行（按曲目轨序插入；更新时原地同步，避免重建丢焦点） */
+  private readonly practiceRows = new Map<
+    number,
+    { item: HTMLButtonElement; name: HTMLSpanElement }
+  >()
   private readonly ring: SVGSVGElement
   private readonly ringCircle: SVGCircleElement
   private seeking = false
   private duration = 0
-  private practiceOn = false
+  /** 最近一次分轨练习 UI 状态（标题与菜单行同步用） */
+  private practiceUi: PracticeUiState | null = null
+  private midiConnected = false
 
   constructor(cbs: TransportViewCallbacks) {
+    this.cbs = cbs
     // 侧栏展开按钮：固定在控制行最左、位置始终预留；展开态隐藏但保留占位，
     // 折叠后显示，避免出现时把播放/停止等按钮往右推。与侧栏内收起按钮共用同一侧栏图标。
     this.expandBtn = el('button', {
@@ -138,7 +152,8 @@ export class TransportView implements View {
     this.midiBtn.append(midiKeyboardIcon())
     this.midiBtn.addEventListener('click', () => cbs.onMidiToggle())
 
-    // 练习模式：连接 MIDI 键盘后才可用，未连接置灰禁用
+    // 练习模式：连接 MIDI 键盘后才可用，未连接置灰禁用；
+    // 悬浮在按钮上时其上方展开分轨练习菜单（菜单是包装器子元素，移入菜单不收起）
     this.practiceBtn = el('button', {
       class: 'icon-btn transport__practice',
       title: '练习模式（需先连接 MIDI 键盘）',
@@ -146,6 +161,26 @@ export class TransportView implements View {
     this.practiceBtn.disabled = true
     this.practiceBtn.append(practiceIcon())
     this.practiceBtn.addEventListener('click', () => cbs.onPracticeToggle())
+
+    this.practiceMenuList = el('div', { class: 'transport__practice-menu__list' })
+    this.practiceMenuEmpty = el(
+      'div',
+      { class: 'transport__practice-menu__empty' },
+      '载入曲目后，这里可以按轨开启练习',
+    )
+    const practiceMenu = el(
+      'div',
+      { class: 'transport__practice-menu', role: 'menu' },
+      el('div', { class: 'transport__practice-menu__title' }, '分轨练习'),
+      this.practiceMenuList,
+      this.practiceMenuEmpty,
+    )
+    const practiceWrap = el(
+      'div',
+      { class: 'transport__practice-wrap' },
+      this.practiceBtn,
+      practiceMenu,
+    )
 
     // 播放坞：进度条贴坞上沿，控制行在下；整体钉在页面底部
     this.el = el(
@@ -164,7 +199,7 @@ export class TransportView implements View {
         this.volumeEl,
         modeBar,
         this.midiBtn,
-        this.practiceBtn,
+        practiceWrap,
       ),
     )
   }
@@ -229,12 +264,13 @@ export class TransportView implements View {
    * - 连接尝试中：旋转等待图标，tooltip “连接中（点击取消）”，点击取消；
    * - 已连接：琥珀高亮，tooltip 显示键盘名称（点击断开），点击断开；
    * - 失败态（超时/被拒/不支持等）：恢复暗色，tooltip 提示原因，点击重试。
-   * 练习图标仅在已连接时可用。
+   * 练习图标与菜单行仅在已连接时可用。
    */
   setMidiStatus(ui: MidiUiState): void {
     const { status, attempting, deviceLabel } = ui
     const connected = status === 'connected'
     const spinning = attempting && !connected
+    this.midiConnected = connected
     this.midiBtn.classList.toggle('is-connected', connected)
     this.midiBtn.classList.toggle('is-connecting', spinning)
     this.midiBtn.disabled = status === 'unsupported'
@@ -255,26 +291,81 @@ export class TransportView implements View {
                   ? '连接失败（点击重试）'
                   : '连接 MIDI 键盘'
     this.practiceBtn.disabled = !connected
-    this.practiceBtn.title = this.practiceOn
-      ? '退出练习模式'
-      : connected
-        ? '练习模式'
-        : '练习模式（需先连接 MIDI 键盘）'
+    for (const row of this.practiceRows.values()) {
+      row.item.disabled = !connected
+      row.item.title = connected ? '开关该轨练习' : '需先连接 MIDI 键盘'
+    }
+    this.refreshPracticeTitle()
   }
 
-  /** 同步练习模式开关：开启时琥珀高亮 */
-  setPractice(on: boolean): void {
-    this.practiceOn = on
-    this.practiceBtn.classList.toggle('is-active', on)
-    this.practiceBtn.title = on
-      ? '退出练习模式'
-      : this.practiceBtn.disabled
-        ? '练习模式（需先连接 MIDI 键盘）'
-        : '练习模式'
+  /**
+   * 同步分轨练习状态（设计文档 §4.1）：任一轨开启时按钮琥珀高亮；
+   * 悬浮菜单行同步轨名 / 瀑布流颜色图例 / 开关圆点，未连接时行禁用但菜单仍可查看。
+   */
+  setPractice(ui: PracticeUiState): void {
+    this.practiceUi = ui
+    this.practiceBtn.classList.toggle('is-active', ui.active)
+    const seen = new Set<number>()
+    for (const t of ui.tracks) {
+      seen.add(t.index)
+      let row = this.practiceRows.get(t.index)
+      if (row === undefined) {
+        row = this.buildPracticeRow(t.index)
+        this.practiceRows.set(t.index, row)
+      }
+      row.name.textContent = t.name
+      row.item.classList.toggle('is-active', t.on)
+      row.item.setAttribute('aria-checked', String(t.on))
+    }
+    for (const [index, row] of this.practiceRows) {
+      if (!seen.has(index)) {
+        row.item.remove()
+        this.practiceRows.delete(index)
+      }
+    }
+    this.practiceMenuEmpty.classList.toggle('is-visible', ui.tracks.length === 0)
+    this.refreshPracticeTitle()
   }
 
   /** 同步侧栏折叠态：折叠时显示最左的展开按钮（其位置始终预留，不挤压其它控件） */
   setSidebarCollapsed(collapsed: boolean): void {
     this.expandBtn.classList.toggle('is-visible', collapsed)
+  }
+
+  /** 菜单行：瀑布流轨色渐变图例 + 轨名 + 开关圆点；点击开关该轨（多选，不收起菜单） */
+  private buildPracticeRow(index: number): {
+    item: HTMLButtonElement
+    name: HTMLSpanElement
+  } {
+    const [top, bottom] = trackColor(index)
+    const swatch = el('span', { class: 'transport__practice-item__swatch' })
+    swatch.style.background = `linear-gradient(180deg, rgb(${top[0]},${top[1]},${top[2]}), rgb(${bottom[0]},${bottom[1]},${bottom[2]}))`
+    const name = el('span', { class: 'transport__practice-item__name' })
+    const dot = el('span', { class: 'transport__practice-item__dot' })
+    const item = el(
+      'button',
+      {
+        class: 'transport__practice-item',
+        role: 'menuitemcheckbox',
+        dataset: { track: String(index) },
+      },
+      swatch,
+      name,
+      dot,
+    )
+    item.disabled = !this.midiConnected
+    item.title = this.midiConnected ? '开关该轨练习' : '需先连接 MIDI 键盘'
+    item.addEventListener('click', () => this.cbs.onPracticeTrack(index))
+    this.practiceMenuList.append(item)
+    return { item, name }
+  }
+
+  private refreshPracticeTitle(): void {
+    const ui = this.practiceUi
+    if (!this.midiConnected) {
+      this.practiceBtn.title = '练习模式（需先连接 MIDI 键盘）'
+      return
+    }
+    this.practiceBtn.title = ui !== null && ui.allOn ? '关闭全部轨练习' : '开启全部轨练习'
   }
 }

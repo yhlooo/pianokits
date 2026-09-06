@@ -2,7 +2,7 @@ import { OscillatorEngine } from './core/engine/oscillator-engine'
 import { SmplrEngine } from './core/engine/smplr-engine'
 import { parseMidi } from './core/midi/parse'
 import { quantizeToScore } from './core/midi/quantize'
-import { PracticeController } from './core/practice'
+import { PracticeController, practiceTracksOf } from './core/practice'
 import { Transport } from './core/transport'
 import { FileLibrary } from './storage/library'
 import { el } from './ui/dom'
@@ -96,6 +96,7 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
         transport.stop()
         waterfall.clear()
         scoreView?.clear()
+        practiceController.setTracks([])
         store.update({ currentFile: null, song: null, score: null })
       }
     },
@@ -131,6 +132,7 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
     onExpandSidebar: () => setSidebarCollapsed(false),
     onMidiToggle: () => practiceController.toggleMidi(),
     onPracticeToggle: () => practiceController.togglePractice(),
+    onPracticeTrack: (index) => practiceController.toggleTrack(index),
   })
 
   // ---------- MIDI 键盘 + 练习模式 ----------
@@ -161,20 +163,25 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
   }
   midiErrorClose.addEventListener('click', hideMidiError)
 
-  // 编排控制器（core/practice.ts）：连接生命周期、实时演奏、练习判定、播放镜像到键盘音源；
+  // 编排控制器（core/practice.ts）：连接生命周期、实时演奏、分轨练习判定、播放镜像到键盘音源；
   // 状态经回调推到播放坞按钮与瀑布流键盘反馈（设计文档 20260906-midi-keyboard-and-practice.md §3.5）
+  let practiceWasActive = false
   const practiceController = new PracticeController({
     transport,
     audioCtx,
     callbacks: {
       onStatus: (ui) => transportView.setMidiStatus(ui),
-      onPractice: (on) => {
-        // 练习的视觉载体是瀑布流键盘：开启时自动切到瀑布流视图
-        if (on && store.get().view !== 'waterfall') {
+      onPractice: (ui) => {
+        // 练习的视觉载体是瀑布流键盘：任一轨开启时自动切到瀑布流视图
+        if (ui.active && !practiceWasActive && store.get().view !== 'waterfall') {
           store.update({ view: 'waterfall' })
           applyViewMode('waterfall')
         }
-        transportView.setPractice(on)
+        practiceWasActive = ui.active
+        // 分轨压暗：练习轨正常显示，非练习轨瀑布流暗淡（练习关闭时传 null 恢复）
+        const gated = new Set(ui.tracks.filter((t) => t.on).map((t) => t.index))
+        waterfall.setPracticeTracks(ui.active ? gated : null)
+        transportView.setPractice(ui)
       },
       onFeedback: (fb) => waterfall.setKeyFeedback(fb),
       onConnectError: (message) => showMidiError(message),
@@ -250,6 +257,7 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
       const score = quantizeToScore(song)
       transport.load(song)
       waterfall.setNotes(song.notes)
+      practiceController.setTracks(practiceTracksOf(song))
       const sv = await ensureScoreView()
       sv.setScore(score)
       transportView.setDuration(song.duration)

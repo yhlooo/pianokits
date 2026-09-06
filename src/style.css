@@ -536,6 +536,139 @@ input[type='range']::-moz-range-thumb {
   cursor: default;
 }
 
+/* 练习按钮悬浮菜单（设计文档 20260906-midi-keyboard-and-practice.md §4.1）：
+   悬停在练习按钮上时在其上方展开，逐轨显示瀑布流颜色图例与练习开关，可多选 */
+.transport__practice-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.transport__practice-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  display: none;
+  flex-direction: column;
+  min-width: 208px;
+  max-width: 280px;
+  max-height: 320px;
+  padding: 4px 6px 6px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-toast);
+}
+
+/* 悬停（含从按钮移入菜单途中）与键盘聚焦时保持展开 */
+.transport__practice-wrap:hover .transport__practice-menu,
+.transport__practice-wrap:focus-within .transport__practice-menu {
+  display: flex;
+}
+
+/* 桥接带：盖住按钮与菜单之间的空隙，鼠标移入菜单途中不收起 */
+.transport__practice-menu::before {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: 8px;
+}
+
+.transport__practice-menu__title {
+  padding: 6px 10px 8px;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.transport__practice-menu__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+.transport__practice-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  color: var(--text-1);
+  cursor: pointer;
+}
+
+.transport__practice-item:hover {
+  background: var(--bg-2);
+  color: var(--text-0);
+  border-color: transparent;
+}
+
+/* 颜色图例：对应瀑布流该轨渐变色的色块 */
+.transport__practice-item__swatch {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+
+.transport__practice-item__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8125rem;
+}
+
+/* 开关圆点：该轨练习开启时点亮（琥珀） */
+.transport__practice-item__dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 50%;
+}
+
+.transport__practice-item.is-active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.transport__practice-item.is-active .transport__practice-item__dot {
+  background: var(--accent);
+  border-color: transparent;
+}
+
+/* 未连接 MIDI 键盘：菜单仍可悬浮查看，行禁用不可点 */
+.transport__practice-item:disabled,
+.transport__practice-item:disabled:hover {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-2);
+  opacity: 0.5;
+  cursor: default;
+}
+
+.transport__practice-menu__empty {
+  display: none;
+  padding: 8px 10px 10px;
+  font-size: 0.8125rem;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.transport__practice-menu__empty.is-visible {
+  display: block;
+}
+
 /* ---------- 通知胶囊 ---------- */
 .notice {
   position: fixed;

@@ -18,6 +18,10 @@ const KEY_FADE_MS = 80
 const BLACK_KEY_INSET = 0.18
 const BLACK_KEY_WIDTH = 0.72
 const BLACK_KEY_HEIGHT = 0.62
+/** 练习模式下非练习轨瀑布流的压暗系数（设计文档 20260906-midi-keyboard-and-practice.md §4.2）：
+ *  亮度 0.6 / 不透明度 0.62——比正常暗淡一点、仍清晰可辨，突出正在练习的轨 */
+const PRACTICE_DIM_VF = 0.6
+const PRACTICE_DIM_ALPHA = 0.62
 
 export interface WaterfallViewCallbacks {
   onSeek(seconds: number): void
@@ -71,6 +75,11 @@ export class WaterfallView implements View {
   private readonly releasedAt = new Map<number, { track: number; at: number }>()
   /** 练习模式键盘反馈（按住/按错键）；null = 不显示 */
   private keyFeedback: WaterfallKeyFeedback | null = null
+  /**
+   * 练习模式开启练习的轨集合（分轨压暗）：集合内的轨正常显示，其余轨的
+   * 音符条与琴键点亮压暗；null = 练习关闭（全部正常显示）
+   */
+  private practiceTracks: ReadonlySet<number> | null = null
   private readonly resizeObserver: ResizeObserver
 
   constructor(cbs: WaterfallViewCallbacks) {
@@ -156,6 +165,16 @@ export class WaterfallView implements View {
   /** 练习模式键盘反馈：按住键琥珀点亮、按错键红色（null 清除） */
   setKeyFeedback(fb: WaterfallKeyFeedback | null): void {
     this.keyFeedback = fb
+    this.render()
+  }
+
+  /**
+   * 分轨压暗（设计文档 20260906-midi-keyboard-and-practice.md §4.2）：
+   * 传入开启练习的轨集合——这些轨正常显示，其余轨瀑布流压暗；
+   * null = 关闭练习，全部正常显示。
+   */
+  setPracticeTracks(tracks: ReadonlySet<number> | null): void {
+    this.practiceTracks = tracks
     this.render()
   }
 
@@ -332,10 +351,12 @@ export class WaterfallView implements View {
       if (y1 - y0 < 1) continue
 
       const [top, bottom] = trackColor(n.trackIndex)
+      // 分轨压暗：练习模式下非练习轨暗淡，练习轨正常显示
+      const dimmed = this.practiceTracks !== null && !this.practiceTracks.has(n.trackIndex)
       // 力度映射：弱音更暗更淡，强音更亮更实
       const v = Math.max(0, Math.min(1, n.velocity / 127))
-      const vf = 0.55 + 0.5 * v
-      const alpha = 0.55 + 0.45 * v
+      const vf = (0.55 + 0.5 * v) * (dimmed ? PRACTICE_DIM_VF : 1)
+      const alpha = (0.55 + 0.45 * v) * (dimmed ? PRACTICE_DIM_ALPHA : 1)
 
       const col = n.pitch - MIN_PITCH
       const black = BLACK_PCS.has(n.pitch % 12)
@@ -346,7 +367,7 @@ export class WaterfallView implements View {
       g.addColorStop(0, shade(top, Math.min(1.05, vf)))
       g.addColorStop(1, shade(bottom, vf))
       ctx.globalAlpha = alpha
-      ctx.shadowColor = rgba(top, 0.45)
+      ctx.shadowColor = rgba(top, dimmed ? 0.18 : 0.45)
       ctx.shadowBlur = 6
       ctx.fillStyle = g
       const radius = Math.min(3, keyW / 4, (y1 - y0) / 2)
@@ -363,7 +384,8 @@ export class WaterfallView implements View {
     }
   }
 
-  /** 发声中的琴键点亮（颜色跟随音符轨色，同键多音符取最近 onset；释放后 80ms 渐隐） */
+  /** 发声中的琴键点亮（颜色跟随音符轨色，同键多音符取最近 onset；释放后 80ms 渐隐；
+   *  练习模式下非练习轨点亮随瀑布流一起压暗） */
   private drawActiveKeys(w: number, keyboardTop: number): void {
     const ctx = this.ctx
     const keyW = w / PITCH_COUNT
@@ -404,29 +426,34 @@ export class WaterfallView implements View {
       ctx.globalAlpha = 1
     }
 
-    // 按轨色分批绘制（批次数 ≤ 色板大小 5，每批一次 fillStyle/shadow 设置）
+    // 按轨色 × 是否压暗分批绘制（批次数 ≤ 色板大小 5 × 2，每批一次 fillStyle/shadow 设置）
+    const isDimmed = (track: number): boolean =>
+      this.practiceTracks !== null && !this.practiceTracks.has(track)
     const byColor = new Map<number, [number, number][]>()
-    const addEntry = (colorIndex: number, entry: [number, number]): void => {
-      let list = byColor.get(colorIndex)
+    const addEntry = (colorIndex: number, dimmed: boolean, entry: [number, number]): void => {
+      const key = colorIndex * 2 + (dimmed ? 1 : 0)
+      let list = byColor.get(key)
       if (list === undefined) {
         list = []
-        byColor.set(colorIndex, list)
+        byColor.set(key, list)
       }
       list.push(entry)
     }
-    for (const [p, track] of active) addEntry(track % TRACK_COLORS.length, [p, 1])
+    for (const [p, track] of active) addEntry(track % TRACK_COLORS.length, isDimmed(track), [p, 1])
     for (const [p, v] of this.releasedAt) {
       const alpha = 1 - (now - v.at) / KEY_FADE_MS
-      addEntry(v.track % TRACK_COLORS.length, [p, alpha])
+      addEntry(v.track % TRACK_COLORS.length, isDimmed(v.track), [p, alpha])
     }
-    const paint = (entries: [number, number][], color: TrackColor): void => {
-      ctx.shadowColor = rgba(color[0], 0.85)
-      ctx.shadowBlur = 10
-      ctx.fillStyle = shade(color[0], 1)
+    const paint = (entries: [number, number][], color: TrackColor, dimmed: boolean): void => {
+      ctx.shadowColor = rgba(color[0], dimmed ? 0.3 : 0.85)
+      ctx.shadowBlur = dimmed ? 6 : 10
+      ctx.fillStyle = shade(color[0], dimmed ? 0.55 : 1)
       for (const [p, alpha] of entries) drawKey(p, alpha)
       ctx.shadowBlur = 0
     }
-    for (const [colorIndex, entries] of byColor) paint(entries, TRACK_COLORS[colorIndex])
+    for (const [key, entries] of byColor) {
+      paint(entries, TRACK_COLORS[key >> 1], (key & 1) === 1)
+    }
   }
 
   /** 练习模式键盘反馈：按住键琥珀点亮、按错键红色 + 光晕（画在轨色点亮之上） */

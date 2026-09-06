@@ -1,5 +1,5 @@
 import type { Note, Song } from './model'
-import type { AudioEngine } from './engine/types'
+import type { AudioEngine, ScheduledNote } from './engine/types'
 
 export type TransportState = 'empty' | 'ready' | 'playing' | 'paused'
 
@@ -8,6 +8,16 @@ export interface TransportHost {
   now(): number
   setInterval(cb: () => void, ms: number): number
   clearInterval(id: number): void
+}
+
+/**
+ * MIDI 输出镜像（可选）：走带排期的每个音符同步发一份到外部 MIDI 输出
+ * （如键盘自带音源，与电脑播放同步发声；设计文档 20260906-midi-keyboard-and-practice.md §3.6）。
+ * 实现为 core/midi/output.ts 的 MidiOutputSink（结构化匹配，无需相互引用）。
+ */
+export type MidiOutputSink = {
+  scheduleNote(ev: ScheduledNote): void
+  allNotesOff(): void
 }
 
 /** lookahead 窗口（秒）：调度器把未来 100ms 内的音符一次性排入引擎 */
@@ -59,6 +69,8 @@ export class Transport {
   /** 练习模式等待中的和弦；null = 未等待 */
   private waitingChord: PracticeChord | null = null
   private practiceChordCb: PracticeChordListener | null = null
+  /** MIDI 输出镜像（可选）：与引擎同步排期的外部音源（无输出端口时为 null） */
+  private midiOut: MidiOutputSink | null = null
 
   constructor(engine: AudioEngine, host: TransportHost) {
     this.engine = engine
@@ -98,7 +110,7 @@ export class Transport {
     }
     const wasPlaying = this._state === 'playing'
     const pos = this.position
-    this.engine.allNotesOff()
+    this.silenceAll()
     this.engine = engine
     engine.setVolume(this.volume)
     if (this.song !== null) {
@@ -116,7 +128,7 @@ export class Transport {
 
   load(song: Song): void {
     this.stopTicker()
-    this.engine.allNotesOff()
+    this.silenceAll()
     this.cancelWaiting()
     this.song = song
     this.notes = song.notes
@@ -144,7 +156,7 @@ export class Transport {
     if (this._state !== 'playing') return
     this.pausedAt = this.position
     this.stopTicker()
-    this.engine.allNotesOff()
+    this.silenceAll()
     // 取消练习等待：暂停期间琴键不参与判定，恢复播放时重新进入等待并回调
     this.cancelWaiting()
     this.setState('paused')
@@ -155,7 +167,7 @@ export class Transport {
     this.pausedAt = 0
     this.offset = this.host.now()
     this.stopTicker()
-    this.engine.allNotesOff()
+    this.silenceAll()
     this.cancelWaiting()
     this.nextIndex = 0
     this.setState('paused')
@@ -165,7 +177,7 @@ export class Transport {
     if (this.song === null) return
     const wasPlaying = this._state === 'playing'
     const target = Math.max(0, Math.min(this._duration, seconds))
-    this.engine.allNotesOff()
+    this.silenceAll()
     this.pausedAt = target
     this.cancelWaiting()
     this.setPointer(target)
@@ -188,6 +200,11 @@ export class Transport {
     this.engine.noteOff(pitch)
   }
 
+  /** 设置 / 解除 MIDI 输出镜像（外部音源与引擎同步发声；无输出端口时传 null） */
+  setMidiOutput(sink: MidiOutputSink | null): void {
+    this.midiOut = sink
+  }
+
   get practiceMode(): boolean {
     return this.practiceEnabled
   }
@@ -201,7 +218,7 @@ export class Transport {
     if (this.practiceEnabled === on) return
     this.practiceEnabled = on
     if (on) {
-      this.engine.allNotesOff()
+      this.silenceAll()
       this.cancelWaiting()
       if (this.song !== null) this.setNotePointerStart(this.position)
     } else {
@@ -227,7 +244,7 @@ export class Transport {
     const now = this.host.now()
     for (const n of chord.notes) {
       if (n.end <= chord.start) continue
-      this.engine.scheduleNote({
+      this.scheduleToBoth({
         pitch: n.pitch,
         velocity: n.velocity,
         time: now,
@@ -244,7 +261,7 @@ export class Transport {
 
   dispose(): void {
     this.stopTicker()
-    this.engine.allNotesOff()
+    this.silenceAll()
     this.listeners.clear()
     this.practiceChordCb = null
     this.waitingChord = null
@@ -269,7 +286,7 @@ export class Transport {
       this.nextIndex++
       if (n.end <= from) continue
       const atTime = this.offset + n.start
-      this.engine.scheduleNote({
+      this.scheduleToBoth({
         pitch: n.pitch,
         velocity: n.velocity,
         time: atTime,
@@ -325,6 +342,18 @@ export class Transport {
     if (this.waitingChord === null) return
     this.waitingChord = null
     this.practiceChordCb?.(null)
+  }
+
+  /** 音符排期：引擎与 MIDI 输出镜像同步各发一份（设计文档 §3.6） */
+  private scheduleToBoth(ev: ScheduledNote): void {
+    this.engine.scheduleNote(ev)
+    this.midiOut?.scheduleNote(ev)
+  }
+
+  /** 静默：引擎止音 + MIDI 输出清空队列并 All Notes Off（暂停/停止/跳转等） */
+  private silenceAll(): void {
+    this.engine.allNotesOff()
+    this.midiOut?.allNotesOff()
   }
 
   private startTicker(): void {

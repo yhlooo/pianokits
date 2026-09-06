@@ -161,10 +161,11 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
   }
   midiErrorClose.addEventListener('click', hideMidiError)
 
-  // 编排控制器（core/practice.ts）：连接生命周期、实时演奏、练习判定；
+  // 编排控制器（core/practice.ts）：连接生命周期、实时演奏、练习判定、播放镜像到键盘音源；
   // 状态经回调推到播放坞按钮与瀑布流键盘反馈（设计文档 20260906-midi-keyboard-and-practice.md §3.5）
   const practiceController = new PracticeController({
     transport,
+    audioCtx,
     callbacks: {
       onStatus: (ui) => transportView.setMidiStatus(ui),
       onPractice: (on) => {

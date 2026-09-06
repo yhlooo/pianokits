@@ -87,8 +87,21 @@ class FakeInput {
   }
 }
 
+/** 假 MIDIOutput：记录 send/clear（镜像 sink 的目标） */
+class FakeOutput {
+  sent: number[][] = []
+  clearCount = 0
+  send(data: Uint8Array): void {
+    this.sent.push([...data])
+  }
+  clear(): void {
+    this.clearCount++
+  }
+}
+
 class FakeAccess {
   inputs = new Map<string, FakeInput>()
+  outputs = new Map<string, FakeOutput>()
   private stateCbs = new Set<() => void>()
   addEventListener(_type: string, cb: () => void): void {
     this.stateCbs.add(cb)
@@ -128,6 +141,7 @@ describe('PracticeController 编排', () => {
     const errors: string[] = []
     const c = new PracticeController({
       transport,
+      audioCtx: { currentTime: 0 },
       callbacks: {
         onStatus: (ui) => {
           statuses.push(ui.status)
@@ -210,6 +224,7 @@ describe('PracticeController 编排', () => {
     stubNavigator(() => Promise.resolve(new FakeAccess()))
     const c = new PracticeController({
       transport,
+      audioCtx: { currentTime: 0 },
       callbacks: {
         onStatus: () => {},
         onPractice: () => {},
@@ -236,6 +251,7 @@ describe('PracticeController 编排', () => {
     const errors: string[] = []
     const c = new PracticeController({
       transport,
+      audioCtx: { currentTime: 0 },
       callbacks: {
         onStatus: (ui) => uiStates.push({ status: ui.status, attempting: ui.attempting }),
         onPractice: () => {},
@@ -266,6 +282,7 @@ describe('PracticeController 编排', () => {
       const errors: string[] = []
       const c = new PracticeController({
         transport,
+        audioCtx: { currentTime: 0 },
         callbacks: {
           onStatus: (ui) => uiStates.push({ status: ui.status, attempting: ui.attempting }),
           onPractice: () => {},
@@ -293,6 +310,7 @@ describe('PracticeController 编排', () => {
     const errors: string[] = []
     const c = new PracticeController({
       transport,
+      audioCtx: { currentTime: 0 },
       callbacks: {
         onStatus: () => {},
         onPractice: () => {},
@@ -303,6 +321,54 @@ describe('PracticeController 编排', () => {
     c.toggleMidi()
     await vi.waitFor(() => expect(c.status).toBe('denied'))
     expect(errors).toEqual(['MIDI 授权被拒绝'])
+    c.dispose()
+  })
+
+  it('有输出端口：走带排期同步镜像到键盘音源；断开后解除镜像', async () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const transport = new Transport(engine, host)
+    const access = new FakeAccess()
+    const input = new FakeInput()
+    const output = new FakeOutput()
+    access.inputs.set('1', input)
+    access.outputs.set('o1', output)
+    stubNavigator(() => Promise.resolve(access))
+    const c = new PracticeController({
+      transport,
+      audioCtx: { currentTime: 0 },
+      callbacks: {
+        onStatus: () => {},
+        onPractice: () => {},
+        onFeedback: () => {},
+        onConnectError: () => {},
+      },
+    })
+    c.toggleMidi()
+    await vi.waitFor(() => expect(c.status).toBe('connected'))
+
+    // 播放：3 个和弦音符同时排入引擎与输出端口（Note On ×3 + Note Off ×3）
+    transport.load(makeSong())
+    transport.play()
+    host.advance(0.45)
+    host.fireTicks()
+    expect(engine.scheduled).toHaveLength(3)
+    const noteOns = output.sent.filter((d) => d[0] === 0x90)
+    const noteOffs = output.sent.filter((d) => d[0] === 0x80)
+    expect(noteOns.map((d) => d[1])).toEqual([60, 64, 67])
+    expect(noteOns.map((d) => d[2])).toEqual([100, 100, 100])
+    expect(noteOffs.map((d) => d[1])).toEqual([60, 64, 67])
+
+    // 断开：镜像解除并静默输出（清队列 + 全音符止音）
+    const sentBefore = output.sent.length
+    c.toggleMidi()
+    await vi.waitFor(() => expect(c.status).toBe('idle'))
+    expect(output.clearCount).toBeGreaterThan(0)
+    // 断开后新排期不再镜像
+    transport.play()
+    host.advance(0.1)
+    host.fireTicks()
+    expect(output.sent.length).toBe(sentBefore + 32) // 32 = 16 通道 CC123 + CC120
     c.dispose()
   })
 })

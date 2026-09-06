@@ -1,6 +1,7 @@
 import type { MidiNoteEvent } from './midi/input'
 import { MidiConnection, type MidiConnectionStatus } from './midi/connection'
 import { ChordGate } from './midi/chord-gate'
+import { MidiOutputSink } from './midi/output'
 import type { Transport } from './transport'
 
 /** 练习模式键盘反馈：按住键 + 按错键（推给瀑布流渲染，设计文档 20260906-midi-keyboard-and-practice.md §4.2） */
@@ -29,13 +30,18 @@ export interface PracticeCallbacks {
 
 export interface PracticeControllerOptions {
   transport: Transport
+  /** 时间换算用（AudioContext 时间 → MIDI send 时间戳），只读 currentTime */
+  audioCtx: { currentTime: number }
   callbacks: PracticeCallbacks
 }
 
 /**
  * MIDI 键盘 + 练习模式编排（不触碰 DOM，设计文档 20260906-midi-keyboard-and-practice.md §3.5）：
  * - 连接生命周期：点击尝试连接（5s 限时）、点击取消、点击断开；失败经 onConnectError 报错；
- * - 实时演奏：已连接且非练习模式时按键直达引擎（经 Transport 透传）；
+ * - 播放镜像（§3.6）：连接产生的输出端口挂到 MidiOutputSink，走带排期的每个音符同步
+ *   发一份到键盘自带音源（与电脑播放同步发声）；断开/拔出时解除；
+ * - 实时演奏：已连接且非练习模式时按键直达引擎（经 Transport 透传）；按键**不**回送
+ *   输出端口（键盘 Local Control 开启时会造成叠音/回授）；
  * - 练习模式：仅在 connected 时可开；接线 Transport 等待回调 ↔ ChordGate，
  *   触发即放行；gate 每次变化后把按住/按错键经 onFeedback 外发；
  * - 连接状态离开 connected（断开/设备拔出）时强制退出练习模式。
@@ -44,6 +50,7 @@ export class PracticeController {
   private readonly transport: Transport
   private readonly cbs: PracticeCallbacks
   private readonly midi: MidiConnection
+  private readonly sink: MidiOutputSink
   private readonly gate = new ChordGate()
   private practiceOn = false
   private disposed = false
@@ -51,6 +58,7 @@ export class PracticeController {
   constructor(opts: PracticeControllerOptions) {
     this.transport = opts.transport
     this.cbs = opts.callbacks
+    this.sink = new MidiOutputSink(opts.audioCtx)
     this.midi = new MidiConnection({
       onStatus: (status) => {
         if (this.disposed) return
@@ -64,6 +72,7 @@ export class PracticeController {
         this.emitMidiState()
       },
       onNote: (ev) => this.onNote(ev),
+      onOutputs: (outputs) => this.syncOutputs(outputs),
     })
     this.transport.onPracticeChord((chord) => {
       if (chord === null) {
@@ -121,7 +130,18 @@ export class PracticeController {
       this.practiceOn = false
       this.transport.setPracticeMode(false)
     }
+    this.transport.setMidiOutput(null)
+    this.sink.dispose()
     this.midi.dispose()
+  }
+
+  /** 输出端口变化：同步到镜像 sink 并挂/摘 Transport（无输出端口时不镜像；
+   *  端口清空时先静默并清队列，避免键盘上残留长音） */
+  private syncOutputs(outputs: readonly MIDIOutput[]): void {
+    if (this.disposed) return
+    if (outputs.length === 0) this.sink.allNotesOff()
+    this.sink.sync(outputs)
+    this.transport.setMidiOutput(outputs.length > 0 ? this.sink : null)
   }
 
   private setPractice(on: boolean): void {

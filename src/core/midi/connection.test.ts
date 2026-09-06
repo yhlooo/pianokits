@@ -21,9 +21,19 @@ class FakeInput {
   }
 }
 
-/** 假 MIDIAccess：inputs Map + statechange 监听 */
+/** 假 MIDIOutput：最小实现（send/clear 由镜像 sink 调用） */
+class FakeOutput {
+  sent: number[][] = []
+  send(data: Uint8Array): void {
+    this.sent.push([...data])
+  }
+  clear(): void {}
+}
+
+/** 假 MIDIAccess：inputs/outputs Map + statechange 监听 */
 class FakeAccess {
   inputs = new Map<string, FakeInput>()
+  outputs = new Map<string, FakeOutput>()
   private stateCbs = new Set<() => void>()
 
   addEventListener(_type: string, cb: () => void): void {
@@ -287,5 +297,29 @@ describe('MidiConnection 连接尝试（超时/取消/设备名）', () => {
     expect(c.status).toBe('connected')
     expect(statuses).toEqual(['connecting', 'connected', 'idle', 'connecting', 'connected'])
     c.disconnect()
+  })
+
+  it('输出端口快照随连接同步/热插拔刷新，断开时清空', async () => {
+    const access = new FakeAccess()
+    const out = new FakeOutput()
+    access.outputs.set('o1', out)
+    access.inputs.set('1', new FakeInput())
+    stubNavigator(() => Promise.resolve(access))
+    const snapshots: unknown[][] = []
+    const c = new MidiConnection({
+      onStatus: () => {},
+      onNote: () => {},
+      onOutputs: (outputs) => snapshots.push([...outputs]),
+    })
+    await c.connect()
+    expect(snapshots.at(-1)).toEqual([out])
+    // 热插拔：新输出端口被快照
+    const out2 = new FakeOutput()
+    access.outputs.set('o2', out2)
+    access.fireStateChange()
+    expect(snapshots.at(-1)).toEqual([out, out2])
+    // 断开：输出快照清空
+    c.disconnect()
+    expect(snapshots.at(-1)).toEqual([])
   })
 })

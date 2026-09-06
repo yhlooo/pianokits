@@ -28,6 +28,8 @@ export interface MidiConnectionCallbacks {
   onStatus(status: MidiConnectionStatus): void
   /** 解码后的按键事件（复用 core/midi/input.ts 的 parseMidiMessage） */
   onNote(ev: MidiNoteEvent): void
+  /** 输出端口变化（连接同步 / 热插拔 / 断开清空）；镜像播放音符到键盘音源用 */
+  onOutputs?(outputs: readonly MIDIOutput[]): void
 }
 
 function deviceLabel(input: MIDIInput): string {
@@ -144,7 +146,7 @@ export class MidiConnection {
     if (ev !== null) this.cbs.onNote(ev)
   }
 
-  /** 重新挂载当前全部输入并刷新状态（初始接入与热插拔共用）；
+  /** 重新挂载当前全部输入/输出并刷新状态（初始接入与热插拔共用）；
    *  连上（≥1 台设备）即结束连接尝试（清计时器），无设备则保持 attempting 等待超时 */
   private sync(): void {
     if (this.access === null) return
@@ -153,6 +155,8 @@ export class MidiConnection {
       input.addEventListener('midimessage', this.onMessage)
       this.attachedInputs.push(input)
     }
+    // 输出端口快照（镜像播放音符到键盘音源用；断开时由 teardownAccess 通知清空）
+    this.cbs.onOutputs?.([...this.access.outputs.values()])
     if (this.attachedInputs.length > 0) {
       this.clearTimeout()
       this._attempting = false
@@ -169,12 +173,13 @@ export class MidiConnection {
     this.attachedInputs.length = 0
   }
 
-  /** 摘掉全部输入监听与 statechange 监听并丢弃 access */
+  /** 摘掉全部输入监听与 statechange 监听并丢弃 access；输出快照清空 */
   private teardownAccess(): void {
     this.detachInputs()
     if (this.access !== null) {
       this.access.removeEventListener('statechange', this.onStateChange)
       this.access = null
+      this.cbs.onOutputs?.([])
     }
   }
 

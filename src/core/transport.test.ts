@@ -393,3 +393,103 @@ describe('Transport 练习模式', () => {
     expect(host.activeTimers).toBe(0)
   })
 })
+
+describe('Transport MIDI 输出镜像', () => {
+  class FakeSink {
+    scheduled: ScheduledNote[] = []
+    allNotesOffCount = 0
+
+    scheduleNote(ev: ScheduledNote): void {
+      this.scheduled.push(ev)
+    }
+    allNotesOff(): void {
+      this.allNotesOffCount++
+    }
+  }
+
+  it('排期音符同步镜像到输出（与引擎同一份排期数据）', () => {
+    const engine = new FakeEngine()
+    const sink = new FakeSink()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    t.setMidiOutput(sink)
+    t.load(
+      makeSong([
+        { pitch: 60, start: 0.05, end: 0.3 },
+        { pitch: 64, start: 1.0, end: 1.2 },
+      ]),
+    )
+    t.play()
+    host.fireTicks()
+    expect(sink.scheduled).toHaveLength(1)
+    expect(sink.scheduled[0]).toEqual(engine.scheduled[0])
+    host.advance(0.95)
+    host.fireTicks()
+    expect(sink.scheduled).toHaveLength(2)
+    expect(sink.scheduled[1]).toEqual(engine.scheduled[1])
+  })
+
+  it('解除镜像后不再发送', () => {
+    const engine = new FakeEngine()
+    const sink = new FakeSink()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    t.load(makeSong([{ pitch: 60, start: 0.05, end: 0.3 }]))
+    t.play()
+    host.fireTicks()
+    expect(sink.scheduled).toHaveLength(0)
+    t.setMidiOutput(sink)
+    host.advance(0.2)
+    host.fireTicks()
+    // 指针已越过该音符：挂上 sink 后无新排期，仍为 0
+    expect(sink.scheduled).toHaveLength(0)
+    t.setMidiOutput(null)
+  })
+
+  it('暂停/停止/跳转/换引擎触发输出静默', () => {
+    const engine = new FakeEngine()
+    const sink = new FakeSink()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    t.load(makeSong([{ pitch: 60, start: 0.1, end: 1 }]))
+    t.setMidiOutput(sink)
+    t.play()
+    host.fireTicks()
+    host.advance(0.3)
+    t.pause()
+    expect(sink.allNotesOffCount).toBe(1)
+    t.play()
+    host.fireTicks()
+    t.stop()
+    expect(sink.allNotesOffCount).toBe(2)
+    t.play()
+    host.fireTicks()
+    t.seek(0.5)
+    expect(sink.allNotesOffCount).toBe(3)
+    const engine2 = new FakeEngine('smplr')
+    t.setEngine(engine2)
+    expect(sink.allNotesOffCount).toBe(4)
+  })
+
+  it('练习模式放行和弦同样镜像到输出', () => {
+    const engine = new FakeEngine()
+    const sink = new FakeSink()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    t.setMidiOutput(sink)
+    t.load(
+      makeSong([
+        { pitch: 60, start: 0.5, end: 0.9 },
+        { pitch: 64, start: 0.5, end: 0.9 },
+      ]),
+    )
+    t.setPracticeMode(true)
+    t.play()
+    host.advance(0.55)
+    host.fireTicks()
+    expect(sink.scheduled).toHaveLength(0) // 等待中不发声也不镜像
+    t.releaseChord()
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([60, 64])
+    expect(sink.scheduled).toEqual(engine.scheduled)
+  })
+})

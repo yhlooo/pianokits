@@ -1,18 +1,17 @@
 import type { Note } from '../core/model'
 import { el } from './dom'
 import {
-  BLACK_PCS,
   KEYBOARD_H_RATIO,
   MAX_PITCH,
   MIN_PITCH,
   buildPiano,
+  keyGeometry,
   type PianoLit,
   type PianoView,
 } from './piano-keyboard'
 import type { View } from './store'
 import { TRACK_COLORS, trackColor } from './track-colors'
 
-const PITCH_COUNT = MAX_PITCH - MIN_PITCH + 1
 const DEFAULT_PX_PER_SEC = 140
 /** 点亮键释放后的渐隐时长（ms） */
 const KEY_FADE_MS = 80
@@ -66,6 +65,8 @@ function overTuple(c: Rgb, over: Rgb, t: number): Rgb {
  * 无中间判定线）；音符条自上而下坠落，
  * 落到琴键的瞬间即发声时刻（与音频调度共用同一时钟，天然对齐），发声期间琴键点亮。
  * 视觉（视觉风格指南 §6.4）：按轨五色循环（一轨一色，第 6 轨复用第 1 色）+ 力度→明度映射 + 音区参考线。
+ * 横向几何：音符条与音区参考线按键盘几何绘制（keyGeometry，与 DOM 键盘同一套公式）——
+ * 白键音符宽 = 白键宽、黑键音符宽 = 黑键宽（按组外扩定位），与底部键盘严格对齐、边缘不漂移。
  * 交互：点击跳转、拖拽平移（联动进度条，松手后恢复跟随）、双击恢复跟随。
  */
 export class WaterfallView implements View {
@@ -258,15 +259,14 @@ export class WaterfallView implements View {
     this.applyKeyLights()
   }
 
-  /** 音区参考线：每个 C 音位置 1px 发丝竖线 */
+  /** 音区参考线：每个 C 音位置 1px 发丝竖线，画在 C 键左边缘（B|C 键缝），与键盘严格对齐 */
   private drawLaneGuides(w: number, noteAreaH: number): void {
     const ctx = this.ctx
-    const keyW = w / PITCH_COUNT
     ctx.fillStyle = 'rgba(255,255,255,0.04)'
-    for (let i = 0; i < PITCH_COUNT; i++) {
-      const pc = (MIN_PITCH + i) % 12
-      if (pc !== 0) continue
-      ctx.fillRect(Math.round(i * keyW) + 0.5, 0, 1, noteAreaH)
+    for (let p = MIN_PITCH; p <= MAX_PITCH; p++) {
+      if (p % 12 !== 0) continue
+      const left = keyGeometry(w, p).left
+      ctx.fillRect(Math.round(left) + 0.5, 0, 1, noteAreaH)
     }
   }
 
@@ -349,10 +349,13 @@ export class WaterfallView implements View {
     this.piano.setLit(lit)
   }
 
-  /** 音符条：按轨五色循环（一轨一色），力度调制明度与透明度，顶部 1px 高光 */
+  /**
+   * 音符条：按轨五色循环（一轨一色），力度调制明度与透明度，顶部 1px 高光。
+   * 横向按键盘几何（keyGeometry）：白键音符宽 = 白键宽、黑键音符宽 = 黑键宽，
+   * 左边缘与琴键左边缘重合 → 与底部键盘严格对齐。
+   */
   private drawNotes(w: number, noteAreaH: number, yAt: (t: number) => number): void {
     if (this.notes.length === 0) return
-    const keyW = w / PITCH_COUNT
     // 可见窗口：[判定线时间, 画布顶边时间] = [viewTopSec - noteAreaH/pps, viewTopSec]
     const tKey = this.viewTopSec - noteAreaH / this.pxPerSecond
 
@@ -385,10 +388,8 @@ export class WaterfallView implements View {
       const vf = (0.55 + 0.5 * v) * (dimmed ? PRACTICE_DIM_VF : 1)
       const alpha = (0.55 + 0.45 * v) * (dimmed ? PRACTICE_DIM_ALPHA : 1)
 
-      const col = n.pitch - MIN_PITCH
-      const black = BLACK_PCS.has(n.pitch % 12)
-      const x = col * keyW + keyW * (black ? 0.1 : 0.07)
-      const bw = keyW * (black ? 0.8 : 0.86)
+      // 键位几何 = 琴键横向占位（白键宽 / 黑键宽 + 分组外扩定位），与 DOM 键盘同一公式
+      const { left, width: keyWidth } = keyGeometry(w, n.pitch)
 
       const g = ctx.createLinearGradient(0, y0, 0, y1)
       g.addColorStop(0, shade(top, Math.min(1.05, vf)))
@@ -397,14 +398,14 @@ export class WaterfallView implements View {
       ctx.shadowColor = rgba(top, dimmed ? 0.18 : 0.45)
       ctx.shadowBlur = 6
       ctx.fillStyle = g
-      const radius = Math.min(3, keyW / 4, (y1 - y0) / 2)
-      this.roundRect(x, y0, bw, y1 - y0, radius)
+      const radius = Math.min(3, keyWidth / 4, (y1 - y0) / 2)
+      this.roundRect(left, y0, keyWidth, y1 - y0, radius)
       ctx.fill()
       ctx.shadowBlur = 0
       // 顶部 1px 高光边（音符够高时才有意义）
       if (y1 - y0 > 4) {
         ctx.fillStyle = 'rgba(255,255,255,0.22)'
-        this.roundRect(x, y0, bw, 1, 0.5)
+        this.roundRect(left, y0, keyWidth, 1, 0.5)
         ctx.fill()
       }
       ctx.globalAlpha = 1

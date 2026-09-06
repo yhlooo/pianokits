@@ -9,12 +9,12 @@ iPad 上所有浏览器（Safari、Chrome、Edge…）都被迫使用 WebKit 内
 WebKit，且 **Apple 已于 2020 年公开表态（指纹识别担忧）不会在 Safari 原生支持 Web MIDI**
 （参考文档 §1、§2）。“换浏览器”与“等苹果”都不是出路。可行路径有四条：
 
-| 方案 | 代码改动 | 用户门槛 | 硬件覆盖 | 定位 |
-| ---- | -------- | -------- | -------- | ---- |
-| A. 第三方 MIDI 浏览器 App（Web MIDI Browser） | 零 | 装 App、在其中打开站点 | USB + BLE（Core MIDI 全量） | 快速验证体验 |
-| B. 原生壳包装（WKWebView/Capacitor + Core MIDI 桥） | 零（App 侧），新增原生壳工程 | 装 App | USB + BLE（Core MIDI 全量） | 产品化正路 |
-| C. BLE MIDI 经 Web Bluetooth 扩展（beacio） | 中（新写 BLE MIDI provider） | 装扩展 + 蓝牙键盘 | 仅 BLE 键盘 | Safari 内原生体验 |
-| D. 屏上琴键兜底（纯 Web） | 小 | 无 | 无（不接外设） | 所有平台兜底 |
+| 方案                                                | 代码改动                     | 用户门槛               | 硬件覆盖                    | 定位              |
+| --------------------------------------------------- | ---------------------------- | ---------------------- | --------------------------- | ----------------- |
+| A. 第三方 MIDI 浏览器 App（Web MIDI Browser）       | 零                           | 装 App、在其中打开站点 | USB + BLE（Core MIDI 全量） | 快速验证体验      |
+| B. 原生壳包装（WKWebView/Capacitor + Core MIDI 桥） | 零（App 侧），新增原生壳工程 | 装 App                 | USB + BLE（Core MIDI 全量） | 产品化正路        |
+| C. BLE MIDI 经 Web Bluetooth 扩展（beacio）         | 中（新写 BLE MIDI provider） | 装扩展 + 蓝牙键盘      | 仅 BLE 键盘                 | Safari 内原生体验 |
+| D. 屏上琴键兜底（纯 Web）                           | 小                           | 无                     | 无（不接外设）              | 所有平台兜底      |
 
 **推荐**：先用 A 做零成本验证；决定认真支持 iPad 时走 B（App 代码零改动，接缝已具备）；
 键盘支持蓝牙且想留在 Safari 的走 C；无论哪条，D 都值得作为无外设场景的兜底。
@@ -34,12 +34,12 @@ WebKit，且 **Apple 已于 2020 年公开表态（指纹识别担忧）不会�
 
 排查 `src/` 后确认，Web MIDI 的触点收敛在极少几处（这是所有替代方案都能低成本落地的关键）：
 
-| 触点 | 位置 | 职责 |
-| ---- | ---- | ---- |
+| 触点     | 位置                                              | 职责                                                                    |
+| -------- | ------------------------------------------------- | ----------------------------------------------------------------------- |
 | 输入接入 | `src/core/midi/connection.ts`（`MidiConnection`） | `navigator.requestMIDIAccess()` → 挂 `MIDIInput` → 解码 `MidiNoteEvent` |
-| 消息解析 | `src/core/midi/input.ts`（`parseMidiMessage`） | 纯函数，与浏览器无关 |
-| 输出镜像 | `src/core/midi/output.ts`（`MidiOutputSink`） | 走带排期音符 → `MIDIOutput.send()`（键盘音源同步） |
-| 调试工具 | `src/debug/midi-keyboard.ts` | 同用 `navigator.requestMIDIAccess`（参考实现，独立） |
+| 消息解析 | `src/core/midi/input.ts`（`parseMidiMessage`）    | 纯函数，与浏览器无关                                                    |
+| 输出镜像 | `src/core/midi/output.ts`（`MidiOutputSink`）     | 走带排期音符 → `MIDIOutput.send()`（键盘音源同步）                      |
+| 调试工具 | `src/debug/midi-keyboard.ts`                      | 同用 `navigator.requestMIDIAccess`（参考实现，独立）                    |
 
 结论：**只要在 JS 侧把 `navigator.requestMIDIAccess` / `MIDIInput` / `MIDIOutput` 的 API
 形状补齐（polyfill），应用代码一行都不用改**——练习模式、播放镜像、调试工具全部照常工作。
@@ -110,7 +110,23 @@ iPad 安装 beacio（iOSWebBLE）Safari 扩展后，网页可用 Web Bluetooth�
 核心接缝不变：`MidiConnection` 与 `MidiOutputSink` 之上的所有代码（practice、transport、
 UI）无需感知底层接入方式。
 
-## 7. 参考资料
+## 7. Web MIDI Browser 卡在“连接中”的成因（补充）
+
+结合用户反馈与桥接源码（WebMIDIAPIShimForiOS 的 `WebMIDIAPIPolyfill.js`）实测确认，方案 A
+（Web MIDI Browser）在使用时的两个具体表现，已落实到 `src/debug/midi-keyboard.ts` 的连接诊断面板：
+
+1. **`requestMIDIAccess` 返回非原生 Promise**：shim 的 `requestMIDIAccess` 返回一个自定义 Promise
+   （只实现了 `then`，非标准 Promise），它要等 App 原生侧（Core MIDI 桥）经 `_callback_onReady`
+   回调才 resolve。因此页面长期显示“连接中…”等价于 **App 原生桥未返回**——常见原因是 MIDI 键盘未
+   连接 / 未被 App 识别（USB 需连好并允许外设访问、蓝牙需先配对），或 App 本身异常（2016 年后
+   未更新）。这不是网页代码可修复的，属用户侧操作或 App 局限。
+2. **Permissions API 无法查询 midi 权限**：shim 不注入 `navigator.permissions`，WebKit 的
+   Permissions API 对 `query({ name: 'midi' })` 抛 `NotSupportedError`（个别实现抛 `TypeError`）。
+   这是平台限制，与连接是否成功无关，诊断面板应显示为中性信息而非错误。
+
+此外，shim 不要求安全上下文（HTTP 即可用），因此检测到 shim 时“非安全上下文”不应判为连接故障。
+
+## 8. 参考资料
 
 - 参考文档：`docs/development/reference/midi/webmidi-ios.md`
 - caniuse Web MIDI：<https://caniuse.com/midi>

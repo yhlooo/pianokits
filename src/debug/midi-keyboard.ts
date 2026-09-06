@@ -512,6 +512,12 @@ export function mountMidiKeyboard(host: HTMLElement): () => void {
   let timedOut = false
   let elapsedTimer: number | undefined
   let timeoutTimer: number | undefined
+  /**
+   * 非安全上下文（HTTP）下仍存在 requestMIDIAccess，说明它是第三方 Web MIDI 兼容层注入的 shim
+   * （如 iPad 的 Web MIDI Browser / Cordova Web MIDI 插件），其授权与设备枚举走原生 App 桥接，
+   * 不依赖浏览器的安全上下文，因此“非安全上下文”不再判为连接故障。
+   */
+  const isShimmedMidi = !window.isSecureContext && typeof navigator.requestMIDIAccess === 'function'
 
   function renderAll(): void {
     const pitches = sortedHeldPitches(held)
@@ -655,10 +661,13 @@ export function mountMidiKeyboard(host: HTMLElement): () => void {
       setStatus('连接超时')
       updatePhase()
       setHint(
-        '授权请求 5s 未返回：请确认浏览器是否弹出了 MIDI 授权提示（地址栏左侧权限图标），' +
-          '或在 chrome://settings/content/midiDevices 查看本站点权限；若权限无异常，' +
-          '打开 chrome://device-log 查看系统 MIDI 设备枚举日志；' +
-          '若页面嵌在 iframe，宿主需通过 Permissions-Policy 允许 midi。点击“重试连接”可再次发起请求。',
+        isShimmedMidi
+          ? '授权请求 5s 未返回：请确认 MIDI 键盘已连接并被 App 识别（USB 键盘需插好并允许外设访问，' +
+              '蓝牙键盘需先配对），或退出重进 App 后再点击“重试连接”。'
+          : '授权请求 5s 未返回：请确认浏览器是否弹出了 MIDI 授权提示（地址栏左侧权限图标），' +
+              '或在 chrome://settings/content/midiDevices 查看本站点权限；若权限无异常，' +
+              '打开 chrome://device-log 查看系统 MIDI 设备枚举日志；' +
+              '若页面嵌在 iframe，宿主需通过 Permissions-Policy 允许 midi。点击“重试连接”可再次发起请求。',
       )
       retryEl.hidden = false
     }, CONNECT_TIMEOUT_MS)
@@ -739,8 +748,16 @@ export function mountMidiKeyboard(host: HTMLElement): () => void {
       })
       .catch((err: unknown) => {
         if (disposed) return
-        console.warn('[midi-debug] 查询 midi 权限失败', err)
-        setDiag(rowPerm, `查询失败（${err instanceof Error ? err.name : String(err)}）`, 'warn')
+        const name = err instanceof Error ? err.name : String(err)
+        // 多数浏览器不支持经 Permissions API 查询 midi 权限：WebKit（含 iPad 的
+        // Web MIDI Browser / Safari）抛 NotSupportedError，个别实现抛 TypeError。这是平台
+        // 限制而非连接故障——连接走 requestMIDIAccess，不受此查询失败影响，故按中性态展示。
+        if (name === 'NotSupportedError' || name === 'TypeError') {
+          setDiag(rowPerm, '不可查询（本浏览器不支持查询 midi 权限，不影响连接）', 'neutral')
+        } else {
+          console.warn('[midi-debug] 查询 midi 权限失败', err)
+          setDiag(rowPerm, `查询失败（${name}）`, 'warn')
+        }
       })
   }
 
@@ -785,8 +802,12 @@ export function mountMidiKeyboard(host: HTMLElement): () => void {
   renderAll()
   setDiag(
     rowSecure,
-    window.isSecureContext ? '是（HTTPS / localhost）' : '否——非安全上下文无法使用 Web MIDI',
-    window.isSecureContext ? 'ok' : 'bad',
+    window.isSecureContext
+      ? '是（HTTPS / localhost）'
+      : isShimmedMidi
+        ? '否（HTTP）——已检测到 Web MIDI 兼容层，连接不依赖安全上下文'
+        : '否——非安全上下文无法使用 Web MIDI',
+    window.isSecureContext ? 'ok' : isShimmedMidi ? 'neutral' : 'bad',
   )
   queryPermission()
 
@@ -800,7 +821,8 @@ export function mountMidiKeyboard(host: HTMLElement): () => void {
     setStatus('当前浏览器不支持 Web MIDI')
     setHint(
       window.isSecureContext
-        ? 'Safari 等浏览器不支持 Web MIDI，请换用 Chrome / Edge / Firefox。'
+        ? 'Safari（含 iPad 上的所有浏览器）不支持 Web MIDI：iPad 可安装“Web MIDI Browser”App，' +
+            '桌面端可换用 Chrome / Edge / Firefox。'
         : '当前页面不是安全上下文（需 HTTPS 或 localhost），请改用受支持的地址访问。',
     )
     renderDevices()

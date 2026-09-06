@@ -147,12 +147,15 @@ export function sortedHeldPitches(held: ReadonlyMap<number, number>): number[]
    - **安全上下文**：`window.isSecureContext`（否时提示非 HTTPS/localhost 无法使用 Web MIDI）；
    - **Web MIDI API**：`typeof navigator.requestMIDIAccess`（缺失时提示如 Safari 不支持）；
    - **MIDI 权限**：Permissions API `query({ name: 'midi' })` 的实时状态（已授权 / 待定 / 已拒绝 /
-     查询失败），订阅 `PermissionStatus` 的 `change` 事件实时刷新；
+     查询失败）；不支持查询 midi 权限的浏览器（WebKit，如 iPad 的 Web MIDI Browser / Safari，
+     抛 `NotSupportedError`，个别实现抛 `TypeError`）显示“不可查询”并视为中性信息（不影响连接）。
+     订阅 `PermissionStatus` 的 `change` 事件实时刷新；
    - **连接阶段**：请求中实时显示耗时（200ms 刷新）并叠加权限状态提示（“等待用户应答授权提示”
      / “已授权，等待浏览器返回设备列表”）；失败时显示异常名与消息（如 `NotAllowedError`）。
      出现问题（等待授权 / 超时 / 被拒 / 不支持）时面板下方显示排查提示（检查地址栏授权提示、
      `chrome://settings/content/midiDevices`、`chrome://device-log`、iframe 需 Permissions-Policy
-     允许 midi 等），超时与可重试失败时出现“重试连接”按钮；全部状态变化同时写入浏览器 Console
+     允许 midi 等；检测到第三方 Web MIDI 兼容层 shim 时改为提示在 App 内确认 MIDI 键盘已连接 / 已配对）。
+     超时与可重试失败时出现“重试连接”按钮；全部状态变化同时写入浏览器 Console
      （前缀 `[midi-debug]`）。
 3. 连接尝试语义：复用共享服务的 5s 超时阈值（`CONNECT_TIMEOUT_MS`，见
    `20260906-midi-keyboard-and-practice.md` §3.1）——超时先行提示“连接超时”但**不放弃在途

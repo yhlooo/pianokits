@@ -14,6 +14,9 @@ import { el } from './dom'
  * - 圆角与宽度成固定比例（键盘圆角 = 白键宽 × 0.5、黑键底角 = 黑键宽 × 1/4，
  *   随宽度/缩放等比变化），黑键底部另有常态投影。
  *
+ * `keyGeometry(totalWidth, pitch)` 把上述几何公式（与 CSS 逐项对应）暴露为纯函数：
+ * 瀑布流画布用它画音符条与音区参考线，保证画布内容与底部 DOM 键盘严格对齐。
+ *
  * 点亮态有两种：
  * - `setPressed`：简单的“按下”态（琥珀渐变 class），调试页用；
  * - `setLit`：逐键点亮样式（颜色 / 强度 / 光晕），瀑布流用——点亮色按 alpha
@@ -40,6 +43,62 @@ for (let p = MIN_PITCH; p <= MAX_PITCH; p++) {
 }
 
 type Rgb = readonly [number, number, number]
+
+/**
+ * 黑键横向占位比例：黑键落在左白键上的宽度占比（[分子, 分母]）。
+ * C# 2/3、D# 1/3（2/3 在右）、F# 3/4、G# 1/2（居中）、A# 1/4（3/4 在右）——
+ * DOM 黑键的 CSS 定位与 keyGeometry 共用本常量，保证两处公式一致。
+ */
+const BLACK_LEFT_FRAC: Readonly<Record<number, readonly [number, number]>> = {
+  1: [2, 3],
+  3: [1, 3],
+  6: [3, 4],
+  8: [1, 2],
+  10: [1, 4],
+}
+
+/** 黑键宽 = 白键宽 × 1.3/2.3（与 .piano 的 CSS --bkey-w 同一比例） */
+export const BLACK_KEY_WIDTH_RATIO = 1.3 / 2.3
+
+export interface KeyGeom {
+  /** 键左边缘距键盘左边缘的距离（CSS px） */
+  left: number
+  /** 键宽（CSS px） */
+  width: number
+}
+
+/**
+ * 由键盘总宽度计算某音高的键位几何（相对键盘左边缘）。
+ * 公式与 .piano 的 CSS 逐项对应：
+ * - 白键：白键宽 = 总宽度 / 52，left = 白键宽 × 白键序；
+ * - 黑键：宽 = 白键宽 × 1.3/2.3，left = 白键宽 × (左白键序 + 1) − 黑键宽 × leftFrac
+ *   （横向占位按组外扩，非全部居中）。
+ * 瀑布流画布用它画音符条与音区参考线 → 与底部 DOM 键盘严格对齐，靠近边缘也不漂移。
+ * pitch 必须在 [MIN_PITCH, MAX_PITCH] 内，否则抛 RangeError。
+ */
+export function keyGeometry(totalWidth: number, pitch: number): KeyGeom {
+  if (pitch < MIN_PITCH || pitch > MAX_PITCH) {
+    throw new RangeError(`pitch ${pitch} 超出 88 键范围 ${MIN_PITCH}–${MAX_PITCH}`)
+  }
+  const keyW = totalWidth / WHITE_PITCHES.length
+  const pc = pitch % 12
+  if (!BLACK_PCS.has(pc)) {
+    const i = WHITE_INDEX.get(pitch)
+    // 不可达：范围内白键必有白键序（仅防御性兜底）
+    if (i === undefined) throw new RangeError(`pitch ${pitch} 无白键序`)
+    return { left: keyW * i, width: keyW }
+  }
+  const frac = BLACK_LEFT_FRAC[pc]
+  // 不可达：BLACK_PCS 与 BLACK_LEFT_FRAC 的键集合一致（仅防御性兜底）
+  if (frac === undefined) throw new RangeError(`pitch ${pitch} 无黑键占位比例`)
+  const i = WHITE_INDEX.get(pitch - 1)
+  // 不可达：黑键必有左邻白键（最低音 A0 即白键，仅防御性兜底）
+  if (i === undefined) throw new RangeError(`pitch ${pitch} 无左邻白键`)
+  return {
+    left: keyW * (i + 1) - keyW * BLACK_KEY_WIDTH_RATIO * (frac[0] / frac[1]),
+    width: keyW * BLACK_KEY_WIDTH_RATIO,
+  }
+}
 
 /** 白键基础渐变（顶→底），点亮色按 alpha 混合到其上 */
 const WHITE_BASE: readonly [Rgb, Rgb] = [
@@ -104,13 +163,10 @@ export function buildPiano(): PianoView {
     isBlack.add(p)
     const i = WHITE_INDEX.get(p - 1) ?? 0
     // 黑键宽 = 白键宽 × 1.3/2.3（CSS --bkey-w）；横向占位按组外扩（非全部居中）：
-    // leftFrac = 黑键落在左白键上的宽度占比——C# 2/3、D# 1/3（2/3 在右）、
-    // F# 3/4、G# 1/2（居中）、A# 1/4（3/4 在右）
-    const pc = p % 12
-    const leftFrac =
-      pc === 1 ? '2 / 3' : pc === 3 ? '1 / 3' : pc === 6 ? '3 / 4' : pc === 8 ? '1 / 2' : '1 / 4'
+    // leftFrac = 黑键落在左白键上的宽度占比（与 keyGeometry 共用 BLACK_LEFT_FRAC）
+    const frac = BLACK_LEFT_FRAC[p % 12]
     // 左边缘 = 左白键右边界（分界线）− leftFrac × 黑键宽
-    const left = `calc(var(--key-w) * ${i + 1} - var(--bkey-w) * (${leftFrac}))`
+    const left = `calc(var(--key-w) * ${i + 1} - var(--bkey-w) * (${frac[0]} / ${frac[1]}))`
     const key = el('div', { class: 'piano__bkey', dataset: { pitch: p }, style: { left } })
     keyByPitch.set(p, key)
     blacks.append(key)

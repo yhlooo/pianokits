@@ -49,6 +49,55 @@ class FakeAccess {
   }
 }
 
+/**
+ * 模拟 Web MIDI shim（如 iPad 的 Web MIDI Browser / cordova-plugin-webmidi）的端口表：
+ * 只有 `forEach` / `size`，`values()` 返回的迭代器**没有 Symbol.iterator**（不可 `for…of` /
+ * 展开）。若实现里用 `for…of` / `[...values()]` 遍历会抛 TypeError，本假类用于守住该回归。
+ */
+class FakeShimPortMap<T> {
+  private readonly items: readonly T[]
+
+  constructor(items: readonly T[]) {
+    this.items = items
+  }
+
+  get size(): number {
+    return this.items.length
+  }
+
+  forEach(cb: (value: T) => void): void {
+    for (const item of this.items) cb(item)
+  }
+
+  /** 故意返回不可迭代对象：`next()` 可用但无 `[Symbol.iterator]` */
+  values(): { next(): { value: T | undefined; done: boolean } } {
+    let index = 0
+    const items = this.items
+    return {
+      next() {
+        return index < items.length
+          ? { value: items[index++], done: false }
+          : { value: undefined, done: true }
+      },
+    }
+  }
+}
+
+/** 模拟 Web MIDI shim 的 MIDIAccess：inputs/outputs 为非原生端口表（见 FakeShimPortMap） */
+class FakeShimAccess {
+  inputs = new FakeShimPortMap<FakeInput>([])
+  outputs = new FakeShimPortMap<FakeOutput>([])
+  private stateCbs = new Set<() => void>()
+
+  addEventListener(_type: string, cb: () => void): void {
+    this.stateCbs.add(cb)
+  }
+
+  removeEventListener(_type: string, cb: () => void): void {
+    this.stateCbs.delete(cb)
+  }
+}
+
 /** 以假 requestMIDIAccess 替换全局 navigator（本测试文件进程内生效） */
 function stubNavigator(request: (() => Promise<FakeAccess>) | undefined): void {
   Object.defineProperty(globalThis, 'navigator', {
@@ -112,6 +161,30 @@ describe('MidiConnection 接入层', () => {
     const c = new MidiConnection({ onStatus: () => {}, onNote: () => {} })
     await c.connect()
     expect(c.status).toBe('unsupported')
+  })
+
+  it('shim 端口表（无 Symbol.iterator）也能连上并同步输出快照', async () => {
+    const input = new FakeInput()
+    const out = new FakeOutput()
+    const access = new FakeShimAccess()
+    access.inputs = new FakeShimPortMap([input])
+    access.outputs = new FakeShimPortMap([out])
+    stubNavigator(() => Promise.resolve(access as unknown as FakeAccess))
+    const notes: unknown[] = []
+    const snapshots: unknown[][] = []
+    const c = new MidiConnection({
+      onStatus: () => {},
+      onNote: (ev) => notes.push(ev),
+      onOutputs: (outputs) => snapshots.push([...outputs]),
+    })
+    await c.connect()
+    // 关键：即便端口表不可迭代（for…of / 展开会抛 TypeError），也照常连上
+    expect(c.status).toBe('connected')
+    expect(c.connectedLabel).toBe('ACME Fake Keyboard')
+    expect(snapshots.at(-1)).toEqual([out])
+    input.send(NOTE_ON_C4)
+    expect(notes).toEqual([{ type: 'noteOn', channel: 0, pitch: 60, velocity: 100 }])
+    c.dispose()
   })
 
   it('disconnect：摘监听回 idle，不再派发按键', async () => {

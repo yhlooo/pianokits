@@ -112,19 +112,25 @@ UI）无需感知底层接入方式。
 
 ## 7. Web MIDI Browser 卡在“连接中”的成因（补充）
 
-结合用户反馈与桥接源码（WebMIDIAPIShimForiOS 的 `WebMIDIAPIPolyfill.js`）实测确认，方案 A
-（Web MIDI Browser）在使用时的两个具体表现，已落实到 `src/debug/midi-keyboard.ts` 的连接诊断面板：
+结合用户反馈、官方示例页 `startpage105.html` 与桥接源码（WebMIDIAPIShimForiOS 的
+`WebMIDIAPIPolyfill.js`）实测确认，方案 A（Web MIDI Browser）有三个具体表现：
 
-1. **`requestMIDIAccess` 返回非原生 Promise**：shim 的 `requestMIDIAccess` 返回一个自定义 Promise
-   （只实现了 `then`，非标准 Promise），它要等 App 原生侧（Core MIDI 桥）经 `_callback_onReady`
-   回调才 resolve。因此页面长期显示“连接中…”等价于 **App 原生桥未返回**——常见原因是 MIDI 键盘未
-   连接 / 未被 App 识别（USB 需连好并允许外设访问、蓝牙需先配对），或 App 本身异常（2016 年后
-   未更新）。这不是网页代码可修复的，属用户侧操作或 App 局限。
-2. **Permissions API 无法查询 midi 权限**：shim 不注入 `navigator.permissions`，WebKit 的
+1. **端口表不可迭代（连接卡住的根因，已修复）**：shim 的 `MIDIAccess.inputs/outputs` 不是原生
+   `MIDIInputMap/MIDIOutputMap`，而是只有 `size`/`forEach`/`get`/`has` 的伪 Map，其 `values()`
+   返回的迭代器**没有 `[Symbol.iterator]`**。官方示例页用 `iter.next()` 手动循环遍历，而本项目原
+   实现用 `for…of` / `[...values()]`，在 shim 上抛 `TypeError: … is not iterable`，导致授权成功后
+   `sync()` 中断、页面永远停在“连接中…”。已改为 `forEach` 遍历（`src/core/midi/connection.ts`、
+   `src/debug/midi-keyboard.ts`），对原生与 shim 均兼容；并在 `connection.test.ts` 增加
+   「shim 端口表（无 Symbol.iterator）也能连上」回归用例。
+2. **`requestMIDIAccess` 返回非原生 Promise**：shim 的 `requestMIDIAccess` 返回自定义 Promise
+   （只实现 `then`），要等 App 原生侧（Core MIDI 桥）经 `_callback_onReady` 回调才 resolve。
+   若 App 原生桥不返回（键盘未连接 / 未被 App 识别、或 App 异常），请求仍会长期挂起——这一层
+   在 App 内部，网页侧以超时提示兜底。
+3. **Permissions API 无法查询 midi 权限**：shim 不注入 `navigator.permissions`，WebKit 的
    Permissions API 对 `query({ name: 'midi' })` 抛 `NotSupportedError`（个别实现抛 `TypeError`）。
-   这是平台限制，与连接是否成功无关，诊断面板应显示为中性信息而非错误。
+   这是平台限制，与连接是否成功无关，诊断面板显示为中性信息而非错误。
 
-此外，shim 不要求安全上下文（HTTP 即可用），因此检测到 shim 时“非安全上下文”不应判为连接故障。
+此外，shim 不要求安全上下文（HTTP 即可用），检测到 shim 时“非安全上下文”不应判为连接故障。
 
 ## 8. 参考资料
 

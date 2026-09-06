@@ -83,7 +83,11 @@ class MidiConnection {
   （拆掉 access，在途的授权结果作废）。每次 connect/disconnect/超时都会使 attempt 序号自增，
   `await` 之后校验序号与状态，杜绝迟到的授权结果覆盖新一轮连接；
 - `sync()` 统一负责“连上即结束尝试”：connected 时清计时器、attempting 置 false（初始接入与
-  热插拔共用此路径）。
+  热插拔共用此路径）；
+- 端口表遍历统一用 `forEach`（而非 `for…of` / `[...values()]`）：第三方 Web MIDI shim（如 iPad
+  的 Web MIDI Browser）提供的 `inputs`/`outputs` 是非原生 Map，其 `values()` 迭代器没有
+  `Symbol.iterator`，`for…of`/展开会抛 `TypeError`，导致“授权成功却一直卡在连接中”
+  （见研究文档 `20260906-web-midi-ipad.md` §7）。
 
 ### 3.2 实时演奏（AudioEngine 扩展）
 

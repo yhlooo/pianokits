@@ -541,7 +541,9 @@ export function mountMidiKeyboard(host: HTMLElement): () => void {
   function renderDevices(): void {
     devicesEl.replaceChildren()
     if (access === null) return
-    const inputs = [...access.inputs.values()]
+    // 用 forEach 收集而非 [...values()]：shim 的端口表不可迭代（见 connection.ts sync 注释）
+    const inputs: MIDIInput[] = []
+    access.inputs.forEach((input) => inputs.push(input))
     if (inputs.length === 0) {
       devicesEl.append(
         el('li', { class: 'midi-debug__device midi-debug__device--empty' }, '（无）'),
@@ -571,10 +573,10 @@ export function mountMidiKeyboard(host: HTMLElement): () => void {
   function attachInputs(): void {
     detachInputs()
     if (access === null) return
-    for (const input of access.inputs.values()) {
+    access.inputs.forEach((input) => {
       input.addEventListener('midimessage', onMessage)
       attachedInputs.push(input)
-    }
+    })
   }
 
   function sync(): void {

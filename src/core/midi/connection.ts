@@ -151,12 +151,18 @@ export class MidiConnection {
   private sync(): void {
     if (this.access === null) return
     this.detachInputs()
-    for (const input of this.access.inputs.values()) {
+    // 端口表统一用 forEach 遍历，而非 for…of / [...values()]：第三方 Web MIDI shim
+    // （如 iPad 的 Web MIDI Browser / cordova-plugin-webmidi）提供的 inputs/outputs 是
+    // 非原生 Map，其 values() 返回的迭代器没有 Symbol.iterator，for…of / 展开会抛
+    // TypeError，导致“连接成功却一直显示连接中”。forEach 在原生成与 shim 上行为一致。
+    this.access.inputs.forEach((input) => {
       input.addEventListener('midimessage', this.onMessage)
       this.attachedInputs.push(input)
-    }
+    })
     // 输出端口快照（镜像播放音符到键盘音源用；断开时由 teardownAccess 通知清空）
-    this.cbs.onOutputs?.([...this.access.outputs.values()])
+    const outputs: MIDIOutput[] = []
+    this.access.outputs.forEach((output) => outputs.push(output))
+    this.cbs.onOutputs?.(outputs)
     if (this.attachedInputs.length > 0) {
       this.clearTimeout()
       this._attempting = false

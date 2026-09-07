@@ -1,16 +1,14 @@
 import { parseMidiMessage, type MidiNoteEvent } from './input'
 
 export type MidiConnectionStatus =
-  /** 未连接（初始 / 已断开） */
+  /** 未连接（初始；本方案下仅工具卸载后/未发起前短暂存在） */
   | 'idle'
-  /** 授权请求中（连接尝试进行中） */
+  /** 授权请求中（requestMIDIAccess 的 Promise 未落定） */
   | 'connecting'
   /** 已授权且至少一台输入设备挂载（练习模式可用的前提） */
   | 'connected'
-  /** 已授权但无输入设备（连接尝试窗口内等待设备插入） */
+  /** 已授权但无输入设备（常驻等待插入，靠 statechange 自动连上） */
   | 'no-devices'
-  /** 连接尝试超时（5s 内未连上） */
-  | 'timeout'
   /** 浏览器不支持 Web MIDI */
   | 'unsupported'
   /** 授权被拒绝 */
@@ -19,8 +17,15 @@ export type MidiConnectionStatus =
   | 'error'
 
 /**
- * 连接尝试超时（ms）：超过此时长仍未连接上（授权未完成 / 无设备）即放弃本次尝试，
- * 状态进入 timeout 并通知上层弹报错（设计文档 20260906-midi-keyboard-and-practice.md §4.1）。
+ * 授权请求软提示（ms）：`connecting` 状态超过此时长仍未落定（授权提示未应答 / 平台挂起，
+ * 见研究文档 20260906-web-midi-connect-hang.md）时，仅经 `connectingHint` 给出提示，
+ * **不拆 access、不进入失败终态**；Promise 晚到仍按真实状态呈现。
+ */
+export const CONNECT_HINT_MS = 5000
+
+/**
+ * 连接超时（ms）：调试工具「MIDI 键盘」页沿用 5s 诊断超时（提示"连接超时"并可重试，
+ * 见设计文档 20260905-debug-tools.md §4.3）。保留供 debug/midi-keyboard.ts 复用。
  */
 export const CONNECT_TIMEOUT_MS = 5000
 
@@ -40,25 +45,25 @@ function deviceLabel(input: MIDIInput): string {
 
 /**
  * Web MIDI 输入接入层（主工具与调试工具共用的共享服务，设计文档
- * 20260906-midi-keyboard-and-practice.md §3.1）：
+ * 20260906-midi-keyboard-and-practice.md §3.1，2026-09-07 起改为自动连接语义，
+ * 见 20260907-midi-auto-connect.md §4.1）：
  * 请求授权 → 挂载全部 MIDIInput → statechange 热插拔感知；
  * 按键消息解码为 MidiNoteEvent 后回调。
  *
- * 连接尝试语义（§4.1）：connect() 启动一次 5s 限时尝试（attempting = true）；
- * - 期间 resolved 且有设备 → connected（attempting 结束）；
- * - 期间 resolved 但无设备 → no-devices（继续等待到超时，热插拔可立即连上）；
- * - 期间被 disconnect()（用户点击取消）→ idle（attempting 结束，在途结果作废）；
- * - 5s 仍未 connected → timeout（在途结果作废，报错由上层负责）。
+ * 自动连接语义：`connect()` 请求授权后**常驻 MIDIAccess**，不因无设备而拆除——
+ * 无设备时置 `no-devices`，等待 `statechange` 在插入设备后自动翻成 `connected`；
+ * 授权失败（denied/unsupported/error）可再次 `connect()` 重试；`connecting` 超过
+ * `CONNECT_HINT_MS` 仅提示（不拆、不失败），晚到的结果按真实状态呈现。
  */
 export class MidiConnection {
   private readonly cbs: MidiConnectionCallbacks
   private access: MIDIAccess | null = null
   private readonly attachedInputs: MIDIInput[] = []
   private _status: MidiConnectionStatus = 'idle'
-  /** 尝试序号：connect/disconnect/超时都会自增，用于作废在途的授权请求结果 */
+  /** 尝试序号：dispose 时自增，作废在途的授权请求结果 */
   private attempt = 0
-  private timeoutId: number | undefined
-  private _attempting = false
+  private hintId: number | undefined
+  private _connectingHint: string | null = null
 
   constructor(cbs: MidiConnectionCallbacks) {
     this.cbs = cbs
@@ -68,51 +73,51 @@ export class MidiConnection {
     return this._status
   }
 
-  /** 连接尝试是否进行中（5s 窗口内：授权请求中，或已授权但尚未等到设备） */
-  get attempting(): boolean {
-    return this._attempting
+  /** connecting 超时软提示；非 connecting 或未超时均为 null */
+  get connectingHint(): string | null {
+    return this._connectingHint
   }
 
-  /** 已连接键盘的显示名（manufacturer + name）；未连接时为 null */
-  get connectedLabel(): string | null {
-    if (this._status !== 'connected' || this.access === null) return null
-    const first = this.access.inputs.values().next().value
-    if (first === undefined) return null
-    return deviceLabel(first)
+  /** 已连接键盘的显示名列表（manufacturer + name）；未连接 / 无设备时为空数组 */
+  get connectedLabels(): readonly string[] {
+    if (this._status !== 'connected' || this.access === null) return []
+    const labels: string[] = []
+    // 端口表统一用 forEach 遍历（第三方 Web MIDI shim 的 values() 迭代器无 Symbol.iterator）
+    this.access.inputs.forEach((input) => labels.push(deviceLabel(input)))
+    return labels
   }
 
+  /**
+   * 发起（自动）连接：请求授权并常驻 access。已持有授权（connected / no-devices）
+   * 与请求进行中（connecting）时幂等返回；denied / error / unsupported / idle 可再次发起。
+   */
   async connect(): Promise<void> {
-    // 先用局部变量判定，避免 TS 把 this._status 收窄后影响 await 之后的检查
-    const status = this._status
-    if (status === 'connecting' || status === 'connected' || this._attempting) return
+    if (this.access !== null) return
+    if (this._status === 'connecting') return
     if (typeof navigator.requestMIDIAccess !== 'function') {
       this.setStatus('unsupported')
       return
     }
-    // 清理上一次残留的 access（授权已成功但超时/断连后的重试）
-    this.teardownAccess()
     const attempt = ++this.attempt
-    this._attempting = true
     this.setStatus('connecting')
-    this.timeoutId = setTimeout(() => {
-      this.timeoutId = undefined
-      this._attempting = false
-      this.attempt++ // 作废在途的授权请求结果
-      this.teardownAccess()
-      this.setStatus('timeout')
-    }, CONNECT_TIMEOUT_MS)
+    this.hintId = setTimeout(() => {
+      this.hintId = undefined
+      if (this._status === 'connecting') {
+        this.setHint('授权请求超时，请检查浏览器权限提示或站点设置')
+      }
+    }, CONNECT_HINT_MS)
     try {
       const access = await navigator.requestMIDIAccess({ sysex: false })
-      // 在途期间被取消（disconnect）或超时：丢弃本次结果
-      if (attempt !== this.attempt || this._status !== 'connecting') return
+      // 在途期间被 dispose：丢弃本次结果
+      if (attempt !== this.attempt) return
+      this.clearHint()
       this.access = access
       access.addEventListener('statechange', this.onStateChange)
-      // sync 决定状态：connected 时结束尝试（清计时器）；no-devices 则继续等待到超时
+      // sync 决定状态：≥1 台输入 → connected；0 台 → no-devices（常驻等待插入）
       this.sync()
     } catch (err) {
-      if (attempt !== this.attempt || this._status !== 'connecting') return
-      this.clearTimeout()
-      this._attempting = false
+      if (attempt !== this.attempt) return
+      this.clearHint()
       if (err instanceof DOMException && err.name === 'NotAllowedError') {
         this.setStatus('denied')
       } else if (err instanceof DOMException && err.name === 'NotSupportedError') {
@@ -123,16 +128,11 @@ export class MidiConnection {
     }
   }
 
-  disconnect(): void {
-    this.clearTimeout()
+  dispose(): void {
     this.attempt++
-    this._attempting = false
+    this.clearHint()
     this.teardownAccess()
     this.setStatus('idle')
-  }
-
-  dispose(): void {
-    this.disconnect()
   }
 
   private readonly onStateChange = (): void => {
@@ -146,8 +146,7 @@ export class MidiConnection {
     if (ev !== null) this.cbs.onNote(ev)
   }
 
-  /** 重新挂载当前全部输入/输出并刷新状态（初始接入与热插拔共用）；
-   *  连上（≥1 台设备）即结束连接尝试（清计时器），无设备则保持 attempting 等待超时 */
+  /** 重新挂载当前全部输入/输出并刷新状态（初始接入与热插拔共用） */
   private sync(): void {
     if (this.access === null) return
     this.detachInputs()
@@ -163,13 +162,7 @@ export class MidiConnection {
     const outputs: MIDIOutput[] = []
     this.access.outputs.forEach((output) => outputs.push(output))
     this.cbs.onOutputs?.(outputs)
-    if (this.attachedInputs.length > 0) {
-      this.clearTimeout()
-      this._attempting = false
-      this.setStatus('connected')
-    } else {
-      this.setStatus('no-devices')
-    }
+    this.setStatus(this.attachedInputs.length > 0 ? 'connected' : 'no-devices')
   }
 
   private detachInputs(): void {
@@ -189,11 +182,19 @@ export class MidiConnection {
     }
   }
 
-  private clearTimeout(): void {
-    if (this.timeoutId !== undefined) {
-      clearTimeout(this.timeoutId)
-      this.timeoutId = undefined
+  private clearHint(): void {
+    if (this.hintId !== undefined) {
+      clearTimeout(this.hintId)
+      this.hintId = undefined
     }
+    if (this._connectingHint !== null) this.setHint(null)
+  }
+
+  private setHint(hint: string | null): void {
+    if (this._connectingHint === hint) return
+    this._connectingHint = hint
+    // 提示变化也推送：上层控制器据此重读 connectingHint（状态本身未变，不经 setStatus）
+    this.cbs.onStatus(this._status)
   }
 
   private setStatus(status: MidiConnectionStatus): void {

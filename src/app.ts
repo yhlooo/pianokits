@@ -134,7 +134,7 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
       applyViewMode(next)
     },
     onExpandSidebar: () => setSidebarCollapsed(false),
-    onMidiToggle: () => practiceController.toggleMidi(),
+    onMidiRetry: () => practiceController.autoConnect(),
     onPracticeToggle: () => practiceController.togglePractice(),
     onPracticeTrack: (index) => practiceController.toggleTrack(index),
   })
@@ -191,6 +191,9 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
       onConnectError: (message) => showMidiError(message),
     },
   })
+  // 自动连接：进入播放器页面即发起授权（首次弹浏览器授权提示，之后秒连）；
+  // 授权后由 statechange 感知 MIDI 线插拔（设计文档 20260907-midi-auto-connect.md §4.2）
+  practiceController.autoConnect()
 
   // 通知胶囊：文本 + 关闭按钮，6 秒自动消退
   const noticeText = el('span', { class: 'notice__text' })

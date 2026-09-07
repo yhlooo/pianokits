@@ -775,6 +775,96 @@ input[type='range']::-moz-range-thumb {
   display: block;
 }
 
+/* MIDI 键盘连接状态图标 + 状态浮层（设计文档 20260907-midi-auto-connect.md §6）：
+   图标三态——暗色=未连接、旋转=连接中、琥珀高亮=已连接；点击弹状态浮层 */
+.transport__midi-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.transport__midi-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  display: none;
+  flex-direction: column;
+  min-width: 208px;
+  max-width: 280px;
+  max-height: 320px;
+  padding: 4px 6px 6px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-toast);
+}
+
+/* 点击状态图标切换 .is-open 展开/收起（桌面与触控一致，点外部空白收起） */
+.transport__midi-wrap.is-open .transport__midi-menu {
+  display: flex;
+}
+
+/* 桥接带：盖住按钮与浮层之间的空隙，鼠标移入浮层途中不收起 */
+.transport__midi-menu::before {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: 8px;
+}
+
+.transport__midi-menu__title {
+  padding: 6px 10px 8px;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.transport__midi-menu__body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+.transport__midi-menu__text,
+.transport__midi-menu__device {
+  padding: 4px 10px;
+  font-size: 0.8125rem;
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* connecting 超时软提示：危险色弱提示 */
+.transport__midi-menu__text--hint {
+  color: var(--danger);
+}
+
+/* 失败态"重连"按钮：整行次级动作 */
+.transport__midi-menu__retry {
+  align-self: stretch;
+  margin: 4px 6px 2px;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 0.8125rem;
+  background: var(--bg-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  color: var(--text-0);
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .transport__midi-menu__retry:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+}
+
 /* ---------- 通知胶囊 ---------- */
 .notice {
   position: fixed;

@@ -27,8 +27,8 @@ export interface TransportViewCallbacks {
   /** 点击“瀑布/乐谱”开关：切换对应面板（两个开关不能都关闭） */
   onViewToggle(panel: ViewPanel): void
   onExpandSidebar(): void
-  /** 点击钢琴图标：连接 / 断开 MIDI 键盘 */
-  onMidiToggle(): void
+  /** 点击状态浮层中的"重连"按钮：重新发起 MIDI 连接（失败态兜底） */
+  onMidiRetry(): void
   /** 点击练习图标：非全开（含全关）→ 全部开启；全开 → 全部关闭 */
   onPracticeToggle(): void
   /** 点击悬浮菜单中的某轨：开关该轨练习（可多选） */
@@ -61,6 +61,10 @@ export class TransportView implements View {
   private readonly waterfallBtn: HTMLButtonElement
   private readonly scoreBtn: HTMLButtonElement
   private readonly midiBtn: HTMLButtonElement
+  private readonly midiWrap: HTMLElement
+  private readonly midiMenu: HTMLElement
+  private readonly midiMenuBody: HTMLElement
+  private closeMidiOnOutside: ((e: Event) => void) | null = null
   private readonly practiceBtn: HTMLButtonElement
   private readonly practiceMenuList: HTMLDivElement
   private readonly practiceMenuEmpty: HTMLDivElement
@@ -213,10 +217,20 @@ export class TransportView implements View {
     this.scoreBtn.append(scoreIcon())
     this.scoreBtn.addEventListener('click', () => cbs.onViewToggle('score'))
 
-    // MIDI 键盘连接：右下角钢琴图标（连接/断开，状态经 setMidiStatus 同步）
-    this.midiBtn = el('button', { class: 'icon-btn transport__midi', title: '连接 MIDI 键盘' })
+    // MIDI 键盘连接状态图标：暗色=未连接、旋转=连接中、琥珀高亮=已连接（状态经 setMidiStatus 同步）；
+    // 点击弹出状态浮层（未连接 / 键盘名列表 / 失败原因 + 重连），不再承担连接/断开动作
+    // （设计文档 20260907-midi-auto-connect.md §6）
+    this.midiBtn = el('button', { class: 'icon-btn transport__midi', title: 'MIDI 键盘' })
     this.midiBtn.append(midiKeyboardIcon())
-    this.midiBtn.addEventListener('click', () => cbs.onMidiToggle())
+    this.midiBtn.addEventListener('click', () => this.toggleMidiMenu())
+    this.midiMenuBody = el('div', { class: 'transport__midi-menu__body' })
+    this.midiMenu = el(
+      'div',
+      { class: 'transport__midi-menu', role: 'dialog' },
+      el('div', { class: 'transport__midi-menu__title' }, 'MIDI 键盘'),
+      this.midiMenuBody,
+    )
+    this.midiWrap = el('div', { class: 'transport__midi-wrap' }, this.midiBtn, this.midiMenu)
 
     // 练习模式：连接 MIDI 键盘后才可用，未连接置灰禁用；
     // 桌面端（有 hover）悬浮展开分轨练习菜单、点击开关全部轨；触控端无 hover，
@@ -269,7 +283,7 @@ export class TransportView implements View {
           this.volumeWrap,
           this.waterfallBtn,
           this.scoreBtn,
-          this.midiBtn,
+          this.midiWrap,
           this.practiceWrap,
         ),
       ),
@@ -297,6 +311,29 @@ export class TransportView implements View {
       }
     }
     document.addEventListener('pointerdown', this.closePracticeOnOutside)
+  }
+
+  /** 点击钢琴状态图标展开/收起状态浮层；展开时监听外部点击，点空白处收起 */
+  private toggleMidiMenu(): void {
+    if (this.midiWrap.classList.contains('is-open')) {
+      this.closeMidiMenu()
+      return
+    }
+    this.midiWrap.classList.add('is-open')
+    this.closeMidiOnOutside = (e) => {
+      if (!this.midiWrap.contains(e.target as Node)) {
+        this.closeMidiMenu()
+      }
+    }
+    document.addEventListener('pointerdown', this.closeMidiOnOutside)
+  }
+
+  private closeMidiMenu(): void {
+    this.midiWrap.classList.remove('is-open')
+    if (this.closeMidiOnOutside !== null) {
+      document.removeEventListener('pointerdown', this.closeMidiOnOutside)
+      this.closeMidiOnOutside = null
+    }
   }
 
   private positionFromSlider(): number {
@@ -409,43 +446,94 @@ export class TransportView implements View {
   }
 
   /**
-   * 同步 MIDI 按钮状态（设计文档 §4.1）：
-   * - 未连接：暗色钢琴图标，tooltip “连接 MIDI 键盘”，点击尝试连接；
-   * - 连接尝试中：旋转等待图标，tooltip “连接中（点击取消）”，点击取消；
-   * - 已连接：琥珀高亮，tooltip 显示键盘名称（点击断开），点击断开；
-   * - 失败态（超时/被拒/不支持等）：恢复暗色，tooltip 提示原因，点击重试。
+   * 同步 MIDI 状态图标 + 状态浮层（设计文档 20260907-midi-auto-connect.md §6）：
+   * - 未连接/无设备/失败：暗色钢琴图标，点击弹浮层显示状态/原因（失败附重连）；
+   * - 连接中：旋转等待图标；已连接：琥珀高亮，浮层列出键盘名。
    * 练习图标与菜单行仅在已连接时可用。
    */
   setMidiStatus(ui: MidiUiState): void {
-    const { status, attempting, deviceLabel } = ui
+    const { status, connectedLabels, connectingHint } = ui
     const connected = status === 'connected'
-    const spinning = attempting && !connected
+    const spinning = status === 'connecting'
     this.midiConnected = connected
     this.midiBtn.classList.toggle('is-connected', connected)
     this.midiBtn.classList.toggle('is-connecting', spinning)
-    this.midiBtn.disabled = status === 'unsupported'
     this.midiBtn.replaceChildren(spinning ? spinnerIcon() : midiKeyboardIcon())
     this.midiBtn.title = connected
-      ? `已连接 ${deviceLabel ?? ''}（点击断开）`
+      ? '已连接（点击查看键盘）'
       : spinning
-        ? '连接中（点击取消）'
-        : status === 'unsupported'
-          ? '当前浏览器不支持 Web MIDI'
-          : status === 'no-devices'
-            ? '未检测到 MIDI 键盘（点击重连）'
-            : status === 'denied'
-              ? 'MIDI 授权被拒绝（点击重试）'
-              : status === 'timeout'
-                ? '连接超时（点击重试）'
-                : status === 'error'
-                  ? '连接失败（点击重试）'
-                  : '连接 MIDI 键盘'
+        ? '正在连接 MIDI 键盘…'
+        : status === 'no-devices'
+          ? '已授权，等待插入 MIDI 键盘'
+          : status === 'denied'
+            ? 'MIDI 授权被拒绝'
+            : status === 'unsupported'
+              ? '当前浏览器不支持 Web MIDI'
+              : status === 'error'
+                ? 'MIDI 连接失败'
+                : 'MIDI 键盘未连接'
+    this.renderMidiMenu(status, connectedLabels, connectingHint)
     this.practiceBtn.disabled = !connected
     for (const row of this.practiceRows.values()) {
       row.item.disabled = !connected
       row.item.title = connected ? '开关该轨练习' : '需先连接 MIDI 键盘'
     }
     this.refreshPracticeTitle()
+  }
+
+  /** 重建状态浮层内容：未连接 / 键盘名列表 / 失败原因 + 重连按钮 */
+  private renderMidiMenu(
+    status: MidiUiState['status'],
+    connectedLabels: readonly string[],
+    connectingHint: string | null,
+  ): void {
+    const body = this.midiMenuBody
+    body.replaceChildren()
+
+    if (status === 'connected') {
+      if (connectedLabels.length === 0) {
+        body.append(el('div', { class: 'transport__midi-menu__text' }, '已连接'))
+      } else {
+        for (const label of connectedLabels) {
+          body.append(el('div', { class: 'transport__midi-menu__device' }, label))
+        }
+      }
+      return
+    }
+
+    const text =
+      status === 'connecting'
+        ? (connectingHint ?? '正在连接 MIDI 键盘…')
+        : status === 'no-devices'
+          ? '已授权，等待插入 MIDI 键盘'
+          : status === 'denied'
+            ? 'MIDI 授权被拒绝'
+            : status === 'unsupported'
+              ? '当前浏览器不支持 Web MIDI'
+              : status === 'error'
+                ? 'MIDI 连接失败'
+                : 'MIDI 键盘未连接'
+    body.append(
+      el(
+        'div',
+        {
+          class:
+            connectingHint !== null
+              ? 'transport__midi-menu__text transport__midi-menu__text--hint'
+              : 'transport__midi-menu__text',
+        },
+        text,
+      ),
+    )
+
+    if (status === 'denied' || status === 'error') {
+      const retry = el('button', { class: 'transport__midi-menu__retry' }, '重连')
+      retry.addEventListener('click', () => {
+        this.closeMidiMenu()
+        this.cbs.onMidiRetry()
+      })
+      body.append(retry)
+    }
   }
 
   /**

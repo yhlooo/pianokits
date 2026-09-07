@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { CONNECT_TIMEOUT_MS, MidiConnection } from './connection'
+import { CONNECT_HINT_MS, MidiConnection } from './connection'
 
 /** 假 MIDIInput：记录监听器，可模拟消息与热插拔 */
 class FakeInput {
@@ -109,8 +109,13 @@ function stubNavigator(request: (() => Promise<FakeAccess>) | undefined): void {
 const NOTE_ON_C4 = Uint8Array.from([0x90, 60, 100])
 const NOTE_OFF_C4 = Uint8Array.from([0x80, 60, 0])
 
+/** 冲刷微任务队列（让 await 的续体跑完） */
+const flush = async (): Promise<void> => {
+  for (let i = 0; i < 5; i++) await Promise.resolve()
+}
+
 describe('MidiConnection 接入层', () => {
-  it('成功授权但无输入设备 → connecting 后进入 no-devices', async () => {
+  it('成功授权但无输入设备 → connecting 后进入 no-devices（常驻，不超时）', async () => {
     const access = new FakeAccess()
     stubNavigator(() => Promise.resolve(access))
     const statuses: string[] = []
@@ -121,6 +126,7 @@ describe('MidiConnection 接入层', () => {
     await c.connect()
     expect(statuses).toEqual(['connecting', 'no-devices'])
     expect(c.status).toBe('no-devices')
+    expect(c.connectedLabels).toEqual([])
     c.dispose()
   })
 
@@ -180,28 +186,29 @@ describe('MidiConnection 接入层', () => {
     await c.connect()
     // 关键：即便端口表不可迭代（for…of / 展开会抛 TypeError），也照常连上
     expect(c.status).toBe('connected')
-    expect(c.connectedLabel).toBe('ACME Fake Keyboard')
+    expect(c.connectedLabels).toEqual(['ACME Fake Keyboard'])
     expect(snapshots.at(-1)).toEqual([out])
     input.send(NOTE_ON_C4)
     expect(notes).toEqual([{ type: 'noteOn', channel: 0, pitch: 60, velocity: 100 }])
     c.dispose()
   })
 
-  it('disconnect：摘监听回 idle，不再派发按键', async () => {
+  it('connectedLabels：返回全部已连接键盘的 厂商+名称 列表', async () => {
     const access = new FakeAccess()
-    const input = new FakeInput()
-    access.inputs.set('1', input)
+    const a = new FakeInput()
+    const b = new FakeInput()
+    b.name = 'Keyboard B'
+    b.manufacturer = 'Yamaha'
+    access.inputs.set('a', a)
+    access.inputs.set('b', b)
     stubNavigator(() => Promise.resolve(access))
-    const notes: unknown[] = []
-    const c = new MidiConnection({ onStatus: () => {}, onNote: (ev) => notes.push(ev) })
+    const c = new MidiConnection({ onStatus: () => {}, onNote: () => {} })
     await c.connect()
-    c.disconnect()
-    expect(c.status).toBe('idle')
-    input.send(NOTE_ON_C4)
-    expect(notes).toHaveLength(0)
+    expect(c.connectedLabels).toEqual(['ACME Fake Keyboard', 'Yamaha Keyboard B'])
+    c.dispose()
   })
 
-  it('热插拔：statechange 后重挂输入并刷新状态', async () => {
+  it('热插拔：statechange 重挂输入并刷新状态；拔出再插入自动重连', async () => {
     const access = new FakeAccess()
     const a = new FakeInput()
     access.inputs.set('a', a)
@@ -223,17 +230,38 @@ describe('MidiConnection 接入层', () => {
     b.send(NOTE_ON_C4)
     expect(notes).toHaveLength(1)
 
-    // 设备全部拔出：老输入不再派发
+    // 设备全部拔出：老输入不再派发，进入 no-devices（access 仍常驻）
     access.inputs.clear()
     access.fireStateChange()
     expect(c.status).toBe('no-devices')
     a.send(NOTE_ON_C4)
     b.send(NOTE_ON_C4)
     expect(notes).toHaveLength(1)
+
+    // 再插入：statechange 自动重连，无需再次 connect
+    access.inputs.set('c', a)
+    access.fireStateChange()
+    expect(c.status).toBe('connected')
+    a.send(NOTE_ON_C4)
+    expect(notes).toHaveLength(2)
     c.dispose()
   })
 
-  it('connect 期间 disconnect：丢弃迟到的授权结果', async () => {
+  it('dispose：摘监听回 idle，不再派发按键', async () => {
+    const access = new FakeAccess()
+    const input = new FakeInput()
+    access.inputs.set('1', input)
+    stubNavigator(() => Promise.resolve(access))
+    const notes: unknown[] = []
+    const c = new MidiConnection({ onStatus: () => {}, onNote: (ev) => notes.push(ev) })
+    await c.connect()
+    c.dispose()
+    expect(c.status).toBe('idle')
+    input.send(NOTE_ON_C4)
+    expect(notes).toHaveLength(0)
+  })
+
+  it('connect 期间 dispose：丢弃迟到的授权结果', async () => {
     let resolveAccess!: (access: FakeAccess) => void
     stubNavigator(
       () =>
@@ -244,7 +272,7 @@ describe('MidiConnection 接入层', () => {
     const c = new MidiConnection({ onStatus: () => {}, onNote: () => {} })
     const pending = c.connect()
     expect(c.status).toBe('connecting')
-    c.disconnect()
+    c.dispose()
     expect(c.status).toBe('idle')
     const access = new FakeAccess()
     access.inputs.set('1', new FakeInput())
@@ -255,26 +283,30 @@ describe('MidiConnection 接入层', () => {
   })
 })
 
-describe('MidiConnection 连接尝试（超时/取消/设备名）', () => {
-  /** 冲刷微任务队列（让 await 的续体跑完） */
-  const flush = async (): Promise<void> => {
-    for (let i = 0; i < 5; i++) await Promise.resolve()
-  }
-
-  it('已连接：attempting 结束、connectedLabel 为 厂商+名称', async () => {
-    const access = new FakeAccess()
-    access.inputs.set('1', new FakeInput())
-    stubNavigator(() => Promise.resolve(access))
-    const c = new MidiConnection({ onStatus: () => {}, onNote: () => {} })
-    await c.connect()
-    expect(c.status).toBe('connected')
-    expect(c.attempting).toBe(false)
-    expect(c.connectedLabel).toBe('ACME Fake Keyboard')
-    c.disconnect()
-    expect(c.connectedLabel).toBeNull()
+describe('MidiConnection 自动连接（常驻 access / 软提示 / 重试）', () => {
+  it('授权后无设备：no-devices 常驻，超过提示阈值也不超时、不拆 access', async () => {
+    vi.useFakeTimers()
+    try {
+      const access = new FakeAccess()
+      stubNavigator(() => Promise.resolve(access))
+      const statuses: string[] = []
+      const c = new MidiConnection({ onStatus: (s) => statuses.push(s), onNote: () => {} })
+      await c.connect()
+      expect(c.status).toBe('no-devices')
+      await vi.advanceTimersByTimeAsync(CONNECT_HINT_MS * 2)
+      expect(c.status).toBe('no-devices')
+      expect(statuses).not.toContain('timeout')
+      // 插入设备 → statechange → connected
+      access.inputs.set('1', new FakeInput())
+      access.fireStateChange()
+      expect(c.status).toBe('connected')
+      c.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
-  it('5s 内未连上 → timeout；迟到的授权结果作废、attempting 结束', async () => {
+  it('connecting 超过提示阈值 → connectingHint 软提示，状态仍 connecting；晚到结果按真实状态呈现', async () => {
     vi.useFakeTimers()
     try {
       let resolveAccess!: (access: FakeAccess) => void
@@ -284,95 +316,59 @@ describe('MidiConnection 连接尝试（超时/取消/设备名）', () => {
             resolveAccess = resolve
           }),
       )
-      const c = new MidiConnection({ onStatus: () => {}, onNote: () => {} })
-      const pending = c.connect()
-      expect(c.status).toBe('connecting')
-      expect(c.attempting).toBe(true)
-      await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS)
-      expect(c.status).toBe('timeout')
-      expect(c.attempting).toBe(false)
-      // 迟到的授权结果（用户 5s 后才允许）被作废
-      const access = new FakeAccess()
-      const input = new FakeInput()
-      access.inputs.set('1', input)
-      resolveAccess(access)
-      await flush()
-      expect(c.status).toBe('timeout')
-      expect(c.connectedLabel).toBeNull()
-      await pending
-      c.disconnect()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('已授权无设备：5s 窗口内热插拔即连上（计时器清除，不再超时）', async () => {
-    vi.useFakeTimers()
-    try {
-      const access = new FakeAccess()
-      stubNavigator(() => Promise.resolve(access))
       const statuses: string[] = []
       const c = new MidiConnection({ onStatus: (s) => statuses.push(s), onNote: () => {} })
       const pending = c.connect()
-      await flush()
-      // 已授权但无设备：仍在尝试窗口内
-      expect(c.status).toBe('no-devices')
-      expect(c.attempting).toBe(true)
-      // 窗口内插入设备 → connected，attempting 结束
-      const input = new FakeInput()
-      access.inputs.set('1', input)
-      access.fireStateChange()
-      expect(c.status).toBe('connected')
-      expect(c.attempting).toBe(false)
-      await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS)
-      expect(c.status).toBe('connected')
-      expect(statuses).not.toContain('timeout')
-      await pending
-      c.disconnect()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('已授权无设备且窗口内未插入：超时 → timeout 并拆掉 access', async () => {
-    vi.useFakeTimers()
-    try {
+      expect(c.status).toBe('connecting')
+      expect(c.connectingHint).toBeNull()
+      await vi.advanceTimersByTimeAsync(CONNECT_HINT_MS)
+      expect(c.status).toBe('connecting')
+      expect(c.connectingHint).toContain('超时')
+      // 晚到的授权结果仍按真实状态呈现：有设备 → connected，软提示清除
       const access = new FakeAccess()
-      stubNavigator(() => Promise.resolve(access))
-      const c = new MidiConnection({ onStatus: () => {}, onNote: () => {} })
-      const pending = c.connect()
-      await flush()
-      expect(c.status).toBe('no-devices')
-      await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS)
-      expect(c.status).toBe('timeout')
-      expect(c.attempting).toBe(false)
-      // access 已拆除：此后热插拔不再生效
       access.inputs.set('1', new FakeInput())
-      access.fireStateChange()
-      expect(c.status).toBe('timeout')
+      resolveAccess(access)
+      await flush()
+      expect(c.status).toBe('connected')
+      expect(c.connectingHint).toBeNull()
       await pending
-      c.disconnect()
+      c.dispose()
+      expect(statuses).not.toContain('timeout')
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('断开后重试：重连可再次成功', async () => {
+  it('denied 后重试：connect 可再次发起并成功', async () => {
+    stubNavigator(() => Promise.reject(new DOMException('denied', 'NotAllowedError')))
+    const c = new MidiConnection({ onStatus: () => {}, onNote: () => {} })
+    await c.connect()
+    expect(c.status).toBe('denied')
+    // 授权改回成功 + 有设备，重试连上
     const access = new FakeAccess()
     access.inputs.set('1', new FakeInput())
     stubNavigator(() => Promise.resolve(access))
-    const statuses: string[] = []
-    const c = new MidiConnection({ onStatus: (s) => statuses.push(s), onNote: () => {} })
-    await c.connect()
-    c.disconnect()
-    expect(c.status).toBe('idle')
     await c.connect()
     expect(c.status).toBe('connected')
-    expect(statuses).toEqual(['connecting', 'connected', 'idle', 'connecting', 'connected'])
-    c.disconnect()
+    c.dispose()
   })
 
-  it('输出端口快照随连接同步/热插拔刷新，断开时清空', async () => {
+  it('connected / no-devices 下再次 connect 幂等（不重复请求）', async () => {
+    let calls = 0
+    const access = new FakeAccess()
+    stubNavigator(() => {
+      calls++
+      return Promise.resolve(access)
+    })
+    const c = new MidiConnection({ onStatus: () => {}, onNote: () => {} })
+    await c.connect()
+    expect(c.status).toBe('no-devices')
+    await c.connect()
+    expect(calls).toBe(1)
+    c.dispose()
+  })
+
+  it('输出端口快照随连接同步/热插拔刷新，dispose 时清空', async () => {
     const access = new FakeAccess()
     const out = new FakeOutput()
     access.outputs.set('o1', out)
@@ -391,8 +387,8 @@ describe('MidiConnection 连接尝试（超时/取消/设备名）', () => {
     access.outputs.set('o2', out2)
     access.fireStateChange()
     expect(snapshots.at(-1)).toEqual([out, out2])
-    // 断开：输出快照清空
-    c.disconnect()
+    // 销毁：输出快照清空
+    c.dispose()
     expect(snapshots.at(-1)).toEqual([])
   })
 })

@@ -1,16 +1,19 @@
 # 设计：MIDI 键盘连接与练习模式
 
 - 日期：2026-09-06
-- 状态：**正式生效（2026-09-06 实现）**
+- 状态：**正式生效（2026-09-06 实现；连接部分由 `20260907-midi-auto-connect.md` 修订）**
 - 关联文档：
   - `20260905-midi-import-player.md`（MIDI 播放工具主设计；本功能对其 M1 非目标的一次扩展）
   - `docs/development/research/20260905-web-midi-input.md`（Web MIDI 接入调查结论）
   - `docs/development/reference/midi/webmidi-api.md`（Web MIDI API 参考）
   - `20260905-debug-tools.md` §4.3（既有“MIDI 键盘”调试工具的接入模式，本设计的接入层由此提炼为共享服务）
+  - `20260907-midi-auto-connect.md`（对本文 §1/§3.1/§3.5/§4.1 连接部分的修订：自动连接 +
+    连接状态展示图标，取代“点击连接/断开”）
 
 ## 1. 需求
 
-1. MIDI 播放器（播放坞）右下角添加**钢琴图标**，点击连接 MIDI 钢琴键盘；
+1. MIDI 播放器（播放坞）右下角添加**钢琴状态图标**，进入页面自动连接 MIDI 钢琴键盘，
+   高亮/暗色表示已连接/未连接，点击显示连接状态（**由 `20260907-midi-auto-connect.md` 修订**）；
 2. 连接后可用 MIDI 钢琴键盘**实时演奏**（按键即发声、离键即止音，音色走当前音频引擎）；
 3. 再添加**练习图标**，未连接 MIDI 键盘前该图标置灰禁用：
    - 练习模式下瀑布流音符落到琴键**不自动发声**，等待 MIDI 键盘按下对应琴键才播放；
@@ -54,7 +57,7 @@
 | 8   | 匹配判定     | 纯逻辑 `ChordGate`（`core/midi/chord-gate.ts`）                                                                                                                                                              | 判定规则复杂（按错标记、多按拦截、预先按住的立即触发、豁免键忽略），抽成纯模块可单测，与 DOM/音频解耦                                                                                                              |
 | 9   | 编排         | `PracticeController`（`core/practice.ts`）：连接生命周期、实时演奏、分轨练习开关、gate ↔ transport 接线、键盘反馈事件                                                                                        | app.ts 是组合根，只做注入与视图更新；控制器不碰 DOM，经回调向外发状态                                                                                                                                              |
 | 10  | 键盘反馈     | 瀑布流键盘新增反馈层：按住键琥珀点亮、按错键红色 + 光晕，仅练习模式显示                                                                                                                                      | 复用与「MIDI 键盘」调试页共用的 DOM 钢琴键盘（`ui/piano-keyboard.ts`，2026-09-06 起瀑布流键盘即该组件）的逐键点亮层；红色使用语义色 `--danger`，与点亮色、轨色不冲突                                               |
-| 11  | 入口 UI      | 播放坞控制行最右端（视图切换右侧）两个图标按钮：钢琴（连接/断开）、练习（全开/全关 + 悬浮分轨菜单）                                                                                                          | 与“右下角”需求一致；图标沿用 20×20 / 1.5px 描边 / currentColor 的既有图标语言                                                                                                                                      |
+| 11  | 入口 UI      | 播放坞控制行最右端（视图切换右侧）两个图标按钮：钢琴（连接状态展示，点击弹状态浮层，**由 `20260907-midi-auto-connect.md` 修订**）、练习（全开/全关 + 悬浮分轨菜单）                                          | 与“右下角”需求一致；图标沿用 20×20 / 1.5px 描边 / currentColor 的既有图标语言                                                                                                                                      |
 | 12  | 播放镜像     | `MidiOutputSink`（`core/midi/output.ts`）把走带排期的每个音符**同步发一份**到键盘输出端口（键盘自带音源发声）；挂载在 `Transport`（与引擎共用同一排期）                                                      | 用户键盘既是输入也是音源，要求“同步输出一份到键盘”；镜像挂在走带排期点上天然与电脑播放逐音符对齐；Transport 只面对结构化接口，换输出实现不动调度器                                                                 |
 | 13  | 音量统一     | `MidiOutputSink` 挂载输出端口时发送 **Local Control Off**（CC122=0），断开/销毁时恢复 **On**（CC122=127）                                                                                                    | 键盘 Local Control On 时物理按键会由键盘自带音源直接发声，造成练习键双重发声、且与程序输出的非练习轨声源（音量旋钮/力度）不一致；禁用自带音源后，练习键经软件回送、非练习轨经引擎+镜像，均由程序掌控、消除双重发声 |
 | 14  | 练习键回送   | 练习模式（门控中）的 noteOn/noteOff 经 `MidiOutputSink.echoNote()` **原样**（音高+力度+通道）回送到键盘输出端口，并经 `transport.liveNoteOn/Off` 驱动电脑引擎（同力度）；`releaseChord()` 不再排期门控轨音符 | 练习轨音量应「按按键力度决定」（像弹真钢琴），故禁用键盘本地音源后用软件回送替代本地发声、同时驱动电脑引擎（戴耳机也能听到自己弹的练习轨）；弹错的音同样发声，仅红显+阻止放行；门控轨不再由程序排期，避免双重发声  |
@@ -63,41 +66,43 @@
 
 ### 3.1 MIDI 接入层（core/midi/connection.ts）
 
+> 本节连接语义已由 `20260907-midi-auto-connect.md` §4.1 修订：改为**自动连接**（进入页面即
+> `connect()`，授权后常驻 `MIDIAccess`，靠 `statechange` 感知插拔，不因无设备而超时拆除；
+> 去掉 `disconnect()` 与 `timeout` 终态）。以下为修订后形态：
+
 ```ts
 type MidiConnectionStatus =
-  | 'idle' // 未连接（初始/已断开）
-  | 'connecting' // 授权请求中
+  | 'idle' // 未连接（初始；仅工具卸载/未发起前短暂存在）
+  | 'connecting' // 授权请求中（requestMIDIAccess 的 Promise 未落定）
   | 'connected' // 已授权且 ≥1 台输入设备挂载（练习模式可用的前提）
-  | 'no-devices' // 已授权但无输入设备（连接尝试窗口内等待设备插入）
-  | 'timeout' // 连接尝试超时（5s 内未连上）
+  | 'no-devices' // 已授权但无输入设备（常驻等待插入，靠 statechange 自动连上）
   | 'unsupported' // 浏览器不支持 Web MIDI
   | 'denied' // 授权被拒绝
   | 'error' // 其它失败
 
-export const CONNECT_TIMEOUT_MS = 5000 // 连接尝试超时
+export const CONNECT_HINT_MS = 5000 // connecting 超时软提示（不拆 access、不失败）
+export const CONNECT_TIMEOUT_MS = 5000 // 调试工具「MIDI 键盘」页沿用 5s 诊断超时
 
 class MidiConnection {
   readonly status: MidiConnectionStatus
-  readonly attempting: boolean // 连接尝试是否进行中（5s 窗口内）
-  readonly connectedLabel: string | null // 已连接键盘的 厂商+名称；未连接为 null
-  connect(): Promise<void> // 发起一次 5s 限时连接尝试
-  disconnect(): void // 取消尝试/断开：摘监听、移除 statechange、回 idle
-  dispose(): void // 同 disconnect
-  // 构造回调：onStatus(status)、onNote(MidiNoteEvent)（复用 core/midi/input.ts 的 parseMidiMessage）
+  readonly connectingHint: string | null // connecting 超时软提示；其余状态为 null
+  readonly connectedLabels: readonly string[] // 已连接键盘 厂商+名称 列表；未连接为空数组
+  connect(): Promise<void> // 自动连接：请求授权并常驻 access；connected/no-devices/connecting 幂等
+  dispose(): void // 工具卸载清理：摘监听、移除 statechange、回 idle
+  // 构造回调：onStatus(status)、onNote(MidiNoteEvent)（复用 core/midi/input.ts 的 parseMidiMessage）、
+  // onOutputs(outputs)（输出端口变化，镜像播放用）
 }
 ```
 
 要点（沿用调查结论 R-WebMIDI）：
 
 - `navigator.requestMIDIAccess({ sysex: false })`；`NotAllowedError` → denied、`NotSupportedError` → unsupported；
-- `statechange` 时重新挂载 inputs 并刷新状态（设备热插拔自动感知）；
-- **连接尝试语义**（`attempting`）：`connect()` 启动 5s 限时尝试——期间授权成功且有设备 →
-  connected（尝试结束）；已授权但无设备 → no-devices，**继续等待到 5s 超时**（窗口内热插拔
-  即连上）；期间 `disconnect()`（用户点击取消）→ idle；5s 仍非 connected → timeout
-  （拆掉 access，在途的授权结果作废）。每次 connect/disconnect/超时都会使 attempt 序号自增，
-  `await` 之后校验序号与状态，杜绝迟到的授权结果覆盖新一轮连接；
-- `sync()` 统一负责“连上即结束尝试”：connected 时清计时器、attempting 置 false（初始接入与
-  热插拔共用此路径）；
+- `statechange` 时重新挂载 inputs 并刷新状态（设备热插拔自动感知；`no-devices` 常驻等待插入）；
+- **自动连接语义**：`connect()` 请求授权成功后**常驻 `MIDIAccess`**，不因无设备而超时拆除；
+  `denied`/`error`/`idle` 可再次 `connect()` 重试；`connecting` 超过 `CONNECT_HINT_MS` 仅经
+  `connectingHint` 软提示（不拆、不失败），晚到的结果按真实状态呈现；`dispose()` 自增 attempt
+  序号作废在途请求；
+- `sync()` 统一负责“刷新状态”：`attachedInputs` ≥1 → connected，0 → no-devices（初始接入与热插拔共用）；
 - 端口表遍历统一用 `forEach`（而非 `for…of` / `[...values()]`）：第三方 Web MIDI shim（如 iPad
   的 Web MIDI Browser）提供的 `inputs`/`outputs` 是非原生 Map，其 `values()` 迭代器没有
   `Symbol.iterator`，`for…of`/展开会抛 `TypeError`，导致“授权成功却一直卡在连接中”
@@ -207,8 +212,8 @@ interface KeyFeedback {
 
 interface MidiUiState {
   status: MidiConnectionStatus
-  attempting: boolean // 连接尝试进行中（旋转等待；点击取消）
-  deviceLabel: string | null // 已连接键盘名（tooltip 用）
+  connectedLabels: readonly string[] // 已连接键盘名列表（多台逐行；未连接为空）
+  connectingHint: string | null // connecting 超时软提示；其余状态为 null
 }
 
 interface PracticeTrackInfo {
@@ -226,12 +231,12 @@ interface PracticeCallbacks {
   onStatus(ui: MidiUiState): void
   onPractice(ui: PracticeUiState): void // 分轨练习状态（轨列表 / 每轨开关 / active / allOn）
   onFeedback(fb: KeyFeedback | null): void // null = 非练习模式（隐藏键盘反馈）
-  onConnectError(message: string): void // 连接失败（超时/被拒等）→ 右下角报错通知
+  onConnectError(message: string): void // 连接失败（被拒/不支持等）→ 右下角报错通知
 }
 
 class PracticeController {
   constructor(opts: { transport: Transport; callbacks: PracticeCallbacks })
-  toggleMidi(): void
+  autoConnect(): void // 自动连接（进页面调用；失败态“重连”复用）；MidiConnection.connect 幂等
   setTracks(tracks: readonly PracticeTrackInfo[]): void // 切换曲目：更新轨列表，与旧开关求交
   togglePractice(): void // 非全开（含全关）→ 全开；全开 → 全关
   toggleTrack(index: number): void // 开关单轨（可多选）
@@ -245,10 +250,12 @@ function practiceTracksOf(song: Song): PracticeTrackInfo[]
 
 职责与规则：
 
-1. 持有 `MidiConnection`，`toggleMidi()` 点击语义：**已连接 → 断开**；**尝试中
-   （attempting）→ 取消**（回 idle，不报错）；**其余 → 发起一次连接尝试**；
-2. 连接失败（timeout / denied / unsupported / error）经 `onConnectError` 弹报错，
-   **主动取消不报错**；
+1. 持有 `MidiConnection`，`autoConnect()`（**由 `20260907-midi-auto-connect.md` 修订**）：
+   进入页面时调用一次，发起自动连接；授权失败（denied/error）后由详情浮层“重连”按钮再次
+   `autoConnect()`（幂等）；
+2. 连接失败通知（**修订**）：无设备（no-devices）静默；授权被拒（denied）/ 不支持
+   （unsupported）/ 其它失败（error）经 `onConnectError` 弹右下角报错；connecting 挂起仅经
+   `connectingHint` 浮层软提示、不弹报错；
 3. **实时演奏 / 练习按键**：已连接且无门控轨时，noteOn/noteOff → `transport.liveNoteOn/Off`
    （驱动电脑引擎）；有门控轨（练习中）时，noteOn/noteOff → `sink.echoNote(ev)` 原样回送到
    键盘音源（力度=按键力度、通道=输入通道）**并同时 `transport.liveNoteOn/Off` 驱动电脑引擎
@@ -256,13 +263,13 @@ function practiceTracksOf(song: Song): PracticeTrackInfo[]
    （放行不再排期门控轨音符，避免与回送双重发声）；
 4. **分轨练习开关**：`practiceTracks` 集合（轨 index）非空且 connected 时把集合推给
    `transport.setPracticeTracks`，空集合（关闭练习）推空集；仅在 `connected` 时可开启
-   任何轨；连接状态离开 `connected`（断开/设备拔出）时**清空全部轨的练习开关**（强制退出）；
+   任何轨；连接状态离开 `connected`（设备拔出）时**清空全部轨的练习开关**（强制退出）；
 5. **练习按钮语义**：全部轨已开启 → 全部关闭；其余（全关或部分开启）→ 全部开启。
    悬浮菜单点击单轨开关该轨（可多选），不在轨列表内的点击忽略；
 6. **暂停/播放联动**：开关任意轨练习（练习按钮全开/全关、菜单开关单轨，集合确有
    变化时）自动 `transport.pause()`（仅播放中生效）；练习开启（connected 且有门控轨）
    时收到任意 noteOn 且未在播放 → `transport.play()` 恢复播放（该按键同时参与判定）；
-   连接尝试不触碰播放状态；连接状态离开 connected（点击断开/设备拔出，经
+   连接过程不触碰播放状态；连接状态离开 connected（设备拔出，经
    `lastStatus` 前值判定）→ `transport.pause()`；
 7. **切换曲目**（`setTracks`）：app 在载入歌曲时传 `practiceTracksOf(song)` 的结果
    （仅列出出现在瀑布流中的非打击乐轨）；练习开关与新的轨列表**求交保留**（换歌不丢
@@ -316,16 +323,23 @@ class MidiOutputSink {
 
 ### 4.1 入口按钮（播放坞控制行最右端）
 
+> 本节钢琴按钮语义已由 `20260907-midi-auto-connect.md` §6 修订：从“连接/断开开关”改为
+> **连接状态展示图标 + 状态浮层**，连接改自动触发。以下为修订后形态：
+
 - 顺序：`[音量][瀑布][乐谱][钢琴][练习]`（练习在最右端；音量、瀑布/乐谱均为图标按钮，
   音量滑块为喇叭图标上方的竖向弹层）；
-- **钢琴图标**（琴键剪影：描边白键 + 实心黑键，沿用图标语言）三态：
-  - **未连接**：暗色（弱文本色，比常规图标按钮暗一档），tooltip“连接 MIDI 键盘”，
-    点击发起连接尝试；失败态（超时/被拒/不支持/失败）恢复暗色，tooltip 提示原因（点击重试）；
-  - **连接尝试中**（attempting，5s 窗口）：图标换成**旋转等待圆弧**（CSS 动画），
-    tooltip“连接中（点击取消）”，点击**取消连接**（回未连接暗色，不报错）；
-  - **已连接**：琥珀高亮，tooltip“已连接 {键盘名称}（点击断开）”，点击**断开连接**；
-- 连接尝试**超时 5s 未连上**：右下角弹出**报错通知胶囊**（危险色左边条，5s 自动消退 +
-  关闭按钮，位置在播放坞右上方），按钮恢复未连接暗色；
+- **钢琴状态图标**（琴键剪影：描边白键 + 实心黑键，沿用图标语言）三态：
+  - **未连接/无设备/失败**：暗色（弱文本色，比常规图标按钮暗一档），tooltip 提示状态/原因；
+    点击弹出**状态浮层**（未连接 / 失败原因 + 重连按钮）；
+  - **连接中**（connecting）：图标换成**旋转等待圆弧**（CSS 动画），tooltip“正在连接 MIDI 键盘…”；
+  - **已连接**：琥珀高亮，tooltip“已连接（点击查看键盘）”，点击浮层列出**全部已连接键盘名**；
+- **自动连接**：进入播放器页面即自动 `requestMIDIAccess()`；授权后靠 `statechange` 感知插拔，
+  插线即连；不再提供“断开连接”入口；
+- 失败通知：`denied/unsupported/error` 右下角弹**报错通知胶囊**（危险色左边条，5s 自动消退 +
+  关闭按钮，位置在播放坞右上方）；`no-devices`（无设备）静默；connecting 挂起仅浮层软提示；
+- **状态浮层**：钢琴按钮包一层 `position: relative` 包装器，点击切换 `.is-open` 展开/收起，
+  点菜单外部空白收起；内容按状态渲染——未连接 / 已连接键盘名列表 / 失败原因 + “重连”按钮
+  （denied/error 显示，点击重新请求）；
 - **练习图标**：打开的书（左右两页在书脊处相接），标题“练习模式（需先连接 MIDI 键盘）”；
   未连接时 `disabled` 置灰；**只要至少一轨开启练习即琥珀高亮（`is-active`）**；
   - 点击语义：非全开（含全关）→ 开启全部轨练习（tooltip“开启全部轨练习”）；
@@ -356,14 +370,19 @@ class MidiOutputSink {
 
 ## 5. 验收
 
-- 未连接：钢琴按钮暗色，tooltip“连接 MIDI 键盘”，点击进入连接中；
-- 连接中：旋转等待图标，tooltip“连接中（点击取消）”，点击取消后恢复暗色且不报错；
-- 5s 内连上：按钮变亮，tooltip 显示键盘名称，点击断开；
-- 5s 未连上：右下角弹出报错通知，按钮恢复暗色；
+> 连接相关验收项已由 `20260907-midi-auto-connect.md` §7 修订，此处同步为修订后形态：
+
+- 进入播放器页面自动发起连接；已授权用户秒连、零点击；首次进入弹出浏览器授权提示；
+- 授权后未插键盘：状态图标暗色、浮层“等待插入 MIDI 键盘”、**不弹报错**；插入键盘后经
+  `statechange` 自动连上并高亮；
+- 拔出键盘：图标转暗、练习开关清空、播放暂停、Local Control 恢复 On；再插入自动重连；
+- 已连接时点击图标：浮层列出全部已连接键盘名（多台逐行）；不再提供“断开连接”入口；
+- 失败（denied/unsupported/error）：右下角报错通知；浮层显示失败原因，denied/error 附重连；
+- connecting 长期挂起：浮层“授权请求超时…”软提示，不拆 access、不弹报错，晚到结果按真实状态呈现；
 - 连接 MIDI 键盘后按键即发声、离键即止（音色 = 当前引擎）；
 - 键盘有输出端口时：连接即发送 Local Control Off（禁用键盘自带音源）；练习模式按键（含弹错的音）
   原样回送到键盘音源（力度=按键力度）并驱动电脑引擎（同力度），非练习轨走电脑引擎 + 键盘镜像
-  （力度=原曲）；断开/拔出/销毁恢复 Local Control On；
+  （力度=原曲）；拔出/销毁恢复 Local Control On；
 - 未连接时练习图标置灰不可点；连接后可点、断开后自动退出并恢复置灰；
 - 练习模式：音符进入提前触发窗口（起点前一个四分音符）即可按键判定，落到判定线停住；
   按下练习键即经回送 + 引擎发声（力度=按键力度），按对全部和弦键后继续下落；提前按键可在

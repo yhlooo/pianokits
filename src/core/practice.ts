@@ -11,13 +11,13 @@ export interface KeyFeedback {
   wrong: ReadonlySet<number>
 }
 
-/** MIDI 按钮 UI 状态（推给播放坞钢琴按钮渲染） */
+/** MIDI 状态图标 UI 状态（推给播放坞钢琴状态图标渲染，设计文档 20260907-midi-auto-connect.md §4.3） */
 export interface MidiUiState {
   status: MidiConnectionStatus
-  /** 连接尝试进行中（5s 窗口内）：旋转等待；点击取消连接 */
-  attempting: boolean
-  /** 已连接键盘的显示名；未连接为 null */
-  deviceLabel: string | null
+  /** 已连接键盘显示名列表（多台逐行）；未连接/无设备时为空 */
+  connectedLabels: readonly string[]
+  /** connecting 超时软提示；其余状态为 null */
+  connectingHint: string | null
 }
 
 /** 分轨练习的可练习轨信息（悬浮菜单与门控按此列表） */
@@ -67,8 +67,10 @@ export function practiceTracksOf(song: Song): PracticeTrackInfo[] {
 }
 
 /**
- * MIDI 键盘 + 分轨练习编排（不触碰 DOM，设计文档 20260906-midi-keyboard-and-practice.md §3.5）：
- * - 连接生命周期：点击尝试连接（5s 限时）、点击取消、点击断开；失败经 onConnectError 报错；
+ * MIDI 键盘 + 分轨练习编排（不触碰 DOM，设计文档 20260906-midi-keyboard-and-practice.md §3.5，
+ * 2026-09-07 起连接改自动语义，见 20260907-midi-auto-connect.md §4.2）：
+ * - 连接生命周期：进入页面自动连接（autoConnect，幂等）；授权后常驻，插拔靠 statechange；
+ *   授权被拒/不支持/其它失败经 onConnectError 报错，无设备（no-devices）静默；
  * - 播放镜像（§3.6）：连接产生的输出端口挂到 MidiOutputSink，走带排期的每个音符同步
  *   发一份到键盘自带音源（与电脑播放同步发声）；断开/拔出时解除；
  * - 实时演奏：已连接且无门控轨时按键直达引擎（经 Transport 透传）；按键**不**回送
@@ -77,8 +79,8 @@ export function practiceTracksOf(song: Song): PracticeTrackInfo[] {
  *   时等待琴键放行（和弦需同时按住全部对应琴键），其余轨照常直接播放；
  * - 练习按钮语义：非全开（含全关）→ 全部开启；全开 → 全部关闭；
  * - 暂停/播放联动：开关任意轨练习都会自动暂停；练习开启时按下任意琴键即从暂停
- *   恢复播放；连接键盘不影响播放状态，断开（点击断开/设备拔出）自动暂停；
- * - 连接状态离开 connected（断开/设备拔出）时清空全部轨的练习开关（强制退出练习）。
+ *   恢复播放；连接键盘不影响播放状态，设备拔出自动暂停；
+ * - 连接状态离开 connected（设备拔出/销毁）时清空全部轨的练习开关（强制退出练习）。
  */
 export class PracticeController {
   private readonly transport: Transport
@@ -112,12 +114,11 @@ export class PracticeController {
           // 断开（点击断开/设备拔出）自动暂停；连接尝试的中间状态不影响播放
           if (wasConnected) this.transport.pause()
         }
-        // 连接失败（非用户主动取消）：弹报错通知
+        // 连接失败通知（设计文档 20260907-midi-auto-connect.md §5）：
+        // 无设备（no-devices）静默；授权被拒/不支持/其它失败弹右下角报错；connecting 挂起仅浮层提示
         if (status === 'denied') this.cbs.onConnectError('MIDI 授权被拒绝')
         else if (status === 'unsupported') this.cbs.onConnectError('当前浏览器不支持 Web MIDI')
         else if (status === 'error') this.cbs.onConnectError('MIDI 连接失败，请重试')
-        else if (status === 'timeout')
-          this.cbs.onConnectError('连接 MIDI 键盘超时，请确认设备已连接并允许授权后重试')
         this.emitMidiState()
       },
       onNote: (ev) => this.onNote(ev),
@@ -164,20 +165,11 @@ export class PracticeController {
   }
 
   /**
-   * 钢琴按钮点击语义（设计文档 §4.1）：
-   * - 已连接 → 断开；连接尝试中（attempting）→ 取消连接；
-   * - 其余（未连接/超时/被拒等）→ 发起一次连接尝试。
+   * 自动连接（进入播放器页面时调用一次；失败态"重连"按钮也复用此路径）。
+   * `MidiConnection.connect()` 幂等：已持有授权（connected/no-devices）与 connecting
+   * 时不再重复请求；denied/error/idle 时重新发起（设计文档 20260907-midi-auto-connect.md §4.2）。
    */
-  toggleMidi(): void {
-    if (this.midi.status === 'connected') {
-      this.midi.disconnect()
-      return
-    }
-    if (this.midi.attempting) {
-      this.midi.disconnect()
-      return
-    }
-    if (this.midi.status === 'unsupported') return
+  autoConnect(): void {
     void this.midi.connect()
   }
 
@@ -301,8 +293,8 @@ export class PracticeController {
   private emitMidiState(): void {
     this.cbs.onStatus({
       status: this.midi.status,
-      attempting: this.midi.attempting,
-      deviceLabel: this.midi.connectedLabel,
+      connectedLabels: this.midi.connectedLabels,
+      connectingHint: this.midi.connectingHint,
     })
   }
 }

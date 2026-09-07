@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import type { Song } from './model'
 import type { AudioEngine, ScheduledNote } from './engine/types'
-import { CONNECT_TIMEOUT_MS } from './midi/connection'
+import { CONNECT_HINT_MS } from './midi/connection'
 import { Transport, type TransportHost } from './transport'
 import {
   PracticeController,
@@ -172,7 +172,7 @@ async function connectController(
       onConnectError: (m) => errors.push(m),
     },
   })
-  c.toggleMidi()
+  c.autoConnect()
   await vi.waitFor(() => expect(c.status).toBe('connected'))
   return { c, input, access, practices, feedbacks, errors }
 }
@@ -188,7 +188,7 @@ describe('practiceTracksOf', () => {
 })
 
 describe('PracticeController 编排', () => {
-  it('连接 → 全开练习 → 和弦等待 → 按错键红显且阻止 → 纠错后放行 → 断连强制退出', async () => {
+  it('连接 → 全开练习 → 和弦等待 → 按错键红显且阻止 → 纠错后放行 → 拔出强制退出', async () => {
     const engine = new FakeEngine()
     const host = new FakeHost()
     const transport = new Transport(engine, host)
@@ -255,9 +255,10 @@ describe('PracticeController 编排', () => {
     expect(engine.scheduled).toHaveLength(0)
     expect(feedbacks.at(-1)).toEqual({ held: [60, 62, 64, 67], wrong: [] })
 
-    // 断开 MIDI：强制退出练习模式（清空分轨选择）、反馈清空
-    c.toggleMidi()
-    await vi.waitFor(() => expect(c.status).toBe('idle'))
+    // 拔出 MIDI 键盘：强制退出练习模式（清空分轨选择）、反馈清空
+    access.inputs.clear()
+    access.fireStateChange()
+    await vi.waitFor(() => expect(c.status).toBe('no-devices'))
     expect(c.practiceActive).toBe(false)
     expect([...transport.practiceTracks].sort((a, b) => a - b)).toEqual([])
     expect(practices.at(-1)?.active).toBe(false)
@@ -488,28 +489,11 @@ describe('PracticeController 编排', () => {
     c.dispose()
   })
 
-  it('连接不影响播放状态；断开（点击断开 / 设备拔出）自动暂停', async () => {
+  it('连接不影响播放状态；设备拔出自动暂停并清空练习开关', async () => {
     const transport = new Transport(new FakeEngine(), new FakeHost())
     const { c, access } = await connectController(transport, new FakeAccess())
     transport.load(makeSong())
-    // 已连接状态播放 → 点击断开 → 自动暂停
-    transport.play()
-    expect(transport.state).toBe('playing')
-    c.toggleMidi()
-    await vi.waitFor(() => expect(c.status).toBe('idle'))
-    expect(transport.state).toBe('paused')
-    // 重新连接：不影响暂停状态
-    c.toggleMidi()
-    await vi.waitFor(() => expect(c.status).toBe('connected'))
-    expect(transport.state).toBe('paused')
-    // 播放中连接（重新连接场景）：状态不变
-    transport.play()
-    c.toggleMidi()
-    await vi.waitFor(() => expect(c.status).toBe('idle'))
-    expect(transport.state).toBe('paused')
-    c.toggleMidi()
-    await vi.waitFor(() => expect(c.status).toBe('connected'))
-    expect(transport.state).toBe('paused')
+    // 已连接状态播放；连接过程本身不触碰播放状态
     transport.play()
     expect(transport.state).toBe('playing')
     // 设备拔出（statechange 后无输入设备）→ 自动暂停并清空练习开关
@@ -549,66 +533,50 @@ describe('PracticeController 编排', () => {
     c.dispose()
   })
 
-  it('连接尝试中再次点击 = 取消：回到 idle，在途结果作废', () => {
+  it('授权成功但无设备（no-devices）：静默，不弹报错', async () => {
     const transport = new Transport(new FakeEngine(), new FakeHost())
-    let resolveAccess!: (access: FakeAccess) => void
-    stubNavigator(
-      () =>
-        new Promise<FakeAccess>((resolve) => {
-          resolveAccess = resolve
-        }),
-    )
-    const uiStates: Array<{ status: string; attempting: boolean }> = []
+    stubNavigator(() => Promise.resolve(new FakeAccess()))
     const errors: string[] = []
     const c = new PracticeController({
       transport,
       audioCtx: { currentTime: 0 },
       callbacks: {
-        onStatus: (ui) => uiStates.push({ status: ui.status, attempting: ui.attempting }),
+        onStatus: () => {},
         onPractice: () => {},
         onFeedback: () => {},
         onConnectError: (m) => errors.push(m),
       },
     })
-    c.toggleMidi()
-    expect(c.status).toBe('connecting')
-    expect(uiStates.at(-1)).toEqual({ status: 'connecting', attempting: true })
-    c.toggleMidi() // 取消
-    expect(c.status).toBe('idle')
-    expect(uiStates.at(-1)).toEqual({ status: 'idle', attempting: false })
-    expect(errors).toHaveLength(0) // 主动取消不报错
-    // 迟到的授权结果作废
-    const access = new FakeAccess()
-    access.inputs.set('1', new FakeInput())
-    resolveAccess(access)
+    c.autoConnect()
+    await vi.waitFor(() => expect(c.status).toBe('no-devices'))
+    expect(errors).toHaveLength(0) // 无设备是正常等待态，不报错
     c.dispose()
   })
 
-  it('5s 内未连上：超时报错、按钮状态恢复未连接', async () => {
+  it('connecting 长期未落定：软提示经 MidiUiState 呈现，不弹报错', async () => {
     vi.useFakeTimers()
     try {
       const transport = new Transport(new FakeEngine(), new FakeHost())
       stubNavigator(() => new Promise<FakeAccess>(() => {})) // 永不 resolve
-      const uiStates: Array<{ status: string; attempting: boolean }> = []
+      const uiStates: Array<{ status: string; connectingHint: string | null }> = []
       const errors: string[] = []
       const c = new PracticeController({
         transport,
         audioCtx: { currentTime: 0 },
         callbacks: {
-          onStatus: (ui) => uiStates.push({ status: ui.status, attempting: ui.attempting }),
+          onStatus: (ui) => uiStates.push({ status: ui.status, connectingHint: ui.connectingHint }),
           onPractice: () => {},
           onFeedback: () => {},
           onConnectError: (m) => errors.push(m),
         },
       })
-      c.toggleMidi()
-      expect(uiStates.at(-1)).toEqual({ status: 'connecting', attempting: true })
-      await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS)
-      expect(c.status).toBe('timeout')
-      expect(errors).toHaveLength(1)
-      expect(errors[0]).toContain('超时')
-      // 按钮恢复未连接：attempting 结束
-      expect(uiStates.at(-1)).toEqual({ status: 'timeout', attempting: false })
+      c.autoConnect()
+      expect(c.status).toBe('connecting')
+      expect(uiStates.at(-1)).toEqual({ status: 'connecting', connectingHint: null })
+      await vi.advanceTimersByTimeAsync(CONNECT_HINT_MS)
+      expect(c.status).toBe('connecting') // 状态保持 connecting，不进入失败终态
+      expect(uiStates.at(-1)?.connectingHint).toContain('超时')
+      expect(errors).toHaveLength(0) // 软提示不弹报错
       c.dispose()
     } finally {
       vi.useRealTimers()
@@ -629,13 +597,13 @@ describe('PracticeController 编排', () => {
         onConnectError: (m) => errors.push(m),
       },
     })
-    c.toggleMidi()
+    c.autoConnect()
     await vi.waitFor(() => expect(c.status).toBe('denied'))
     expect(errors).toEqual(['MIDI 授权被拒绝'])
     c.dispose()
   })
 
-  it('有输出端口：走带排期同步镜像到键盘音源；断开后解除镜像', async () => {
+  it('有输出端口：走带排期同步镜像到键盘音源；拔出后解除镜像', async () => {
     const engine = new FakeEngine()
     const host = new FakeHost()
     const transport = new Transport(engine, host)
@@ -656,12 +624,15 @@ describe('PracticeController 编排', () => {
     expect(noteOns.map((d) => d[2])).toEqual([100, 100, 100])
     expect(noteOffs.map((d) => d[1])).toEqual([60, 64, 67])
 
-    // 断开：镜像解除、静默输出（清队列 + 全音符止音）并恢复键盘 Local Control On
+    // 拔出键盘（输入+输出端口同时消失）：镜像解除、静默输出（清队列 + 全音符止音）
+    // 并恢复键盘 Local Control On
     const sentBefore = output.sent.length
-    c.toggleMidi()
-    await vi.waitFor(() => expect(c.status).toBe('idle'))
+    access.inputs.clear()
+    access.outputs.clear()
+    access.fireStateChange()
+    await vi.waitFor(() => expect(c.status).toBe('no-devices'))
     expect(output.clearCount).toBeGreaterThan(0)
-    // 断开后新排期不再镜像
+    // 拔出后新排期不再镜像
     transport.play()
     host.advance(0.1)
     host.fireTicks()

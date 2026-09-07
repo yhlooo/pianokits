@@ -513,11 +513,17 @@ export function mountMidiKeyboard(host: HTMLElement): () => void {
   let elapsedTimer: number | undefined
   let timeoutTimer: number | undefined
   /**
-   * 非安全上下文（HTTP）下仍存在 requestMIDIAccess，说明它是第三方 Web MIDI 兼容层注入的 shim
-   * （如 iPad 的 Web MIDI Browser / Cordova Web MIDI 插件），其授权与设备枚举走原生 App 桥接，
-   * 不依赖浏览器的安全上下文，因此“非安全上下文”不再判为连接故障。
+   * 是否第三方 Web MIDI shim（如 iPad 的 Web MIDI Browser / cordova-plugin-webmidi）。
+   * shim 可运行于 HTTP 与 HTTPS，不能仅凭安全上下文判断：
+   * - 非安全上下文下仍存在 requestMIDIAccess 必为 shim（原生 Web MIDI 只在安全上下文暴露）；
+   * - 安全上下文下改用 shim 注入的非标准全局构造器 MIDIEventDispatcher 识别（原生浏览器无此全局，
+   *   见 WebMIDIAPIShimForiOS 的 WebMIDIAPIPolyfill.js）。
    */
-  const isShimmedMidi = !window.isSecureContext && typeof navigator.requestMIDIAccess === 'function'
+  const isShimmedMidi =
+    typeof navigator.requestMIDIAccess === 'function' &&
+    (!window.isSecureContext ||
+      typeof (window as unknown as { MIDIEventDispatcher?: unknown }).MIDIEventDispatcher ===
+        'function')
 
   function renderAll(): void {
     const pitches = sortedHeldPitches(held)
@@ -673,34 +679,57 @@ export function mountMidiKeyboard(host: HTMLElement): () => void {
       )
       retryEl.hidden = false
     }, CONNECT_TIMEOUT_MS)
-    void navigator.requestMIDIAccess({ sysex: false }).then(
-      (a) => {
-        if (disposed || attempt !== myAttempt) return
-        clearTimers()
-        pending = false
-        console.info(
-          `[midi-debug] requestMIDIAccess 返回：inputs=${a.inputs.size} outputs=${a.outputs.size}` +
-            `（耗时 ${elapsed().toFixed(1)}s）`,
-        )
-        access = a
-        a.addEventListener('statechange', onStateChange)
-        sync()
-        if (timedOut) {
-          setDiag(
-            rowPhase,
-            `授权在 ${elapsed().toFixed(1)}s 后返回（超过 5s 超时阈值，最终成功）`,
-            'ok',
+    try {
+      void navigator.requestMIDIAccess({ sysex: false }).then(
+        (a) => {
+          if (disposed || attempt !== myAttempt) return
+          clearTimers()
+          pending = false
+          console.info(
+            `[midi-debug] requestMIDIAccess 返回：inputs=${a.inputs.size} outputs=${a.outputs.size}` +
+              `（耗时 ${elapsed().toFixed(1)}s）`,
           )
-          setHint(null)
-        }
-      },
-      (err: unknown) => {
-        if (disposed || attempt !== myAttempt) return
-        clearTimers()
-        pending = false
-        handleError(err)
-      },
-    )
+          access = a
+          a.addEventListener('statechange', onStateChange)
+          sync()
+          if (timedOut) {
+            setDiag(
+              rowPhase,
+              `授权在 ${elapsed().toFixed(1)}s 后返回（超过 5s 超时阈值，最终成功）`,
+              'ok',
+            )
+            setHint(null)
+          }
+        },
+        (err: unknown) => {
+          if (disposed || attempt !== myAttempt) return
+          clearTimers()
+          pending = false
+          handleError(err)
+        },
+      )
+    } catch (err) {
+      // shim（Web MIDI Browser）的 requestMIDIAccess 在构造 MIDIAccess 时同步调用
+      // window.webkit.messageHandlers.onready.postMessage(...)；原生桥缺失时会同步抛错、Promise
+      // 根本不会返回——需同步兜底，否则只能等到 5s 超时、毫无线索。
+      if (disposed || attempt !== myAttempt) return
+      clearTimers()
+      pending = false
+      const w = window as unknown as {
+        webkit?: { messageHandlers?: { onready?: { postMessage?: unknown } } }
+      }
+      const bridgeMissing = typeof w.webkit?.messageHandlers?.onready?.postMessage !== 'function'
+      console.error('[midi-debug] requestMIDIAccess 同步抛错', err, { bridgeMissing })
+      setStatus('MIDI 连接失败：请求同步抛错')
+      setDiag(
+        rowPhase,
+        bridgeMissing
+          ? '失败：shim 原生桥缺失（window.webkit.messageHandlers.onready 不存在）'
+          : `失败：requestMIDIAccess 同步抛错（${err instanceof Error ? err.message : String(err)}）`,
+        'bad',
+      )
+      retryEl.hidden = false
+    }
   }
 
   function handleError(err: unknown): void {
@@ -804,12 +833,14 @@ export function mountMidiKeyboard(host: HTMLElement): () => void {
   renderAll()
   setDiag(
     rowSecure,
-    window.isSecureContext
-      ? '是（HTTPS / localhost）'
-      : isShimmedMidi
-        ? '否（HTTP）——已检测到 Web MIDI 兼容层，连接不依赖安全上下文'
+    isShimmedMidi
+      ? window.isSecureContext
+        ? '是（HTTPS / localhost）——已检测到 Web MIDI 兼容层'
+        : '否（HTTP）——已检测到 Web MIDI 兼容层，连接不依赖安全上下文'
+      : window.isSecureContext
+        ? '是（HTTPS / localhost）'
         : '否——非安全上下文无法使用 Web MIDI',
-    window.isSecureContext ? 'ok' : isShimmedMidi ? 'neutral' : 'bad',
+    isShimmedMidi ? 'neutral' : window.isSecureContext ? 'ok' : 'bad',
   )
   queryPermission()
 

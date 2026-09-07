@@ -243,17 +243,16 @@ describe('PracticeController 编排', () => {
     input.send([0x90, 67, 100])
     expect(engine.scheduled).toHaveLength(0) // 错键仍按住 → 不触发
 
-    // 松开错键：条件齐备 → 立即放行（按原曲时值/力度发声）
+    // 松开错键：条件齐备 → 立即放行（门控音符由回送发声，不排期到引擎）
     input.send([0x80, 62, 0])
-    expect(engine.scheduled.map((n) => n.pitch)).toEqual([60, 64, 67])
-    expect(engine.scheduled.every((n) => n.time === 0.55)).toBe(true)
+    expect(engine.scheduled).toHaveLength(0)
     expect(feedbacks.at(-1)).toEqual({ held: [60, 64, 67], wrong: [] })
 
     // 继续推进：下一和弦进入等待
     host.advance(0.7) // pos = 1.25 >= 1.2
     host.fireTicks()
     input.send([0x90, 62, 100])
-    expect(engine.scheduled.map((n) => n.pitch)).toEqual([60, 64, 67, 62])
+    expect(engine.scheduled).toHaveLength(0)
     expect(feedbacks.at(-1)).toEqual({ held: [60, 62, 64, 67], wrong: [] })
 
     // 断开 MIDI：强制退出练习模式（清空分轨选择）、反馈清空
@@ -393,10 +392,99 @@ describe('PracticeController 编排', () => {
     input.send([0x90, 64, 100])
     input.send([0x90, 67, 100])
     expect(engine.scheduled).toHaveLength(0)
-    // 松开错键 → 立即放行
+    // 松开错键 → 立即放行（门控音符由回送发声，不排期到引擎）
     input.send([0x80, 72, 0])
-    expect(engine.scheduled.map((n) => n.pitch)).toEqual([60, 64, 67])
+    expect(engine.scheduled).toHaveLength(0)
     expect(feedbacks.at(-1)).toEqual({ held: [60, 64, 67], wrong: [] })
+    c.dispose()
+  })
+
+  it('长音符重复按：瀑布流上仍在键盘期间再按不判错、不重复触发', async () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const transport = new Transport(engine, host)
+    const { c, input, feedbacks } = await connectController(transport, new FakeAccess())
+    c.setTracks([
+      { index: 0, name: 'T0' },
+      { index: 1, name: 'T1' },
+    ])
+    c.togglePractice() // 全开
+    const song: Song = {
+      ppq: 480,
+      duration: 1.5,
+      tempos: [{ time: 0, bpm: 60 }],
+      timeSignatures: [{ time: 0, numerator: 4, denominator: 4 }],
+      keySignatures: [],
+      tracks: [
+        { index: 0, name: 'T0', channel: 0, instrument: 0, percussion: false, noteCount: 1 },
+        { index: 1, name: 'T1', channel: 1, instrument: 0, percussion: false, noteCount: 1 },
+      ],
+      notes: [
+        { pitch: 62, start: 0.5, end: 1.5, velocity: 100, trackIndex: 0 }, // 长音符
+        { pitch: 60, start: 0.8, end: 1.0, velocity: 100, trackIndex: 1 }, // 短和弦
+      ],
+      sustainEvents: [],
+    }
+    transport.load(song)
+    transport.play()
+    host.advance(0.55)
+    host.fireTicks()
+    // 触发长音符（门控音符由回送发声，不排期到引擎）
+    input.send([0x90, 62, 100])
+    expect(engine.scheduled).toHaveLength(0)
+    expect(feedbacks.at(-1)).toEqual({ held: [62], wrong: [] })
+
+    // 推进到第二个和弦（60 @ 0.8）：长音符仍在键盘上
+    host.advance(0.3) // now = 0.85 → pos = 0.8
+    host.fireTicks()
+    // 松开再按长音符键：不判错、不重复触发
+    input.send([0x80, 62, 0])
+    input.send([0x90, 62, 100])
+    expect(feedbacks.at(-1)).toEqual({ held: [62], wrong: [] })
+    expect(engine.scheduled).toHaveLength(0)
+    // 按对短和弦键触发（不排期到引擎）
+    input.send([0x90, 60, 100])
+    expect(engine.scheduled).toHaveLength(0)
+    c.dispose()
+  })
+
+  it('分轨练习：按下非练习轨的同 onset 音符不判错、不阻止练习轨触发', async () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const transport = new Transport(engine, host)
+    const { c, input, feedbacks } = await connectController(transport, new FakeAccess())
+    c.setTracks([
+      { index: 0, name: 'T0' },
+      { index: 1, name: 'T1' },
+    ])
+    c.toggleTrack(0) // 只练习 track 0
+    const song: Song = {
+      ppq: 480,
+      duration: 1.0,
+      tempos: [{ time: 0, bpm: 60 }],
+      timeSignatures: [{ time: 0, numerator: 4, denominator: 4 }],
+      keySignatures: [],
+      tracks: [
+        { index: 0, name: 'T0', channel: 0, instrument: 0, percussion: false, noteCount: 1 },
+        { index: 1, name: 'T1', channel: 1, instrument: 0, percussion: false, noteCount: 1 },
+      ],
+      notes: [
+        { pitch: 60, start: 0.5, end: 0.8, velocity: 100, trackIndex: 0 }, // 练习轨
+        { pitch: 64, start: 0.5, end: 0.8, velocity: 100, trackIndex: 1 }, // 非练习轨（同 onset）
+      ],
+      sustainEvents: [],
+    }
+    transport.load(song)
+    transport.play()
+    host.advance(0.55)
+    host.fireTicks()
+    // 非练习轨音符：不判错
+    input.send([0x90, 64, 100])
+    expect(feedbacks.at(-1)).toEqual({ held: [64], wrong: [] })
+    // 练习轨和弦键：触发（门控音符由回送发声，不排期到引擎；同 onset 非练习轨下一 tick 排期）
+    input.send([0x90, 60, 100])
+    expect(engine.scheduled).toHaveLength(0)
+    expect(feedbacks.at(-1)).toEqual({ held: [60, 64], wrong: [] })
     c.dispose()
   })
 
@@ -568,7 +656,7 @@ describe('PracticeController 编排', () => {
     expect(noteOns.map((d) => d[2])).toEqual([100, 100, 100])
     expect(noteOffs.map((d) => d[1])).toEqual([60, 64, 67])
 
-    // 断开：镜像解除并静默输出（清队列 + 全音符止音）
+    // 断开：镜像解除、静默输出（清队列 + 全音符止音）并恢复键盘 Local Control On
     const sentBefore = output.sent.length
     c.toggleMidi()
     await vi.waitFor(() => expect(c.status).toBe('idle'))
@@ -577,7 +665,47 @@ describe('PracticeController 编排', () => {
     transport.play()
     host.advance(0.1)
     host.fireTicks()
-    expect(output.sent.length).toBe(sentBefore + 32) // 32 = 16 通道 CC123 + CC120
+    expect(output.sent.length).toBe(sentBefore + 33) // 32 = 16 通道 CC123 + CC120 + 1 Local Control On
+    c.dispose()
+  })
+
+  it('练习模式：按键回送到键盘音源并驱动电脑引擎（力度=按键力度，弹错的音也发声）', async () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const transport = new Transport(engine, host)
+    const access = new FakeAccess()
+    const output = new FakeOutput()
+    access.outputs.set('o1', output)
+    const { c, input } = await connectController(transport, access)
+    c.setTracks([{ index: 0, name: 'T0' }])
+    c.toggleTrack(0) // 开练习
+    transport.load(makeSong())
+    transport.play()
+    host.advance(0.55)
+    host.fireTicks()
+    // 首条为 Local Control Off；其后是练习按键的回送
+    expect(output.sent[0]).toEqual([0xb0, 122, 0])
+    const echoStart = output.sent.length
+
+    // 按对和弦键（力度 50，区别于曲中原力度 100）：回送 noteOn 用按键力度
+    input.send([0x90, 60, 50])
+    expect(output.sent.slice(echoStart)).toEqual([[0x90, 60, 50]])
+
+    // 按错键：同样回送发声（弹错的音也发声，不因判错而静默）
+    input.send([0x90, 99, 64])
+    expect(output.sent.slice(echoStart + 1)).toEqual([[0x90, 99, 64]])
+
+    // 松开错键：回送 noteOff
+    input.send([0x80, 99, 0])
+    expect(output.sent.slice(echoStart + 2)).toEqual([[0x80, 99, 0]])
+
+    // 练习模式下按键同时驱动电脑引擎（力度=按键力度），门控轨仍不排期
+    expect(engine.scheduled).toHaveLength(0)
+    expect(engine.noteOns).toEqual([
+      { pitch: 60, velocity: 50 },
+      { pitch: 99, velocity: 64 },
+    ])
+    expect(engine.noteOffs).toEqual([99])
     c.dispose()
   })
 })

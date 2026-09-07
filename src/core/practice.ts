@@ -130,7 +130,7 @@ export class PracticeController {
         return
       }
       const pitches = new Set(chord.notes.map((n) => n.pitch))
-      if (this.gate.setChord(pitches)) {
+      if (this.gate.setChord(pitches, chord.excused)) {
         // 预先已按住全部琴键：进入等待即放行
         this.release()
       }
@@ -262,7 +262,11 @@ export class PracticeController {
       if (ev.type === 'noteOn' && this.transport.state !== 'playing') {
         this.transport.play()
       }
-      // 按键不直接发声，仅参与判定；满足条件则放行（发声按原曲时值/力度）
+      // 按键原样回送到键盘音源（力度=按键力度）并同时驱动电脑引擎（同力度），弹错的音也
+      // 发声；仅参与判定，满足条件才放行推进瀑布流（放行不再重复发声）
+      this.sink.echoNote(ev)
+      if (ev.type === 'noteOn') this.transport.liveNoteOn(ev.pitch, ev.velocity)
+      else this.transport.liveNoteOff(ev.pitch)
       if (this.gate.note(ev)) this.release()
       this.emitFeedback()
       return
@@ -272,7 +276,7 @@ export class PracticeController {
     else this.transport.liveNoteOff(ev.pitch)
   }
 
-  /** 放行当前等待的和弦：引擎发声、走带继续；gate 清空等待直至下一和弦 */
+  /** 放行当前等待的和弦：走带继续（门控轨音符已由 echoNote 发声）；gate 清空等待直至下一和弦 */
   private release(): void {
     this.transport.releaseChord()
     this.gate.setChord(null)

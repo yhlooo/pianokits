@@ -127,4 +127,50 @@ describe('ChordGate 练习匹配', () => {
     g.note(on(64))
     expect(g.note(on(67))).toBe(true) // 全部重新按下后触发
   })
+
+  it('豁免键（长音符重复按）：按下不算错、不触发、不重复触发', () => {
+    const g = new ChordGate()
+    // 第一个和弦：长音符 62 触发并消费
+    g.setChord(new Set([62]), new Set([62]))
+    expect(g.note(on(62))).toBe(true)
+    g.setChord(null)
+    // 下一个和弦 {60}；62 仍在键盘上（豁免）
+    g.setChord(new Set([60]), new Set([60, 62]))
+    expect(g.note(on(62))).toBe(false) // 重复按长音符：不标错、不触发
+    expect(g.wrongKeys.size).toBe(0)
+    expect(g.heldKeys.has(62)).toBe(true) // 仍反映为按住
+    expect(g.note(on(60))).toBe(true) // 按对和弦键正常触发
+  })
+
+  it('豁免键（非练习轨音符）：按下不算错、不阻止触发', () => {
+    const g = new ChordGate()
+    // 分轨练习：和弦 {60}，64 是同 onset 的非练习轨音符（豁免）
+    g.setChord(new Set([60]), new Set([60, 64]))
+    expect(g.note(on(64))).toBe(false) // 非练习轨音符：不标错
+    expect(g.wrongKeys.size).toBe(0)
+    expect(g.note(on(60))).toBe(true) // 按对和弦键触发（豁免键不阻止）
+  })
+
+  it('豁免键的重复按不标记新鲜按下：后续同音和弦需重新按下才触发', () => {
+    const g = new ChordGate()
+    g.setChord(new Set([62]), new Set([62]))
+    expect(g.note(on(62))).toBe(true) // 触发长音符，消费 62
+    g.setChord(null)
+    g.setChord(new Set([60]), new Set([60, 62]))
+    g.note(on(62)) // 忽略的重复按（不进入 pressed）
+    g.setChord(null)
+    expect(g.setChord(new Set([62]), new Set([62]))).toBe(false) // 62 仍按住但未重新按下 → 不立即触发
+    g.note(off(62))
+    expect(g.note(on(62))).toBe(true) // 重新按下 → 触发
+  })
+
+  it('setChord(null) 清空豁免集合', () => {
+    const g = new ChordGate()
+    g.setChord(new Set([60]), new Set([60, 62]))
+    g.setChord(null)
+    // 取消等待后再设置新和弦：旧豁免（62）不再生效
+    g.setChord(new Set([64]))
+    expect(g.note(on(62))).toBe(false) // 62 不在新和弦、也不再豁免 → 标错
+    expect(g.wrongKeys.has(62)).toBe(true)
+  })
 })

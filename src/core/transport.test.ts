@@ -272,7 +272,7 @@ describe('Transport 练习模式', () => {
     expect(t.position).toBeCloseTo(0.5)
   })
 
-  it('提前窗口内按键可提前放行：音符按按键时刻发声，位置追到和弦起点', () => {
+  it('提前窗口内按键可提前放行：位置追到和弦起点（门控音符不排期发声）', () => {
     const engine = new FakeEngine()
     const host = new FakeHost()
     const t = new Transport(engine, host)
@@ -284,12 +284,10 @@ describe('Transport 练习模式', () => {
     host.fireTicks()
     expect(chords).toHaveLength(1)
     expect(t.position).toBeCloseTo(0)
-    // 在 0.2 提前按键放行：音符在按键时刻发声
+    // 在 0.2 提前按键放行：门控音符不排期（由回送发声），仅位置追到和弦起点
     host.advance(0.2)
     t.releaseChord()
-    expect(engine.scheduled.map((n) => n.pitch)).toEqual([60])
-    expect(engine.scheduled[0]?.time).toBeCloseTo(0.2)
-    expect(engine.scheduled[0]?.duration).toBeCloseTo(0.4)
+    expect(engine.scheduled).toHaveLength(0)
     // 放行后位置追到和弦起点 0.5
     expect(t.position).toBeCloseTo(0.5)
   })
@@ -319,7 +317,7 @@ describe('Transport 练习模式', () => {
     expect(chords[1]?.notes.map((n) => n.pitch)).toEqual([62])
   })
 
-  it('releaseChord：以当前时间发声整组并推进到下一和弦', () => {
+  it('releaseChord：放行推进到下一和弦（门控音符不排期发声）', () => {
     const engine = new FakeEngine()
     const host = new FakeHost()
     const t = new Transport(engine, host)
@@ -337,16 +335,14 @@ describe('Transport 练习模式', () => {
     host.fireTicks()
     expect(chords).toHaveLength(1)
     t.releaseChord()
-    expect(engine.scheduled.map((n) => n.pitch)).toEqual([60, 64])
-    // 发声时刻 = 放行时刻（0.55），时值保持原曲
-    expect(engine.scheduled.every((n) => n.time === 0.55)).toBe(true)
-    expect(engine.scheduled.every((n) => n.duration === 0.4)).toBe(true)
-    // 位置从和弦起点继续推进
+    // 门控音符不排期（由回送发声），位置从和弦起点继续推进
+    expect(engine.scheduled).toHaveLength(0)
+    expect(t.position).toBeCloseTo(0.5)
     host.advance(0.7) // pos = 1.25 >= 1.2
     host.fireTicks()
     expect(chords).toHaveLength(2)
     expect(chords[1]?.notes.map((n) => n.pitch)).toEqual([62])
-    expect(engine.scheduled).toHaveLength(2)
+    expect(engine.scheduled).toHaveLength(0)
   })
 
   it('同 onset 组（相差 ≤ 30ms）合并为一个和弦；更远的音符是下一个和弦', () => {
@@ -512,16 +508,16 @@ describe('Transport 分轨练习（部分门控）', () => {
     host.fireTicks()
     expect(engine.scheduled).toHaveLength(0)
     expect(t.position).toBeCloseTo(0.5)
-    // 放行：门控和弦立即发声；同 onset 自由音符下一 tick 以放行时刻一起发声
+    // 放行：门控和弦不排期（由回送发声）；同 onset 自由音符下一 tick 以放行时刻发声
     t.releaseChord()
-    expect(engine.scheduled.map((n) => n.pitch)).toEqual([60])
+    expect(engine.scheduled).toHaveLength(0)
     host.fireTicks()
-    expect(engine.scheduled.map((n) => n.pitch)).toEqual([60, 62])
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([62])
     expect(engine.scheduled.every((n) => n.time === 0.75)).toBe(true)
     // 后续自由音符相对放行时刻继续推进（0.7 → 放行后 0.2s）
     host.advance(0.2) // now = 0.95
     host.fireTicks()
-    expect(engine.scheduled.map((n) => n.pitch)).toEqual([60, 62, 65])
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([62, 65])
     expect(engine.scheduled.at(-1)?.time).toBeCloseTo(0.95)
   })
 
@@ -544,10 +540,10 @@ describe('Transport 分轨练习（部分门控）', () => {
     // 等待组仅门控轨音符；同 onset 自由音符不提前排期
     expect(chords[0]?.notes.map((n) => n.pitch)).toEqual([60, 64])
     expect(engine.scheduled).toHaveLength(0)
-    // 放行：门控组与同 onset 自由音符以放行时刻一起发声
+    // 放行：门控组不排期（由回送发声），同 onset 自由音符以放行时刻发声
     t.releaseChord()
     host.fireTicks()
-    expect(engine.scheduled.map((n) => n.pitch)).toEqual([60, 64, 67])
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([67])
     expect(engine.scheduled.every((n) => n.time === 0.55)).toBe(true)
   })
 
@@ -576,6 +572,28 @@ describe('Transport 分轨练习（部分门控）', () => {
     host.advance(0.1)
     host.fireTicks()
     expect(t.position).toBeCloseTo(0.5)
+  })
+
+  it('excused：收集和弦时计算「在键盘上/正进入」的音符音高（长音符与同 onset 非门控音符）', () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    const chords = collectChords(t)
+    t.load(
+      makeSongT([
+        { pitch: 62, start: 0.0, end: 1.5, trackIndex: 0 }, // 长音符（跨后续和弦）
+        { pitch: 60, start: 0.5, end: 0.8, trackIndex: 1 }, // 门控和弦
+        { pitch: 64, start: 0.5, end: 0.8, trackIndex: 2 }, // 同 onset 非门控
+      ]),
+    )
+    t.setPracticeTracks(new Set([1]))
+    t.play()
+    host.advance(0.55)
+    host.fireTicks()
+    expect(chords[0]?.notes.map((n) => n.pitch)).toEqual([60])
+    expect([...(chords[0]?.excused ?? new Set<number>())].sort((a, b) => a - b)).toEqual([
+      60, 62, 64,
+    ])
   })
 
   it('部分门控：放行最后一组后播到结尾自动停止', () => {
@@ -708,7 +726,7 @@ describe('Transport MIDI 输出镜像', () => {
     expect(sink.allNotesOffCount).toBe(4)
   })
 
-  it('练习模式放行和弦同样镜像到输出', () => {
+  it('练习模式放行和弦不排期到引擎/镜像（门控音符由回送发声）', () => {
     const engine = new FakeEngine()
     const sink = new FakeSink()
     const host = new FakeHost()
@@ -726,11 +744,11 @@ describe('Transport MIDI 输出镜像', () => {
     host.fireTicks()
     expect(sink.scheduled).toHaveLength(0) // 等待中不发声也不镜像
     t.releaseChord()
-    expect(engine.scheduled.map((n) => n.pitch)).toEqual([60, 64])
-    expect(sink.scheduled).toEqual(engine.scheduled)
+    expect(engine.scheduled).toHaveLength(0)
+    expect(sink.scheduled).toHaveLength(0)
   })
 
-  it('部分门控：自由轨排期与门控轨放行都镜像到输出', () => {
+  it('部分门控：自由轨排期镜像到输出（门控轨由回送发声、不排期不镜像）', () => {
     const engine = new FakeEngine()
     const sink = new FakeSink()
     const host = new FakeHost()
@@ -750,8 +768,8 @@ describe('Transport MIDI 输出镜像', () => {
     expect(engine.scheduled).toHaveLength(0)
     t.releaseChord()
     host.fireTicks()
-    // 放行：门控音符与同 onset 自由音符以放行时刻一起发声，均镜像到输出
-    expect(engine.scheduled.map((n) => n.pitch)).toEqual([60, 62])
+    // 放行：门控音符不排期（回送发声）；同 onset 自由音符以放行时刻发声并镜像
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([62])
     expect(sink.scheduled).toEqual(engine.scheduled)
   })
 })

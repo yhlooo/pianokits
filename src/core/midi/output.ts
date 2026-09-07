@@ -1,3 +1,4 @@
+import type { MidiNoteEvent } from './input'
 import type { ScheduledNote } from '../engine/types'
 
 /** lib.dom 尚未收录 clear() 方法（Web MIDI 规范自 Chrome 43 起支持），本地补全类型 */
@@ -7,6 +8,8 @@ interface MidiOutputExt extends MIDIOutput {
 }
 
 const ALL_CHANNELS = 16
+/** Local Control（CC122，通道模式消息）：0 = 禁用键盘自带音源，127 = 恢复 */
+const CC_LOCAL_CONTROL = 122
 
 /**
  * 把走带排期的音符同步镜像到 MIDI 输出端口（键盘自带音源与电脑播放同步发声，
@@ -25,9 +28,17 @@ export class MidiOutputSink {
     this.audioCtx = audioCtx
   }
 
-  /** 更换输出端口（连接同步 / 热插拔 / 断开时传空数组） */
+  /**
+   * 更换输出端口（连接同步 / 热插拔 / 断开时传空数组）。
+   * 有端口时禁用键盘自带音源（Local Control Off，统一由程序输出音量）；端口被清空
+   * （断开/拔出）时先恢复键盘自带音源（Local Control On），避免键盘残留「无声」状态。
+   */
   sync(outputs: readonly MIDIOutput[]): void {
-    this.outputs = [...outputs] as MidiOutputExt[]
+    const prev = this.outputs
+    const next = [...outputs] as MidiOutputExt[]
+    if (next.length === 0 && prev.length > 0) this.setLocalControl(true)
+    this.outputs = next
+    if (next.length > 0) this.setLocalControl(false)
   }
 
   /** 排期一条音符：Note On（按力度）+ 时值结束的 Note Off，逐端口发送 */
@@ -51,6 +62,20 @@ export class MidiOutputSink {
     }
   }
 
+  /**
+   * 回送实时按键：把输入 noteOn/noteOff 原样（音高 + 力度 + 通道）发回输出端口，
+   * Local Control Off 之后的软件回送——练习模式下按键以此发声（力度=按键力度，
+   * 弹错的音也发声）。无输出端口时为空操作（此时键盘自带音源未被禁用，本地直接发声）。
+   */
+  echoNote(ev: MidiNoteEvent): void {
+    if (this.outputs.length === 0) return
+    const data =
+      ev.type === 'noteOn'
+        ? [0x90 | ev.channel, ev.pitch, ev.velocity]
+        : [0x80 | ev.channel, ev.pitch, 0]
+    for (const out of this.outputs) out.send(data)
+  }
+
   /** 静默全部输出：清空未发送队列 + All Notes Off / All Sound Off（16 通道） */
   allNotesOff(): void {
     for (const out of this.outputs) {
@@ -65,8 +90,18 @@ export class MidiOutputSink {
   }
 
   dispose(): void {
+    // 恢复键盘自带音源，避免断开后键盘留在 Local Off（无声）
+    this.setLocalControl(true)
     this.allNotesOff()
     this.outputs = []
+  }
+
+  /** 设置键盘 Local Control：On（自带音源）或 Off（禁用，统一由程序输出） */
+  private setLocalControl(enabled: boolean): void {
+    const data = [0xb0, CC_LOCAL_CONTROL, enabled ? 0x7f : 0x00]
+    for (const out of this.outputs) {
+      out.send(data)
+    }
   }
 
   /** AudioContext 时间 → send() 时间戳（ms，performance.now 基准）；已过期返回 undefined（立即发送） */

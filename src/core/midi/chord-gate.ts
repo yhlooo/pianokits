@@ -8,8 +8,11 @@ import type { MidiNoteEvent } from './input'
  * - 新鲜按下与消费：noteOn 把该音高标记为“已按下”；和弦放行时消费掉组内各音高（从按下集合移除）。
  *   因此同音高的连续音符必须抬起（noteOff）再重新按下（noteOn）才能再次触发——
  *   一直按住一个键不会连续触发多个同音音符；
- * - 按错标记：等待期间新按下的、不在和弦内的键记为按错（松开即清除）；
+ * - 按错标记：等待期间新按下的、不在和弦内、也不在豁免集合内的键记为按错（松开即清除）；
  *   等待开始之前就按住的键（如上一和弦的延续指法）不计入按错、也不阻止触发；
+ * - 豁免键：等待期间按下、不在和弦内、但在豁免集合内（瀑布流键盘上仍在/正进入的音符，
+ *   如已触发的长音符重复按、分轨练习中非练习轨的音符）完全忽略——不标错、不标记新鲜按下
+ *   （不重复触发），只反映到按住状态；
  * - 预先按住：进入等待时若和弦全部音高已新鲜按下且无按错 → 立即触发（尚未消费过的提前按键）；
  * - 纠错后触发：松开按错的键时若其余条件满足，立即触发；
  * - 等待窗口之外的按键不评估、不标红。
@@ -21,8 +24,10 @@ export class ChordGate {
   private readonly pressed = new Set<number>()
   /** 等待中的和弦音高集合；null = 无等待（不评估按键） */
   private chord: ReadonlySet<number> | null = null
-  /** 等待期间按下且不在和弦内的键（红显） */
+  /** 等待期间按下且不在和弦内、也不在豁免集合内的键（红显） */
   private readonly wrong = new Set<number>()
+  /** 豁免集合：等待期间按下不算错（长音符重复按 / 非练习轨音符等） */
+  private excused = new Set<number>()
 
   get heldKeys(): ReadonlySet<number> {
     return new Set(this.held.keys())
@@ -33,11 +38,12 @@ export class ChordGate {
   }
 
   /**
-   * 设置等待中的和弦（null = 取消等待）。清除旧和弦的按错标记；
+   * 设置等待中的和弦（null = 取消等待）与豁免集合。清除旧和弦的按错标记；
    * 若全部琴键已新鲜按下且无按错，返回 true 表示应立即放行（并消费组内音高）。
    */
-  setChord(pitches: ReadonlySet<number> | null): boolean {
+  setChord(pitches: ReadonlySet<number> | null, excused: ReadonlySet<number> = new Set()): boolean {
     this.chord = pitches
+    this.excused = new Set(excused)
     this.wrong.clear()
     if (this.isSatisfied()) {
       this.consume()
@@ -50,8 +56,13 @@ export class ChordGate {
   note(ev: MidiNoteEvent): boolean {
     if (ev.type === 'noteOn') {
       this.held.set(ev.pitch, ev.velocity)
-      this.pressed.add(ev.pitch)
-      if (this.chord !== null && !this.chord.has(ev.pitch)) this.wrong.add(ev.pitch)
+      // 豁免键（不在和弦内、但在豁免集合内）：完全忽略——不标错、不标记新鲜按下（不重复触发）
+      if (this.chord !== null && !this.chord.has(ev.pitch) && this.excused.has(ev.pitch)) {
+        // ignore
+      } else {
+        this.pressed.add(ev.pitch)
+        if (this.chord !== null && !this.chord.has(ev.pitch)) this.wrong.add(ev.pitch)
+      }
     } else {
       this.held.delete(ev.pitch)
       this.wrong.delete(ev.pitch)
@@ -68,6 +79,7 @@ export class ChordGate {
     this.held.clear()
     this.pressed.clear()
     this.wrong.clear()
+    this.excused.clear()
   }
 
   private isSatisfied(): boolean {

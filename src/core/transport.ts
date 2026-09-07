@@ -40,6 +40,12 @@ export interface PracticeChord {
   start: number
   /** 组内全部门控轨音符（start ∈ [start, start + CHORD_EPSILON_SEC]；非门控轨音符不参与判定） */
   notes: Note[]
+  /**
+   * 豁免键：在和弦起点处仍「在瀑布流键盘上」或「正进入」的音符音高（任意轨）——
+   * 即 `note.start ≤ start + CHORD_EPSILON_SEC 且 note.end > start`。等待期间按下这些键
+   * 不算错（已触发的长音符重复按、分轨练习中非练习轨音符），也不重复触发（见 chord-gate）。
+   */
+  excused: ReadonlySet<number>
 }
 
 type StateListener = (state: TransportState) => void
@@ -264,35 +270,27 @@ export class Transport {
   }
 
   /**
-   * 放行当前等待的和弦：立即以当前时间发声（原始时值/力度），并把位置回拨/追到和弦起点后
-   * 继续推进（提前放行时位置前跳到和弦起点）。同 onset 的非门控音符由自由流在放行后的下一
-   * tick 以同一时刻排期，随和弦一起发声。
+   * 放行当前等待的和弦：只推进门控流并把位置回拨/追到和弦起点后继续推进（提前放行时位置
+   * 前跳到和弦起点）。门控轨音符**不在此排期发声**——练习按键经 `echoNote` 原样回送到键盘
+   * 音源（力度=按键力度，弹错的音也发声）；同 onset 的非门控音符由自由流在放行后的下一
+   * tick 以放行时刻排期，随和弦一起发声。
    */
   releaseChord(): void {
     if (this.gatedTracks.size === 0 || this.waitingChord === null) return
     const chord = this.waitingChord
     const now = this.host.now()
-    // 放行的音符打上已排期标记：退出练习后正常流不重复发声
+    // 放行的门控轨音符打上已排期标记：退出练习后正常流不重复发声（它们已由 echoNote 发声）
     let mark = this.nextGated
     const markUntil = chord.start + CHORD_EPSILON_SEC
     while (mark < this.notes.length && this.notes[mark].start <= markUntil) {
       if (this.gatedTracks.has(this.notes[mark].trackIndex)) this.consumed[mark] = 1
       mark++
     }
-    for (const n of chord.notes) {
-      if (n.end <= chord.start) continue
-      this.scheduleToBoth({
-        pitch: n.pitch,
-        velocity: n.velocity,
-        time: now,
-        duration: n.end - n.start,
-      })
-    }
     // 门控流越过整组（组内非门控音符由自由流独立排期，无需处理）
     this.nextGated = mark
     this.waitingChord = null
     // 回拨 offset 从和弦起点继续：同 onset 的非门控音符由自由流在下一 tick 排期，
-    // 发声时刻 = now（与门控和弦一起播放）；后续音符相对放行时刻继续推进
+    // 发声时刻 = now（与放行同步）；后续音符相对放行时刻继续推进
     this.offset = now - chord.start
     this.waitingFrozen = false
   }
@@ -424,9 +422,28 @@ export class Transport {
       if (this.gatedTracks.has(notes[i].trackIndex)) group.push(notes[i])
       i++
     }
-    this.waitingChord = { start: first.start, notes: group }
+    this.waitingChord = {
+      start: first.start,
+      notes: group,
+      excused: this.excusedPitches(first.start, until),
+    }
     this.waitingFrozen = false
     this.practiceChordCb?.(this.waitingChord)
+  }
+
+  /**
+   * 豁免键：在和弦起点处仍在瀑布流键盘上（`note.end > onset`）或正进入
+   * （`note.start ≤ onset + CHORD_EPSILON_SEC`）的音符音高，任意轨。等待期间按下这些键
+   * 不算错也不重复触发（长音符重复按 / 分轨练习的非练习轨音符）。notes 按 start 排序，
+   * 超过 until 即提前停止。
+   */
+  private excusedPitches(onset: number, until: number): Set<number> {
+    const set = new Set<number>()
+    for (const n of this.notes) {
+      if (n.start > until) break
+      if (n.end > onset) set.add(n.pitch)
+    }
+    return set
   }
 
   /** 冻结：位置到达已提前触发的门控和弦起点时，把播放位置停住（等待放行） */

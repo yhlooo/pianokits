@@ -61,7 +61,11 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
   transport.setVolume(initialVolume)
 
   // ---------- 视图 ----------
-  const waterfall = new WaterfallView({ onSeek: (t) => transport.seek(t) })
+  const waterfall = new WaterfallView({
+    onSeek: (t) => transport.seek(t),
+    onScrub: (t) => transport.scrub(t),
+    onScrubEnd: () => transport.endScrub(),
+  })
 
   const stage = el('div', { class: 'stage stage--split' })
   stage.append(waterfall.el)
@@ -123,7 +127,8 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
     },
     onPause: () => transport.pause(),
     onStop: () => transport.stop(),
-    onSeek: (t) => transport.seek(t),
+    onScrub: (t) => transport.scrub(t),
+    onScrubEnd: () => transport.endScrub(),
     onVolume: (v) => {
       transport.setVolume(v)
       store.update({ volume: v })
@@ -304,7 +309,7 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
     const st = store.get()
     if (st.song !== null) {
       const pos = transport.position
-      waterfall.setPosition(pos, transport.state === 'playing')
+      waterfall.setPosition(pos)
       scoreView?.setPosition(pos)
       transportView.setPosition(pos)
     }

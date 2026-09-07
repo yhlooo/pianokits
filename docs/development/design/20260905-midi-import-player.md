@@ -130,9 +130,10 @@ AudioContext.currentTime（唯一时钟）
 2. **调度器**：主循环 `setInterval(25ms)`；每次把 `[now+latency, now+latency+100ms]` 窗口内的音符事件以 `scheduleNote({pitch, velocity, time, duration})` 排入引擎（时值由调度器从音符起止时间算出）；定时器抖动被 100ms 前瞻吸收。smplr 的 `start({ time, duration })` 直接对齐 `currentTime`，天然支持。
 3. **暂停**：记录 `position`，清空调度队列、对发声中的音符发 `allNotesOff(now)`；**恢复**：以新 `offset = currentTime - position` 重新入队。
 4. **跳转（seek）**：等价于"暂停到 t 再恢复"，并触发视图状态复位（谱面翻页到对应小节、瀑布流视图跟随）。
-5. **视觉**：rAF 每帧读 `Transport.position` 绘制。**绝不用** smplr 的 `onStart` 等回调驱动视觉（其官方 README 明示可能提前最多一个 lookahead 窗口触发）。
-6. **自动播放策略**：应用启动即创建 AudioContext（suspended 状态不妨碍解析与采样预加载）；首次 `resume()` 挂在导入/播放按钮的点击手势中。采样用 `fetch + decodeAudioData` 预加载，不受策略限制。
-7. **变速（M2 可选项）**：`position = (currentTime - offset) × rate`，调度器按 `time/rate` 排期；M1 不做。
+5. **拖动预览（scrub，静音 seek）**：`scrub(t)` 只定位、不排期发声——拖动瀑布流/进度条快速扫过大量音符时避免 MIDI 大量发声卡顿；`endScrub()` 在拖动前处于播放态时恢复播放，此刻才开始发声。
+6. **视觉**：rAF 每帧读 `Transport.position` 绘制。**绝不用** smplr 的 `onStart` 等回调驱动视觉（其官方 README 明示可能提前最多一个 lookahead 窗口触发）。
+7. **自动播放策略**：应用启动即创建 AudioContext（suspended 状态不妨碍解析与采样预加载）；首次 `resume()` 挂在导入/播放按钮的点击手势中。采样用 `fetch + decodeAudioData` 预加载，不受策略限制。
+8. **变速（M2 可选项）**：`position = (currentTime - offset) × rate`，调度器按 `time/rate` 排期；M1 不做。
 
 ## 5. 数据模型与存储
 
@@ -245,7 +246,9 @@ interface Transport {
   load(song: Song): void // 解析完成 → ready
   play(): Promise<void> // 内含 AudioContext.resume()（必须手势调用）
   pause(): void
-  seek(seconds: number): void
+  seek(seconds: number): void // 跳转（播放中跳转后继续发声）
+  scrub(seconds: number): void // 拖动预览：静音定位，不排期发声
+  endScrub(): void // 拖动结束：拖动前在播放则恢复播放
   stop(): void
   readonly state: TransportState
   readonly position: number // 实时计算：currentTime - offset
@@ -262,22 +265,23 @@ interface Transport {
 ```ts
 class WaterfallView {
   setNotes(notes: Note[]): void // 播放同一首歌期间不重建
-  setPosition(positionSec: number, playing: boolean): void // rAF 每帧调用
+  setPosition(positionSec: number): void // rAF 每帧调用
   destroy(): void // 卸载：断开 ResizeObserver
   // 判定线即底部键盘上沿（无中间判定线）：音符条自上而下坠落，
   // 条底到判定线的时刻 = 发声时刻（与音频调度共用同一时钟，天然对齐），
   // 发声期间对应琴键点亮发光。
-  // 交互：click（音符区）→ 换算为时间回调 onSeek(t)；
-  //        drag → 上下平移时间窗（脱离跟随，预览用）；dblclick → 恢复跟随；
-  //        wheel → 以指针为锚点缩放 pxPerSecond；
+  // 交互：click（音符区）→ 换算为时间回调 onSeek(t)（播放中跳转后继续发声）；
+  //        drag → 上下平移时间窗（脱离跟随），回调 onScrub(t) 静音预览、松手 onScrubEnd()；
+  //        dblclick → 恢复跟随；wheel → 以指针为锚点缩放 pxPerSecond；
   // 内部状态：{ pxPerSecond（纵向）, viewTopSec（画布顶边时间）, playheadSec, follow }
 }
 ```
 
 渲染要点：底部 88 键键盘（白键 + 黑键 + C 键标注）离屏缓存只画一次；时间轴为纵向、
 未来在上（画布顶边时间 = `viewTopSec`），`y(t) = 音符区高度 - (t - 判定线时间) × pxPerSecond`
-（t 越大 y 越小）；跟随播放时 `viewTopSec = playhead + 音符区高度 / pxPerSecond`，使判定线
-始终对齐播放头；音符按 start 排序 + 二分查找可见窗口（判定线以下部分裁剪隐藏）；发声中的
+（t 越大 y 越小）；跟随时 `viewTopSec = playhead + 音符区高度 / pxPerSecond`，使判定线
+始终对齐播放头（不限于播放中——暂停时拖进度条/点击跳转同样同步跟随）；音符按 start 排序 +
+二分查找可见窗口（判定线以下部分裁剪隐藏）；发声中的
 琴键用发光色覆盖绘制。`devicePixelRatio` 适配。
 
 ### 6.5 五线谱视图（ui/score-view.ts）
@@ -344,7 +348,7 @@ M2 计划（不进 M1）：tempo/拍号检测、最小编辑距离量化、`@ton
 
 1. **首次导入**：点击"导入 MIDI"（手势①）→ 文件对话框 → 文件字节存入 IndexedDB → 列表出现条目 → 点击条目（手势②）→ 解析 → 采样进度 → 就绪；
 2. **再次访问**：页面加载 → 从 IndexedDB 出列表（无网络请求）→ 点击条目 → 读副本 → 解析（小文件毫秒级）→ 采样已缓存则直接就绪；
-3. **播放中**：暂停/跳转随时可用；瀑布流与谱面始终显示同一 `position`；瀑布流音符条坠落到底部键盘时发声并点亮琴键，谱面高亮当前事件（拖拽瀑布流可脱离跟随浏览，双击恢复，浏览不影响播放）。
+3. **播放中**：暂停/跳转随时可用；瀑布流与谱面始终显示同一 `position`；瀑布流音符条坠落到底部键盘时发声并点亮琴键，谱面高亮当前事件（拖拽瀑布流/进度条静音预览，脱离跟随浏览，松手恢复跟随并继续发声，双击恢复跟随）。
 
 ## 8. 依赖清单与资源
 

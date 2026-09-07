@@ -93,6 +93,10 @@ export class Transport {
   private practiceChordCb: PracticeChordListener | null = null
   /** MIDI 输出镜像（可选）：与引擎同步排期的外部音源（无输出端口时为 null） */
   private midiOut: MidiOutputSink | null = null
+  /** 拖动预览（scrub）进行中（用于记录拖动前是否在播放，结束后恢复） */
+  private scrubbing = false
+  /** 拖动前是否在播放（endScrub 据此决定是否恢复播放） */
+  private scrubResume = false
 
   constructor(engine: AudioEngine, host: TransportHost) {
     this.engine = engine
@@ -210,6 +214,36 @@ export class Transport {
     this.offset = this.host.now() - target
     this.setState(wasPlaying ? 'playing' : 'paused')
     if (wasPlaying) this.tick()
+  }
+
+  /**
+   * 拖动预览（静音）：移动播放位置并止音，但不恢复播放、不排期发声——拖动瀑布流/进度条
+   * 快速扫过大量音符时不触发声音（MIDI 大量发声会卡顿）。首次调用记录拖动前是否在播放，
+   * 供 endScrub 在拖动结束后恢复。
+   */
+  scrub(seconds: number): void {
+    if (this.song === null) return
+    if (!this.scrubbing) {
+      this.scrubbing = true
+      this.scrubResume = this._state === 'playing'
+    }
+    const target = Math.max(0, Math.min(this._duration, seconds))
+    this.silenceAll()
+    this.pausedAt = target
+    this.cancelWaiting()
+    this.setPointer(target)
+    this.offset = this.host.now() - target
+    this.stopTicker()
+    this.setState('paused')
+  }
+
+  /** 拖动结束：若拖动前在播放，则从当前位置恢复播放（此刻才开始发声） */
+  endScrub(): void {
+    if (!this.scrubbing) return
+    this.scrubbing = false
+    const resume = this.scrubResume
+    this.scrubResume = false
+    if (resume && this.song !== null) this.play()
   }
 
   setVolume(volume: number): void {

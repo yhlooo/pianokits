@@ -193,6 +193,60 @@ describe('Transport 调度器', () => {
     expect(engine.scheduled.map((n) => n.pitch)).toEqual([62])
   })
 
+  it('scrub：播放中拖动静音定位不发声，endScrub 恢复播放后才发声', () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    t.load(makeSong([{ pitch: 60, start: 1.0, end: 1.2 }]))
+    t.play()
+    host.fireTicks()
+    // pos=0：1.0 超出 lookahead 窗口，无排期
+    expect(engine.scheduled).toHaveLength(0)
+
+    t.scrub(0.95)
+    expect(t.state).toBe('paused')
+    expect(t.position).toBeCloseTo(0.95)
+    // 拖动预览不排期、定时器已停
+    expect(engine.scheduled).toHaveLength(0)
+    expect(host.activeTimers).toBe(0)
+
+    // 拖动中反复 scrub 仍不发声
+    t.scrub(0.9)
+    t.scrub(0.95)
+    expect(engine.scheduled).toHaveLength(0)
+
+    // 松开：恢复播放，把窗口内的音符排期（此刻才开始发声）
+    t.endScrub()
+    host.fireTicks()
+    expect(t.state).toBe('playing')
+    expect(engine.scheduled.map((n) => n.pitch)).toEqual([60])
+    // 绝对排期时间 = offset + start = (0 - 0.95) + 1.0 = 0.05
+    expect(engine.scheduled[0].time).toBeCloseTo(0.05)
+  })
+
+  it('scrub：暂停中拖动只移动位置，结束后不恢复播放', () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    t.load(makeSong([{ pitch: 60, start: 0.5, end: 0.8 }]))
+    t.scrub(0.3)
+    expect(t.state).toBe('paused')
+    expect(t.position).toBeCloseTo(0.3)
+    t.endScrub()
+    expect(t.state).toBe('paused')
+    expect(host.activeTimers).toBe(0)
+  })
+
+  it('endScrub 未在拖动中调用时为空操作', () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    t.load(makeSong([{ pitch: 60, start: 0.5, end: 0.8 }]))
+    t.endScrub()
+    expect(t.state).toBe('ready')
+    expect(host.activeTimers).toBe(0)
+  })
+
   it('播到结尾自动停止并停在末尾', () => {
     const engine = new FakeEngine()
     const host = new FakeHost()

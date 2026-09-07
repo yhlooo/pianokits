@@ -26,7 +26,12 @@ const PRACTICE_DIM_ALPHA = 0.62
 type Rgb = readonly [number, number, number]
 
 export interface WaterfallViewCallbacks {
+  /** 点击跳转（立即定位，播放中则跳转后继续发声） */
   onSeek(seconds: number): void
+  /** 拖拽预览：静音定位（拖动期间不发声） */
+  onScrub(seconds: number): void
+  /** 拖拽结束：若拖动前在播放则恢复播放（此刻开始发声） */
+  onScrubEnd(): void
 }
 
 /** 练习模式键盘反馈：按住键 + 按错键（设计文档 20260906-midi-keyboard-and-practice.md §4.2） */
@@ -78,7 +83,6 @@ export class WaterfallView implements View {
 
   private notes: Note[] = []
   private playhead = 0
-  private playing = false
   private follow = true
   private pxPerSecond = DEFAULT_PX_PER_SEC
   /** 画布顶边对应的时间（秒）；判定线时间 = viewTopSec - 音符区高度 / pxPerSecond */
@@ -129,16 +133,19 @@ export class WaterfallView implements View {
         this.follow = false
         // 拖拽向下 = 内容下移 = 视窗向更早时间平移（与手势同向）
         this.viewTopSec = this.dragStart.viewTopSec + dy / this.pxPerSecond
-        // 拖动联动进度条：判定线（键盘上沿）时间即当前播放位置
+        // 拖动联动进度条：判定线（键盘上沿）时间即当前播放位置；静音预览，不发声
         const tKey = this.viewTopSec - this.noteAreaHeight() / this.pxPerSecond
-        this.cbs.onSeek(tKey)
+        this.cbs.onScrub(tKey)
       }
     })
     this.canvas.addEventListener('pointerup', (e) => {
       if (this.dragStart === null) return
       const wasDrag = this.dragStart.moved
       this.dragStart = null
-      if (!wasDrag) {
+      if (wasDrag) {
+        // 拖拽结束：若拖动前在播放则恢复播放（此刻才开始发声）
+        this.cbs.onScrubEnd()
+      } else {
         const noteAreaH = this.noteAreaHeight()
         if (e.offsetY < noteAreaH) {
           // 点击处的时间：t = viewTopSec - y / pxPerSecond
@@ -148,7 +155,15 @@ export class WaterfallView implements View {
           }
         }
       }
-      // 拖拽/点击结束后恢复跟随播放（拖拽期间的脱离跟随仅用于手势平移期间）
+      // 拖拽/点击结束后恢复跟随（拖拽期间的脱离跟随仅用于手势平移期间）
+      this.follow = true
+    })
+    // 手势被系统接管（如触控滚动）时也要结束拖拽预览，避免走带停在暂停态不恢复
+    this.canvas.addEventListener('pointercancel', () => {
+      if (this.dragStart === null) return
+      const wasDrag = this.dragStart.moved
+      this.dragStart = null
+      if (wasDrag) this.cbs.onScrubEnd()
       this.follow = true
     })
     this.canvas.addEventListener('dblclick', () => {
@@ -197,9 +212,8 @@ export class WaterfallView implements View {
   }
 
   /** 每帧调用：更新播放位置并重绘 */
-  setPosition(positionSec: number, playing: boolean): void {
+  setPosition(positionSec: number): void {
     this.playhead = positionSec
-    this.playing = playing
     this.render()
   }
 
@@ -241,8 +255,9 @@ export class WaterfallView implements View {
       ctx.clearRect(0, 0, w, h)
     }
 
-    // 跟随播放：判定线（键盘上沿）始终对齐播放头；画布顶边 = 播放头 + 音符区高度/pps
-    if (this.playing && this.follow) {
+    // 跟随：判定线（键盘上沿）始终对齐播放头；画布顶边 = 播放头 + 音符区高度/pps。
+    // 不再限定「播放中」——暂停时拖拽进度条/点击跳转也会移动播放头，视窗需同步跟随。
+    if (this.follow) {
       this.viewTopSec = this.playhead + noteAreaH / this.pxPerSecond
     }
     // 判定线时间；未来在画布上方（y 小），过去在键盘下方（不可见）

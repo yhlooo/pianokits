@@ -22,7 +22,10 @@ export interface TransportViewCallbacks {
   onPlay(): void
   onPause(): void
   onStop(): void
-  onSeek(seconds: number): void
+  /** 进度条拖动/点击预览：静音定位（拖动期间不发声，实时联动瀑布流） */
+  onScrub(seconds: number): void
+  /** 进度条拖动结束：若拖动前在播放则恢复播放 */
+  onScrubEnd(): void
   onVolume(volume: number): void
   /** 点击“瀑布/乐谱”开关：切换对应面板（两个开关不能都关闭） */
   onViewToggle(panel: ViewPanel): void
@@ -133,11 +136,14 @@ export class TransportView implements View {
     this.seekEl.addEventListener('input', () => {
       this.seeking = true
       this.updateSeekFill()
-      this.timeEl.textContent = `${formatTime(this.positionFromSlider())} / ${formatTime(this.duration)}`
+      const pos = this.positionFromSlider()
+      this.timeEl.textContent = `${formatTime(pos)} / ${formatTime(this.duration)}`
+      // 拖动/点击都实时静音预览：联动瀑布流，拖动期间不发声
+      cbs.onScrub(pos)
     })
     this.seekEl.addEventListener('change', () => {
       this.seeking = false
-      cbs.onSeek(this.positionFromSlider())
+      cbs.onScrubEnd()
     })
 
     this.timeEl = el('span', { class: 'transport__time' }, '0:00 / 0:00')

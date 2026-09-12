@@ -45,12 +45,13 @@ export class MidiOutputSink {
   scheduleNote(ev: ScheduledNote): void {
     if (this.outputs.length === 0) return
     const velocity = Math.max(1, Math.min(127, Math.round(ev.velocity)))
+    const channel = Math.max(0, Math.min(15, Math.round(ev.channel ?? 0)))
     // 一律用普通 number[]（而非 Uint8Array）：原生 Chrome 两者皆可，但 Web MIDI Browser
     // 等 shim 的 send() 里 data.map(Number) 对 Uint8Array 仍返回 Uint8Array，经
     // window.webkit.messageHandlers 的 JSON 序列化后变成 {"0":…}（对象）而非数组，
     // 原生侧按字节数组解析时崩溃（见研究文档 20260906-web-midi-ipad.md §7.1）。
-    const on = [0x90, ev.pitch, velocity]
-    const off = [0x80, ev.pitch, 0]
+    const on = [0x90 | channel, ev.pitch, velocity]
+    const off = [0x80 | channel, ev.pitch, 0]
     // Note Off 时间按“音符结束时刻（time + duration）”单独换算，而非“Note On 时间戳 +
     // duration”：练习放行的音符 time 即当前时刻（Note On 已过期、立即发送、无时间戳），
     // 若据此把 Note Off 也立即发送，会把键盘音源上只响了一半的长音切断。

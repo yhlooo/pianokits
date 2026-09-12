@@ -975,6 +975,12 @@ input[type='range']::-moz-range-thumb {
   pointer-events: auto;
 }
 
+/* 成功/提示变体：绿色左边条（下载完成、保存成功等）。
+   默认的红色左边条专用于报错——成功提示不该长得像错误 */
+.notice--success {
+  border-left-color: var(--success);
+}
+
 /* 右下角变体（MIDI 连接失败报错）：钉在播放坞右上方，不居中 */
 .notice--bottom-right {
   top: auto;
@@ -1886,5 +1892,355 @@ input[type='range']::-moz-range-thumb {
   *::after {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
+  }
+}
+
+/* ---------- 模态弹窗（确认 / 文件名输入） ---------- */
+/* 原生 <dialog> 只当舞台：UA 样式自带的边框/内边距/底色全部让位给 .dialog__panel。
+   padding 归零后 dialog 盒子与面板贴合，点击遮罩的判定（target === dialog）才准确 */
+.dialog {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-0);
+  /* :modal 的 UA 样式带 overflow: auto，会连面板投影一起裁掉；限高滚动交给面板自己 */
+  overflow: visible;
+}
+
+/* 遮罩：压暗舞台，把注意力收到弹窗上 */
+.dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.dialog__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  /* 面板即内容盒：不限宽时，长文案或长文件名会把弹窗撑出视口 */
+  max-width: min(420px, calc(100vw - 32px));
+  min-width: 280px;
+  /* 限高滚动放在面板：弹窗本体不裁切，投影才留得住（dvh 处理移动端工具栏收放） */
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  padding: 18px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-paper);
+}
+
+.dialog__title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+/* 正文用次级文本色，行高放宽以便阅读多行提示 */
+.dialog__message {
+  margin: 0;
+  color: var(--text-1);
+  line-height: 1.6;
+}
+
+.dialog__label {
+  font-size: 0.8125rem;
+  color: var(--text-1);
+}
+
+.dialog__input {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  font: inherit;
+  color: var(--text-0);
+  /* 输入区比面板更深一档，靠描边划出边界（控件观感与全局 button 一致） */
+  background: var(--bg-0);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+}
+
+.dialog__input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 错误行常驻占位：无错误时 display: none 不占高度，由脚本切 .is-visible 显示 */
+.dialog__error {
+  display: none;
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--danger);
+}
+
+.dialog__error.is-visible {
+  display: block;
+}
+
+.dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* 弹窗按钮：默认是确认弹窗里的“取消”，沿用全局 button 的描边幽灵观感 */
+.dialog__btn {
+  height: 32px;
+  padding: 0 14px;
+  font: inherit;
+  color: var(--text-1);
+  background: var(--bg-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out);
+}
+
+/* 主按钮：琥珀实心 + 纸面深色字，保证文字对比度 */
+.dialog__btn--primary {
+  color: var(--paper-text);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 危险按钮：红色实心（清空轨道等破坏性动作） */
+.dialog__btn--danger {
+  color: var(--paper);
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+/* 仅桌面端应用 hover：触控端保留 :hover 会把首次点击当 hover 消费掉（见全局 button 注释） */
+@media (hover: hover) and (pointer: fine) {
+  /* 描边提亮只给次要按钮；实心变体各自提亮底色，不能被换成琥珀描边 */
+  .dialog__btn:not(.dialog__btn--primary):not(.dialog__btn--danger):hover {
+    color: var(--text-0);
+    border-color: var(--accent);
+  }
+
+  .dialog__btn--primary:hover {
+    color: var(--paper-text);
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+  }
+
+  .dialog__btn--danger:hover {
+    color: var(--paper);
+    border-color: var(--danger);
+    filter: brightness(1.08);
+  }
+}
+
+/* 按下反馈：实心按钮必须盖过全局 button:active 的灰底
+   （button:active 含类型选择器，权重 0,1,1 高于 .dialog__btn--primary 的 0,1,0） */
+.dialog__btn--primary:active {
+  background: var(--accent-pressed);
+  border-color: var(--accent-pressed);
+}
+
+.dialog__btn--danger:active {
+  color: var(--paper);
+  background: var(--danger);
+  border-color: var(--danger);
+  filter: brightness(0.92);
+}
+
+/* ---------- MIDI 录音工具（/midi-recorder） ---------- */
+.recorder {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-0);
+}
+
+/* 音轨上方：计时器居中（绝对定位的状态行不挤动它） */
+.recorder__head {
+  position: relative;
+  flex: none;
+  height: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-bottom: 1px solid var(--line);
+}
+
+.recorder__timer {
+  font-family: var(--font-display);
+  font-size: 1.375rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  color: var(--text-0);
+}
+
+/* 录音页的通知胶囊：下移到计时器行（46px）之下，避免盖住计时器 */
+.notice--recorder {
+  top: calc(var(--shell-h) + 46px + 10px);
+}
+
+/* MIDI 连接状态：已连接用琥珀，未连接用弱文本色 */
+.recorder__status {
+  position: absolute;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  color: var(--text-2);
+}
+
+.recorder__status.is-connected {
+  color: var(--accent);
+}
+
+/* 音轨舞台：画布填满，Tips 浮在其底部居中 */
+.recorder__stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.recorder__canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  /* 横向拖动音轨由画布自己处理（pointermove），不让浏览器接管手势 */
+  touch-action: none;
+}
+
+.recorder__canvas.is-dragging {
+  cursor: grabbing;
+}
+
+/* Tips：控制行上方居中的小气泡（未连接 MIDI 键盘 / 音轨为空等提示） */
+.recorder__tip {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  max-width: min(420px, 82%);
+  padding: 7px 12px;
+  font-size: 0.8125rem;
+  color: var(--text-0);
+  background: var(--bg-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-toast);
+  opacity: 0;
+  transform: translate(-50%, 6px);
+  pointer-events: none;
+  transition:
+    opacity var(--dur-med) var(--ease-out),
+    transform var(--dur-med) var(--ease-out);
+}
+
+.recorder__tip.is-visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+/* 控制行：5 个圆形按钮居中排列 */
+.recorder__controls {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 12px 16px 14px;
+  background: var(--bg-1);
+  border-top: 1px solid var(--line);
+}
+
+/* 播放/录制的包装器：disabled 元素不派发鼠标事件，Tips 由包装器兜住 */
+.recorder__btn-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+/* 禁用时铺一层透明命中区：hover / 点击落在包装器上（用于弹 Tips） */
+.recorder__btn-wrap.is-blocked::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+}
+
+.recorder__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  color: var(--text-1);
+  background: var(--bg-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+/* 仅桌面端（有 hover）应用 hover 提亮：触控端避免 sticky hover（见全局 button 注释） */
+@media (hover: hover) and (pointer: fine) {
+  .recorder__btn:not(:disabled):hover {
+    color: var(--text-0);
+    border-color: var(--accent);
+  }
+}
+
+.recorder__btn:not(:disabled):active {
+  transform: scale(0.95);
+}
+
+/* 未连接 MIDI 键盘（或音轨为空）时不可点击 */
+.recorder__btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* 播放中：琥珀实心（图标已由视图换成暂停） */
+.recorder__btn.is-active {
+  color: var(--paper-text);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 录制键常态红点；录制中红底 + 呼吸光圈（与录制线红色呼应） */
+.recorder__btn--record {
+  color: var(--danger);
+}
+
+.recorder__btn--record.is-recording {
+  color: var(--paper);
+  background: var(--danger);
+  border-color: var(--danger);
+  animation: recorder-recording-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes recorder-recording-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(224, 105, 94, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 7px rgba(224, 105, 94, 0);
+  }
+}
+
+/* 降低动效偏好：呼吸光圈静止（与全局一致的降级策略） */
+@media (prefers-reduced-motion: reduce) {
+  .recorder__btn--record.is-recording {
+    animation: none;
   }
 }

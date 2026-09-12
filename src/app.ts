@@ -30,7 +30,7 @@ function writeFileQueryName(name: string | null): void {
   window.history.replaceState(null, '', url.pathname + url.search + url.hash)
 }
 
-/** 组装 MIDI 播放器工具：存储/解析/播放/视图接线（设计文档 §3 总体架构）。返回卸载函数。 */
+/** 组装「播放 / 练习」工具：存储/解析/播放/视图接线（设计文档 §3 总体架构）。返回卸载函数。 */
 export async function createApp(host: HTMLElement): Promise<() => void> {
   const library = new FileLibrary()
   const audioCtx = new AudioContext()

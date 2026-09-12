@@ -7,6 +7,8 @@ export interface ScheduledNote {
   time: number
   /** 秒 */
   duration: number
+  /** MIDI 通道 0~15（默认 0）：仅 MIDI 输出镜像使用（录音回放保留录制通道），音频引擎忽略 */
+  channel?: number
 }
 
 export interface EngineInitOptions {

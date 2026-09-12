@@ -202,6 +202,22 @@ export const chevronDownIcon = (): SVGSVGElement => svg(['M5 8l5 5 5-5'])
 /** 展开/收起三角：向上（展开态，点击收起） */
 export const chevronUpIcon = (): SVGSVGElement => svg(['M5 12l5-5 5 5'])
 
+/** 录音（实心圆，MIDI 录音工具用） */
+export const recordIcon = (): SVGSVGElement =>
+  svg(['M10 4.4a5.6 5.6 0 1 1 0 11.2 5.6 5.6 0 0 1 0-11.2Z'], true)
+
+/** 保存到播放器文件库（描边：软盘） */
+export const saveIcon = (): SVGSVGElement =>
+  svg([
+    'M3.5 5.5a2 2 0 0 1 2-2h7.1l3.9 3.9v7.1a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2z',
+    'M7 3.5h5.5v4.2H7z',
+    'M6.6 16.5v-4.3h6.8v4.3',
+  ])
+
+/** 下载（描边：向下箭头 + 底座） */
+export const downloadIcon = (): SVGSVGElement =>
+  svg(['M10 3.6v8.8', 'M6.1 8.7l3.9 3.9 3.9-3.9', 'M4.5 16.4h11'])
+
 /** 空状态装饰：一排琴键剪影（64×24 视窗，currentColor 平涂） */
 export function keysArtIcon(): SVGSVGElement {
   const el = document.createElementNS(SVG_NS, 'svg')

@@ -739,6 +739,62 @@ describe('Transport 踏板练习', () => {
     expect(t.pedalFocus).toBeNull()
   })
 
+  it('pedalsDownAt：踩下区间的持续期间内为「文件正踩着」（含踩下、不含抬起）', () => {
+    const t = new Transport(new FakeEngine(), new FakeHost())
+    t.load(makePedalSong()) // 延音 0.4–1.0
+    t.setPracticeTracks(new Set([0]))
+    t.setPedalPracticeMode('sustain')
+    expect([...t.pedalsDownAt(0.3)]).toEqual([])
+    expect([...t.pedalsDownAt(0.4)]).toEqual(['sustain'])
+    expect([...t.pedalsDownAt(0.7)]).toEqual(['sustain'])
+    expect([...t.pedalsDownAt(1.0)]).toEqual([]) // 抬起时刻起不再踩着
+    // 练习未开启（无关注范围）→ 恒为空
+    t.setPracticeTracks(new Set())
+    expect([...t.pedalsDownAt(0.5)]).toEqual([])
+    // 练习中但踏板练习为 off → 判定踏板为空
+    t.setPracticeTracks(new Set([0]))
+    t.setPedalPracticeMode('off')
+    expect([...t.pedalsDownAt(0.5)]).toEqual([])
+  })
+
+  it('独立踏板闸门：没有音符要按的时刻也会冻结等待（踏板与按键同等地位）', () => {
+    const song = makePedalSong()
+    song.duration = 3
+    song.notes = [
+      { pitch: 60, start: 0.5, end: 0.9, velocity: 100, trackIndex: 0 },
+      { pitch: 64, start: 2.6, end: 2.9, velocity: 100, trackIndex: 0 },
+    ]
+    // 1.5s 处的踏板踩下远离任何音符（最近的音符 0.5 / 2.6，相差 > 合并窗口）
+    song.pedalEvents = [
+      { time: 1.5, controller: 64, value: 127, trackIndex: 0, channel: 0 },
+      { time: 2.2, controller: 64, value: 0, trackIndex: 0, channel: 0 },
+    ]
+    const host = new FakeHost()
+    const t = new Transport(new FakeEngine(), host)
+    t.load(song)
+    t.setPracticeTracks(new Set([0]))
+    t.setPedalPracticeMode('sustain')
+    const chords: Array<PracticeChord | null> = []
+    t.onPracticeChord((c) => chords.push(c))
+    t.play()
+    host.fireTicks() // pos=0：进入和弦 0.5 的提前窗口
+    expect(chords.at(-1)?.notes.map((n) => n.pitch)).toEqual([60])
+    t.releaseChord()
+    host.advance(1.1) // pos ≈ 1.1：越过 0.5，进入独立踏板闸门（1.5）的提前窗口
+    host.fireTicks()
+    const gate = chords.at(-1)
+    expect(gate?.start).toBeCloseTo(1.5)
+    expect(gate?.notes).toEqual([]) // 纯踏板闸门：没有音符要按
+    expect([...(gate?.requiredPedals ?? [])]).toEqual(['sustain'])
+    host.advance(0.5) // pos 到 1.5 → 冻结
+    host.fireTicks()
+    expect(t.position).toBeCloseTo(1.5)
+    t.releaseChord()
+    host.advance(0.3)
+    host.fireTicks()
+    expect(t.position).toBeGreaterThan(1.5)
+  })
+
   it('门控和弦携带踏板要求（覆盖和弦起点的踏板）与参与判定的踏板', () => {
     const engine = new FakeEngine()
     const host = new FakeHost()

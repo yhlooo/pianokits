@@ -14,7 +14,9 @@ import type { Transport } from './transport'
 export interface PracticeFeedback {
   held: ReadonlySet<number>
   wrong: ReadonlySet<number>
-  /** 误踩的踏板（等待期间新踩参与判定但本和弦不需要的踏板；松开即清除） */
+  /** 当前踩下的踏板（实际状态）：练习中踏板光晕只作为「踩下」的反馈，没踩就不亮 */
+  heldPedals: ReadonlySet<PedalId>
+  /** 误踩的踏板（踩下参与判定但当前不需要的踏板；松开即清除） */
   wrongPedals: ReadonlySet<PedalId>
 }
 
@@ -93,8 +95,9 @@ export function practiceTracksOf(song: Song): PracticeTrackInfo[] {
  * - 分轨练习：每轨独立开关（悬浮菜单多选，可多轨同时练习）；开启练习的轨到达判定线
  *   时等待琴键放行（和弦需同时按住全部对应琴键），其余轨照常直接播放；
  * - 踏板练习（设计文档 20260912-midi-pedal-lane-and-practice.md §3.5）：三选一模式
- *   （off/sustain/all）随分轨练习生效；和弦放行还要求「文件在该和弦处踩下的踏板」全部踩着，
- *   等待期间误踩参与判定的踏板红显并阻止放行；
+ *   （off/sustain/all）随分轨练习生效；闸门放行还要求「文件在该时刻踩下的踏板」全部**现踩**，
+ *   等待期间误踩参与判定的踏板红显并阻止放行；文件此刻正踩着的踏板（踩下持续期间内）随时踩下
+ *   都算正确——长踏板与长音符同等对待，持续期间内松开再踩不判错；
  * - 练习按钮语义：非全开（含全关）→ 全部开启；全开 → 全部关闭；
  * - 暂停/播放联动：开关任意轨练习（或切换踏板练习模式）都会自动暂停；练习开启时按下任意琴键即从
  *   暂停恢复播放；连接键盘不影响播放状态，设备拔出自动暂停；
@@ -153,8 +156,8 @@ export class PracticeController {
         return
       }
       const pitches = new Set(chord.notes.map((n) => n.pitch))
-      if (this.gate.setChord(pitches, chord.excused, chord.requiredPedals, chord.judgedPedals)) {
-        // 预先已按住全部琴键（且要求踏板已踩着）：进入等待即放行
+      if (this.gate.setChord(pitches, chord.excused, chord.requiredPedals)) {
+        // 预先已按住全部琴键、且要求的踏板已现踩：进入等待即放行
         this.release()
       }
       this.emitFeedback()
@@ -269,6 +272,9 @@ export class PracticeController {
     const gating = this.isGating()
     this.transport.setPracticeTracks(gating ? new Set(this.practiceTracks) : new Set())
     this.transport.setPedalPracticeMode(this.pedalMode)
+    // 参与判定的踏板：练习关闭时为空集（此时不评估踏板，也不红显）
+    const focus = gating ? this.transport.pedalFocus : null
+    this.gate.setJudgedPedals(focus?.pedals ?? new Set())
     this.emitFeedback()
     this.emitPractice()
   }
@@ -317,13 +323,18 @@ export class PracticeController {
   /**
    * 踏板 CC（CC64/66/67）：并入 gate 的踏板状态并参与判定。
    * 练习中满足放行条件即放行；未开启练习时也照常并入（进入练习时能识别"踏板已经踩着"）。
+   *
+   * 「文件此刻正踩着」的踏板（当前播放位置落在踩下区间的持续期间内）交给 gate：在其中踩下不算
+   * 误踩——长踏板与长音符同等对待，持续期间内松开再踩仍然正确（设计文档 §3.5 修订）。
    */
   private onControl(ev: MidiControlChange): void {
     if (this.disposed) return
-    const triggered = this.gate.control(ev)
+    const expected = this.transport.pedalsDownAt(this.transport.position)
+    const triggered = this.gate.control(ev, expected)
     if (!this.isGating()) return
     if (triggered) this.release()
-    else this.emitFeedback()
+    // 放行后同样要外发反馈：踏板/琴键此刻的按住状态就是光晕与点亮的来源
+    this.emitFeedback()
   }
 
   /** 放行当前等待的和弦：走带继续（门控轨音符已由 echoNote 发声）；gate 清空等待直至下一和弦 */
@@ -338,6 +349,7 @@ export class PracticeController {
         ? {
             held: new Set(this.gate.heldKeys),
             wrong: new Set(this.gate.wrongKeys),
+            heldPedals: new Set(this.gate.heldPedalKeys),
             wrongPedals: new Set(this.gate.wrongPedalKeys),
           }
         : null,

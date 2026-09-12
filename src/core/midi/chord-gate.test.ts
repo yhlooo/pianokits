@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { MidiControlChange, MidiNoteEvent } from './input'
 import { ChordGate } from './chord-gate'
+import type { PedalId } from './pedals'
 
 const on = (pitch: number, velocity = 100): MidiNoteEvent => ({
   type: 'noteOn',
@@ -188,32 +189,44 @@ const SUSTAIN_UP = cc(64, 0)
 const SOFT_DOWN = cc(67, 127)
 const SOFT_UP = cc(67, 0)
 
-describe('ChordGate 踏板判定', () => {
-  it('要求踏板没踩着：琴键齐全也不放行；踩下要求的踏板才放行', () => {
+describe('ChordGate 踏板判定（边缘触发）', () => {
+  it('要求踏板没现踩：琴键齐全也不放行；闸门开始后踩下才放行', () => {
     const g = new ChordGate()
-    g.setChord(CHORD, new Set(), new Set(['sustain']), new Set(['sustain']))
+    g.setJudgedPedals(new Set(['sustain']))
+    g.setChord(CHORD, new Set(), new Set(['sustain']))
     expect(g.note(on(60))).toBe(false)
     expect(g.note(on(64))).toBe(false)
     expect(g.note(on(67))).toBe(false) // 琴键全部按住，但缺少要求踏板
-    expect(g.control(SUSTAIN_DOWN)).toBe(true) // 踩下踏板 → 放行
+    expect(g.control(SUSTAIN_DOWN)).toBe(true) // 现踩踏板 → 放行
     expect(g.wrongPedalKeys.size).toBe(0)
   })
 
-  it('踏板按要求「当前状态」判定：进入等待前已踩着即满足，不要求重踩', () => {
+  it('一直踩着不放不能通过：闸门开始前踩下的不算，必须重踩', () => {
     const g = new ChordGate()
-    g.control(SUSTAIN_DOWN) // 等待之前就踩着（延音踏板可以一直踩）
-    expect(g.setChord(CHORD, new Set(), new Set(['sustain']), new Set(['sustain']))).toBe(false)
+    g.setJudgedPedals(new Set(['sustain']))
+    g.control(SUSTAIN_DOWN) // 闸门开始前就踩着
+    g.setChord(CHORD, new Set(), new Set(['sustain']))
     expect(g.note(on(60))).toBe(false)
     expect(g.note(on(64))).toBe(false)
-    expect(g.note(on(67))).toBe(true) // 琴键齐全即放行
+    expect(g.note(on(67))).toBe(false) // 踏板虽踩着，但不是本闸门现踩的 → 不放行
+    expect(g.control(SUSTAIN_UP)).toBe(false)
+    expect(g.control(SUSTAIN_DOWN)).toBe(true) // 重踩（抬起再踩）→ 放行
   })
 
-  it('误踩（参与判定但本和弦不需要）：标红、不触发放行；松开后可放行', () => {
+  it('纯踏板闸门（没有音符要按）：只判踏板，踩下即放行', () => {
     const g = new ChordGate()
-    g.setChord(CHORD, new Set(), new Set(), new Set(['sustain']))
+    g.setJudgedPedals(new Set(['sustain']))
+    expect(g.setChord(new Set(), new Set(), new Set(['sustain']))).toBe(false)
+    expect(g.control(SUSTAIN_DOWN)).toBe(true)
+  })
+
+  it('误踩（参与判定但本闸门不需要）：标红、不触发放行；松开后可放行', () => {
+    const g = new ChordGate()
+    g.setJudgedPedals(new Set(['sustain']))
+    g.setChord(CHORD, new Set(), new Set())
     expect(g.control(SOFT_DOWN)).toBe(false) // 弱音不在参与判定集合 → 忽略，不标红
     expect(g.wrongPedalKeys.size).toBe(0)
-    expect(g.control(SUSTAIN_DOWN)).toBe(false) // 参与判定但本和弦不需要 → 误踩
+    expect(g.control(SUSTAIN_DOWN)).toBe(false) // 参与判定但本闸门不需要 → 误踩
     expect([...g.wrongPedalKeys]).toEqual(['sustain'])
     expect(g.note(on(60))).toBe(false)
     expect(g.note(on(64))).toBe(false)
@@ -223,36 +236,71 @@ describe('ChordGate 踏板判定', () => {
     expect(g.note(on(67))).toBe(true) // 补全最后一个琴键 → 放行
   })
 
-  it('等待开始前已踩着的非要求踏板不算误踩（同琴键的「遗留指法」语义）', () => {
+  it('没有闸门等待时误踩：只红显、不阻塞（松开即清除）', () => {
     const g = new ChordGate()
-    g.control(SOFT_DOWN)
-    expect(g.setChord(CHORD, new Set(), new Set(), new Set(['soft', 'sustain']))).toBe(false)
+    g.setJudgedPedals(new Set(['sustain']))
+    expect(g.control(SUSTAIN_DOWN)).toBe(false) // 无闸门 → 不触发
+    expect([...g.wrongPedalKeys]).toEqual(['sustain']) // 但要求红显
+    expect(g.control(SUSTAIN_UP)).toBe(false)
     expect(g.wrongPedalKeys.size).toBe(0)
-    expect(g.note(on(60))).toBe(false)
-    expect(g.note(on(64))).toBe(false)
-    expect(g.note(on(67))).toBe(true) // 遗留踏板不阻止放行
   })
 
-  it('多个要求踏板必须全部踩着', () => {
+  it('文件正踩着（长踏板持续期间）时踩下不算误踩、不阻止放行', () => {
     const g = new ChordGate()
-    g.setChord(CHORD, new Set(), new Set(['sustain', 'soft']), new Set(['sustain', 'soft']))
+    const fileDown = new Set<PedalId>(['sustain'])
+    g.setJudgedPedals(new Set(['sustain', 'soft']))
+    g.setChord(CHORD, new Set(), new Set()) // 本闸门不要求踏板（长踏板已在中途踩着）
+    g.note(on(60))
+    // 持续期间内松开再踩：文件此刻正踩着延音 → 不算误踩
+    expect(g.control(SUSTAIN_UP, fileDown)).toBe(false)
+    expect(g.control(SUSTAIN_DOWN, fileDown)).toBe(false)
+    expect(g.wrongPedalKeys.size).toBe(0)
+    // 文件此刻没踩的踏板仍算误踩（红显 → 阻止放行；松开即放行）
+    expect(g.control(SOFT_DOWN, fileDown)).toBe(false)
+    expect([...g.wrongPedalKeys]).toEqual(['soft'])
+    expect(g.note(on(64))).toBe(false)
+    expect(g.note(on(67))).toBe(false) // 琴键齐全，但误踩的踏板仍按着 → 不触发
+    expect(g.control(SOFT_UP, fileDown)).toBe(true)
+  })
+
+  it('文件此刻踩着但本闸门不要求的踏板：不算误踩，也不替代要求的踏板', () => {
+    const g = new ChordGate()
+    g.setJudgedPedals(new Set(['sustain', 'soft']))
+    g.setChord(CHORD, new Set(), new Set(['soft'])) // 本闸门要求现踩弱音
+    const fileDown = new Set<PedalId>(['sustain'])
+    for (const pitch of [60, 64, 67]) g.note(on(pitch))
+    expect(g.control(SUSTAIN_DOWN, fileDown)).toBe(false) // 文件正踩着 → 不误踩，但不满足弱音要求
+    expect(g.wrongPedalKeys.size).toBe(0)
+    expect(g.control(SOFT_DOWN, fileDown)).toBe(true) // 现踩要求的弱音 → 放行
+  })
+
+  it('多个要求踏板必须全部现踩', () => {
+    const g = new ChordGate()
+    g.setJudgedPedals(new Set(['sustain', 'soft']))
+    g.setChord(CHORD, new Set(), new Set(['sustain', 'soft']))
     for (const p of [60, 64, 67]) g.note(on(p))
     expect(g.control(SUSTAIN_DOWN)).toBe(false) // 只踩了一个
     expect(g.control(SOFT_DOWN)).toBe(true) // 两个都踩 → 放行
   })
 
-  it('换和弦清空误踩标记；踏板状态跨和弦保持', () => {
+  it('换闸门清空误踩标记与「现踩」标记；踏板按住状态跨闸门保持', () => {
     const g = new ChordGate()
-    g.setChord(new Set([60]), new Set(), new Set(), new Set(['sustain']))
+    g.setJudgedPedals(new Set(['sustain']))
+    g.setChord(new Set([60]), new Set(), new Set())
     g.control(SUSTAIN_DOWN)
     expect([...g.wrongPedalKeys]).toEqual(['sustain'])
-    g.setChord(new Set([62]), new Set(), new Set(), new Set(['sustain']))
-    expect(g.wrongPedalKeys.size).toBe(0) // 新和弦重新评估
+    // 新闸门要求同一个踏板：之前那次踩下不算现踩（需重踩），但按住的踏板不会误踩
+    g.setChord(new Set([62]), new Set(), new Set(['sustain']))
+    expect(g.wrongPedalKeys.size).toBe(0)
     expect([...g.heldPedalKeys]).toEqual(['sustain'])
+    expect(g.note(on(62))).toBe(false) // 缺现踩
+    expect(g.control(SUSTAIN_UP)).toBe(false)
+    expect(g.control(SUSTAIN_DOWN)).toBe(true)
   })
 
-  it('setChord(null) 后踏板事件不再触发（无等待和弦）', () => {
+  it('setChord(null) 后踏板事件不再触发（无闸门等待）', () => {
     const g = new ChordGate()
+    g.setJudgedPedals(new Set(['sustain']))
     g.control(SUSTAIN_DOWN)
     g.setChord(null)
     expect(g.control(SUSTAIN_UP)).toBe(false)
@@ -261,22 +309,22 @@ describe('ChordGate 踏板判定', () => {
 
   it('resetPedals 清空踏板状态（设备断开）', () => {
     const g = new ChordGate()
+    g.setJudgedPedals(new Set(['sustain', 'soft']))
     g.control(SUSTAIN_DOWN)
-    g.setChord(new Set([60]), new Set(), new Set(), new Set(['sustain', 'soft']))
-    g.control(SOFT_DOWN) // 参与判定但本和弦不需要 → 误踩
+    g.setChord(new Set([60]), new Set(), new Set(['sustain']))
+    g.control(SOFT_DOWN) // 参与判定但本闸门不需要 → 误踩
     expect(g.wrongPedalKeys.size).toBe(1)
     g.resetPedals()
     expect([...g.heldPedalKeys]).toEqual([])
     expect(g.wrongPedalKeys.size).toBe(0)
     // 断开后即使踏板事件恢复，也不残留「已踩着」的旧状态
-    expect(g.setChord(new Set([60]), new Set(), new Set(['sustain']), new Set(['sustain']))).toBe(
-      false,
-    )
+    expect(g.setChord(new Set([60]), new Set(), new Set(['sustain']))).toBe(false)
   })
 
   it('非踏板 CC 忽略（不改变踏板状态、不标红）', () => {
     const g = new ChordGate()
-    g.setChord(new Set([60]), new Set(), new Set(), new Set(['sustain']))
+    g.setJudgedPedals(new Set(['sustain']))
+    g.setChord(new Set([60]), new Set(), new Set())
     expect(g.control(cc(7, 100))).toBe(false)
     expect([...g.heldPedalKeys]).toEqual([])
     expect(g.wrongPedalKeys.size).toBe(0)

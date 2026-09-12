@@ -2,8 +2,9 @@ import type { Note, Song } from './model'
 import type { AudioEngine, ScheduledNote } from './engine/types'
 import {
   buildPedalSegments,
+  mergePedalGates,
   pedalFocus,
-  requiredPedalsAt,
+  pedalsDownAt,
   type PedalFocus,
   type PedalId,
   type PedalPracticeMode,
@@ -44,11 +45,25 @@ const LATENCY_SEC = 0.015
 export const CHORD_EPSILON_SEC = 0.03
 
 /**
- * 踏板要求和弦窗口（秒）：和弦起点后此时长内「仍踩着」或「新踩下」的踏板，计为该和弦的要求
- * （设计文档 20260912-midi-pedal-lane-and-practice.md §3.5）。120ms 约等于 120bpm 的 32 分音符，
- * 足以容下真实演奏中踏板略早/略晚于和弦的偏移，又不会跨到下一个和弦。
+ * 踏板事件与和弦合并窗口（秒）：相差不超过此时长的踏板踩下事件并入该和弦闸门（与琴键一起踩），
+ * 更远的踏板踩下各自成为**独立闸门**（踏板与按键同等地位，设计文档
+ * 20260912-midi-pedal-lane-and-practice.md §3.5）。200ms 约等于 120bpm 的十六分音符，
+ * 足以容下真实演奏中踏板略早/略晚于和弦的偏移，又不会把相邻和弦的踏板张冠李戴。
  */
-export const PEDAL_CHORD_WINDOW_SEC = 0.12
+export const PEDAL_CHORD_WINDOW_SEC = 0.2
+
+/**
+ * 练习闸门点（Transport 内部）：门控轨和弦起点 或 关注范围内的踏板踩下事件（相近者合并）。
+ * 踏板与按键同等地位——没有音符要按的时刻也能单独成闸门。
+ */
+interface PracticeGate {
+  /** 判定时刻（冻结位置）；合并到和弦时 = 和弦起点，独立踏板闸门 = 踏板踩下时刻 */
+  start: number
+  /** 本闸门的门控轨和弦起点；纯踏板闸门为 null */
+  noteStart: number | null
+  /** 本闸门要求「现踩」的踏板（边缘触发） */
+  pedals: readonly PedalId[]
+}
 
 /** 练习模式等待中的和弦（进入提前触发窗口后回调、到达判定线冻结直到放行） */
 export interface PracticeChord {
@@ -63,13 +78,14 @@ export interface PracticeChord {
    */
   excused: ReadonlySet<number>
   /**
-   * 本和弦要求踩下的踏板（判定范围内、文件在该和弦处处于踩下状态；见 requiredPedalsAt）。
-   * 练习模式（踏板练习开启）下，全部踩着才放行。
+   * 本闸门要求**现踩**的踏板（边缘触发）：文件在该时刻踩下的踏板（与和弦相差
+   * `PEDAL_CHORD_WINDOW_SEC` 以内的踩下事件并入本闸门、更远的独立成闸门）。
+   * 必须是本闸门开始之后收到的踩下转变才算数——一直踩着不放不能通过。
    */
   requiredPedals: ReadonlySet<PedalId>
   /**
-   * 本和弦参与判定的踏板（练习模式 ∩ 练习范围）：等待期间新踩这些踏板而非要求踏板 → 误踩红显
-   * 并阻止放行；不在集合内的踏板完全忽略（不判定、不标红）。
+   * 本闸门参与判定的踏板（练习模式 ∩ 练习范围）：踩下这些踏板而非要求踏板 → 误踩红显，
+   * 有闸门等待时阻止放行；不在集合内的踏板完全忽略（不判定、不标红）。
    */
   judgedPedals: ReadonlySet<PedalId>
 }
@@ -118,13 +134,20 @@ export class Transport {
   private pedalSegments: PedalSegment[] = []
   /** 当前踏板关注范围缓存（门控集合/踏板模式/曲目变化时重算）；null = 练习未开启 */
   private pedalFocusCache: PedalFocus | null = null
-  /** 练习模式等待中的和弦（仅含门控轨音符）；null = 未等待 */
+  /**
+   * 练习闸门点（按时间排序）：门控轨和弦起点 ∪ 关注范围内的踏板踩下事件
+   * （相近者合并，见 mergePedalGates）。踏板与按键同等地位——纯踏板时刻也能单独成闸门。
+   */
+  private gates: PracticeGate[] = []
+  /** 闸门指针：第一个尚未处理的闸门 */
+  private nextGate = 0
+  /** 练习模式等待中的闸门（可能只有踏板要求，没有音符）；null = 未等待 */
   private waitingChord: PracticeChord | null = null
-  /** 当前等待的和弦是否冻结视觉位置（position 恒停在和弦起点，音符条底贴判定线） */
+  /** 等待中闸门的音符下标（放行时打「已排期」标记，退出练习后不重复发声） */
+  private waitingIndices: number[] = []
+  /** 当前等待的闸门是否冻结视觉位置（position 恒停在闸门起点，音符条底贴判定线） */
   private waitingFrozen = false
-  /** 门控流指针：第一个尚未处理的门控轨音符（和弦收集与放行推进） */
-  private nextGated = 0
-  /** 自由流指针：第一个尚未排期的非门控轨音符（只排期到下一个门控和弦之前） */
+  /** 自由流指针：第一个尚未排期的非门控轨音符（只排期到下一个闸门之前） */
   private nextFree = 0
   private practiceChordCb: PracticeChordListener | null = null
   /** MIDI 输出镜像（可选）：与引擎同步排期的外部音源（无输出端口时为 null） */
@@ -201,7 +224,7 @@ export class Transport {
     this.pausedAt = 0
     this.offset = this.host.now()
     this.nextIndex = 0
-    this.nextGated = 0
+    this.nextGate = 0
     this.nextFree = 0
     this.consumed = new Uint8Array(this.notes.length)
     this.setState('ready')
@@ -318,6 +341,18 @@ export class Transport {
   }
 
   /**
+   * 关注范围内、**文件在 `at` 时刻正处于踩下状态**的踏板（踩下区间的持续期间；设计文档
+   * 20260912-midi-pedal-lane-and-practice.md §3.5 的 2026-09-12 修订）。
+   * 练习判定用它把长踏板与长音符同等对待：持续期间内松开再踩不算误踩——判定时刻通常是
+   * 冻结/播放中的当前位置，故由调用方传入（`position` 在等待期间恒为闸门起点）。
+   */
+  pedalsDownAt(at: number): ReadonlySet<PedalId> {
+    const focus = this.pedalFocusCache
+    if (focus === null) return new Set()
+    return pedalsDownAt(this.pedalSegments, focus, at)
+  }
+
+  /**
    * 设置踏板练习模式（off/sustain/all）：关注范围变化会取消当前等待（放行条件已变），
    * 下一 tick 按新范围重新进入等待；无变化时为空操作。
    */
@@ -363,26 +398,21 @@ export class Transport {
   }
 
   /**
-   * 放行当前等待的和弦：只推进门控流并把位置回拨/追到和弦起点后继续推进（提前放行时位置
-   * 前跳到和弦起点）。门控轨音符**不在此排期发声**——练习按键经 `echoNote` 原样回送到键盘
+   * 放行当前等待的闸门：闸门指针前移，并把位置回拨/追到闸门起点后继续推进（提前放行时位置
+   * 前跳到闸门起点）。门控轨音符**不在此排期发声**——练习按键经 `echoNote` 原样回送到键盘
    * 音源（力度=按键力度，弹错的音也发声）；同 onset 的非门控音符由自由流在放行后的下一
-   * tick 以放行时刻排期，随和弦一起发声。
+   * tick 以放行时刻排期，随闸门一起发声。
    */
   releaseChord(): void {
     if (this.gatedTracks.size === 0 || this.waitingChord === null) return
     const chord = this.waitingChord
     const now = this.host.now()
     // 放行的门控轨音符打上已排期标记：退出练习后正常流不重复发声（它们已由 echoNote 发声）
-    let mark = this.nextGated
-    const markUntil = chord.start + CHORD_EPSILON_SEC
-    while (mark < this.notes.length && this.notes[mark].start <= markUntil) {
-      if (this.gatedTracks.has(this.notes[mark].trackIndex)) this.consumed[mark] = 1
-      mark++
-    }
-    // 门控流越过整组（组内非门控音符由自由流独立排期，无需处理）
-    this.nextGated = mark
+    for (const i of this.waitingIndices) this.consumed[i] = 1
+    this.waitingIndices = []
+    this.nextGate++
     this.waitingChord = null
-    // 回拨 offset 从和弦起点继续：同 onset 的非门控音符由自由流在下一 tick 排期，
+    // 回拨 offset 从闸门起点继续：同 onset 的非门控音符由自由流在下一 tick 排期，
     // 发声时刻 = now（与放行同步）；后续音符相对放行时刻继续推进
     this.offset = now - chord.start
     this.waitingFrozen = false
@@ -394,8 +424,10 @@ export class Transport {
     this.listeners.clear()
     this.practiceChordCb = null
     this.waitingChord = null
+    this.waitingIndices = []
     this.waitingFrozen = false
     this.pedalSegments = []
+    this.gates = []
     this.pedalFocusCache = null
     this.setState('empty')
   }
@@ -446,7 +478,7 @@ export class Transport {
     const pos = now - this.offset
     if (this.waitingChord === null) {
       this.scheduleFree(pos)
-      this.tryPrimeChord(pos)
+      this.tryPrimeGate(pos)
     } else if (!this.waitingFrozen) {
       this.scheduleFree(pos)
       this.tryFreezeChord(now, pos)
@@ -459,15 +491,15 @@ export class Transport {
   }
 
   /**
-   * 自由流：非门控轨音符按 lookahead 窗口排期，但**不越过下一个门控和弦起点**——
-   * 与门控和弦同 onset 的非门控音符不由自由流提前排期，而是在放行后的 tick 以放行时刻
-   * 排期（与门控和弦一起发声）。
+   * 自由流：非门控轨音符按 lookahead 窗口排期，但**不越过下一个闸门起点**（闸门可能是和弦、
+   * 也可能是独立的踏板踩下时刻）——与闸门同 onset 的非门控音符不由自由流提前排期，
+   * 而是在放行后的 tick 以放行时刻排期（与闸门一起发声）。
    */
   private scheduleFree(pos: number): void {
     const notes = this.notes
     const from = pos + LATENCY_SEC
     const until = pos + LOOKAHEAD_SEC
-    const gatedStart = this.nextGatedStart()
+    const gatedStart = this.nextGateStart()
     const limit = gatedStart === null ? until : Math.min(until, gatedStart)
     while (this.nextFree < notes.length && notes[this.nextFree].start < limit) {
       const i = this.nextFree
@@ -485,60 +517,46 @@ export class Transport {
     }
   }
 
-  /** 下一个门控轨音符的起点（从门控指针出发跳过非门控音符）；无则 null */
-  private nextGatedStart(): number | null {
-    let i = this.nextGated
-    while (i < this.notes.length && !this.gatedTracks.has(this.notes[i].trackIndex)) i++
-    return i < this.notes.length ? this.notes[i].start : null
-  }
-
   /**
-   * 门控流：位置进入下一门控和弦的**提前触发窗口**（和弦起点前一个四分音符）时，收集整组
-   * （仅门控轨音符）并回调（让 gate 提前进入判定、可提前按键），但**不冻结位置**——音符
-   * 继续下坠，人可提前一个四分音符按键触发。
+   * 门控流：位置进入下一闸门的**提前触发窗口**（闸门起点前一个四分音符）时，收集门控轨和弦
+   * （纯踏板闸门没有音符）并回调（让 gate 提前进入判定、可提前按键/踩踏板），但**不冻结位置**——
+   * 音符继续下坠，人可提前一个四分音符触发。
    */
-  private tryPrimeChord(pos: number): void {
-    const notes = this.notes
-    // 从门控指针出发找到第一个门控轨音符（非门控音符永久跳过）
-    let i = this.nextGated
-    while (i < notes.length && !this.gatedTracks.has(notes[i].trackIndex)) i++
-    if (i >= notes.length) {
-      this.nextGated = notes.length
-      return
-    }
-    this.nextGated = i
-    const first = notes[i]
+  private tryPrimeGate(pos: number): void {
+    const gate = this.gates[this.nextGate]
+    if (gate === undefined) return
     // 提前窗口：最多提前一个四分音符（按当前位置的拍速折算）
-    if (pos < first.start - this.earlyTriggerSeconds(first.start)) return
-    // 收集 [start, start + CHORD_EPSILON_SEC] 内的整组门控轨音符
-    const until = first.start + CHORD_EPSILON_SEC
+    if (pos < gate.start - this.earlyTriggerSeconds(gate.start)) return
+    // 收集门控轨音符（纯踏板闸门没有音符 → 只判踏板）；用和弦自己的起点分组
     const group: Note[] = []
-    while (i < notes.length && notes[i].start <= until) {
-      if (this.gatedTracks.has(notes[i].trackIndex)) group.push(notes[i])
-      i++
+    const indices: number[] = []
+    if (gate.noteStart !== null) {
+      const from = gate.noteStart - 1e-6
+      const until = gate.noteStart + CHORD_EPSILON_SEC
+      for (let i = 0; i < this.notes.length && this.notes[i].start <= until; i++) {
+        if (this.notes[i].start < from) continue // notes 按 start 排序：跳过更早的音符
+        if (!this.gatedTracks.has(this.notes[i].trackIndex)) continue
+        group.push(this.notes[i])
+        indices.push(i)
+      }
     }
+    this.waitingIndices = indices
     this.waitingChord = {
-      start: first.start,
+      start: gate.start,
       notes: group,
-      excused: this.excusedPitches(first.start, until),
-      requiredPedals: this.chordRequiredPedals(first.start),
+      excused: this.excusedPitches(gate.start, gate.start + CHORD_EPSILON_SEC),
+      requiredPedals: new Set(gate.pedals),
       judgedPedals: this.pedalFocusCache?.pedals ?? new Set(),
     }
     this.waitingFrozen = false
     this.practiceChordCb?.(this.waitingChord)
   }
 
-  /** 本和弦要求的踏板（关注范围内的文件踩下状态；设计文档 §3.5） */
-  private chordRequiredPedals(start: number): ReadonlySet<PedalId> {
-    const focus = this.pedalFocusCache
-    if (focus === null || focus.pedals.size === 0) return new Set()
-    return requiredPedalsAt(this.pedalSegments, start, focus, PEDAL_CHORD_WINDOW_SEC)
-  }
-
-  /** 重算踏板关注范围（曲目/门控集合/踏板模式变化时；瀑布流经 pedalFocus 读取同一结论） */
+  /** 重算踏板关注范围与练习闸门（曲目/门控集合/踏板模式变化时；瀑布流经 pedalFocus 读取同一结论） */
   private applyPedalFocus(): void {
     if (this.song === null) {
       this.pedalFocusCache = null
+      this.gates = []
       return
     }
     this.pedalFocusCache = pedalFocus(
@@ -547,6 +565,37 @@ export class Transport {
       this.gatedTracks,
       this.pedalMode,
     )
+    this.buildGates()
+  }
+
+  /**
+   * 构造练习闸门：门控轨和弦起点 ∪ 关注范围内的踏板踩下事件（相差 ≤ PEDAL_CHORD_WINDOW_SEC
+   * 的并入和弦，更远的独立成闸门）。notes 已按 start 排序，和弦按 CHORD_EPSILON_SEC 分组。
+   */
+  private buildGates(): void {
+    const chordStarts: number[] = []
+    for (const n of this.notes) {
+      if (!this.gatedTracks.has(n.trackIndex)) continue
+      const last = chordStarts[chordStarts.length - 1]
+      if (last !== undefined && n.start - last <= CHORD_EPSILON_SEC) continue
+      chordStarts.push(n.start)
+    }
+    const focus = this.pedalFocusCache
+    const merged =
+      focus === null || focus.pedals.size === 0
+        ? chordStarts.map((start) => ({ start, pedals: [] as PedalId[] }))
+        : mergePedalGates(chordStarts, this.pedalSegments, focus, PEDAL_CHORD_WINDOW_SEC)
+    const isChord = new Set(chordStarts)
+    this.gates = merged.map((g) => ({
+      start: g.start,
+      noteStart: isChord.has(g.start) ? g.start : null,
+      pedals: g.pedals,
+    }))
+  }
+
+  /** 下一个闸门的起点；无闸门则 null */
+  private nextGateStart(): number | null {
+    return this.gates[this.nextGate]?.start ?? null
   }
 
   /**
@@ -638,11 +687,21 @@ export class Transport {
     this.consumed.fill(0)
   }
 
-  /** 门控模式双流指针：各自定位到第一个 start ≥ position 的门控轨 / 非门控轨音符（进入时放弃已开始的音符） */
+  /**
+   * 门控模式指针：自由流定位到第一个 start ≥ position 的非门控轨音符，闸门指针定位到
+   * 第一个 start ≥ position 的闸门（进入时放弃已开始的音符与已越过的闸门）。
+   */
   private setPracticePointers(position: number): void {
-    this.nextGated = this.firstOf((n) => this.gatedTracks.has(n.trackIndex), position)
     this.nextFree = this.firstOf((n) => !this.gatedTracks.has(n.trackIndex), position)
+    this.nextGate = this.firstGateAtOrAfter(position)
     this.consumed.fill(0)
+  }
+
+  /** 第一个 start ≥ position 的闸门下标；无则 gates.length */
+  private firstGateAtOrAfter(position: number): number {
+    let i = 0
+    while (i < this.gates.length && this.gates[i].start < position) i++
+    return i
   }
 
   /** 第一个未排期音符的下标（退出分轨练习时正常流起点）；无则 notes.length */

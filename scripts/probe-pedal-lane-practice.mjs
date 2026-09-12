@@ -7,8 +7,12 @@
  *   只画光晕（无发光条）、与踏板轨同宽或只略微宽、以判定线为高度中心且可见半高仅 15px、
  *   判定线下方（钢琴键盘区域）不发光；
  * - 练习菜单三个踏板单选（关 / 仅延音踏板 / 全部踏板，默认关）、切换自动全开全部轨；
- * - 和弦要求踏板：只按键不放行（位置冻结），踩下正确踏板才继续；
- * - 误踩踏板：踏板列判定线处红色光晕。
+ * - 练习中踏板光晕只反馈**实际踩下**（没踩就不亮；非练习时才由文件事件驱动）；
+ * - 踏板**边缘触发**：一直踩着不放不能通过，必须在闸门开始后现踩；
+ * - 踏板**独立闸门**：没有音符要按的时刻（踏板踩下事件远离任何和弦）也会冻结等待；
+ * - **长踏板持续期间**（2.9–4.5）内松开再踩不算错：文件此刻正踩着 → 不红显、不阻塞
+ *   （3.6s 处的和弦闸门只要求琴键，重踩延音后按对琴键即可放行）；
+ * - 误踩踏板：判定线处红色光晕；有闸门等待时阻塞，非判定位置只红显不阻塞。
  * 用法：先 `pnpm dev`，再 `node scripts/probe-pedal-lane-practice.mjs`
  */
 import { writeFileSync } from 'node:fs'
@@ -22,6 +26,8 @@ const BASE_URL = process.env.PIANOKITS_URL ?? 'http://localhost:5173'
 // 合成测试曲目：Melody/Bass 两轨都在通道 0（分手导出形态），踏板 CC 只落在 Bass 轨 →
 // 按通道归属，两轨共享同一份踏板（练哪只手都应判定踏板）。
 // 时间轴：踏板 0.4–2.0 踩着、2.9–4.5 踩着；和弦 0.5 / 3.0 / 5.0。
+// 另有低音区单音 24 @3.6（x 在键盘最左侧，远离中央的三条踏板列）：它落在延音 2.9–4.5 的
+// 持续期间内、又不与任何踏板踩下合并 → 只要求琴键的和弦闸门，用于验证"持续期间内重踩"。
 const midi = new Midi()
 const melody = midi.addTrack()
 melody.name = 'Melody'
@@ -31,6 +37,7 @@ melody.addNote({ midi: 67, time: 0.5, duration: 0.4, velocity: 0.8 })
 melody.addNote({ midi: 60, time: 3.0, duration: 0.4, velocity: 0.8 })
 melody.addNote({ midi: 64, time: 3.0, duration: 0.4, velocity: 0.8 })
 melody.addNote({ midi: 67, time: 3.0, duration: 0.4, velocity: 0.8 })
+melody.addNote({ midi: 24, time: 3.6, duration: 0.3, velocity: 0.8 })
 melody.addNote({ midi: 60, time: 5.0, duration: 0.4, velocity: 0.8 })
 const bass = midi.addTrack()
 bass.name = 'Bass'
@@ -41,6 +48,9 @@ bass.addCC({ number: 64, value: 1, time: 0.4 }) // 延音踩下
 bass.addCC({ number: 64, value: 0, time: 2.0 }) // 延音抬起
 bass.addCC({ number: 64, value: 1, time: 2.9 }) // 第二次踩下
 bass.addCC({ number: 64, value: 0, time: 4.5 })
+// 弱音踏板 4.2–4.8s：离最近音符（3.0 / 5.0）都超过合并窗口 → 独立踏板闸门
+bass.addCC({ number: 67, value: 1, time: 4.2 })
+bass.addCC({ number: 67, value: 0, time: 4.8 })
 const MIDI_PATH = '/tmp/probe-pedal-lane.mid'
 writeFileSync(MIDI_PATH, Buffer.from(midi.toArray()))
 
@@ -223,6 +233,38 @@ const glowExtent = (i, dy) =>
 
 const lumOf = (c) => 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
 
+/** 某列里「银灰踏板条」颜色的最长连续像素段（踏板条是几十~几百 px 的竖直长条；
+ *  音符边缘的抗锯齿像素只有一两像素，不会误判；音符彩色/高亮、背景很暗都不计入） */
+const longestBarRun = (i) =>
+  page.evaluate(
+    ({ i }) => {
+      const canvas = document.querySelector('.waterfall__canvas')
+      const dpr = window.devicePixelRatio || 1
+      const ctx = canvas.getContext('2d')
+      const w = canvas.clientWidth
+      const h = canvas.clientHeight
+      const keyW = w / 52
+      const noteAreaH = h - Math.round(w * 0.122) - 16 // 避开底部琥珀判定光带
+      const center = Math.round(((w - 16 * keyW) / 2 + i * 6 * keyW + 2 * keyW) * dpr)
+      let best = 0
+      let run = 0
+      for (let y = 0; y < noteAreaH; y++) {
+        const d = ctx.getImageData(center, Math.round(y * dpr), 1, 1).data
+        const max = Math.max(d[0], d[1], d[2])
+        const min = Math.min(d[0], d[1], d[2])
+        const lum = 0.2126 * d[0] + 0.7152 * d[1] + 0.0722 * d[2]
+        if (max - min <= 14 && lum >= 40 && lum <= 150) {
+          run++
+          if (run > best) best = run
+        } else {
+          run = 0
+        }
+      }
+      return best
+    },
+    { i },
+  )
+
 /** 把播放头定位到 t 秒（拖动进度条：value 是 0–1 的分数） */
 const seekTo = async (t, duration) => {
   await page.locator('.transport__seek').evaluate((el, frac) => {
@@ -231,6 +273,18 @@ const seekTo = async (t, duration) => {
     el.dispatchEvent(new Event('change', { bubbles: true }))
   }, t / duration)
   await page.waitForTimeout(120)
+}
+
+/** 确保处于播放状态（seek 结束会自动恢复播放，盲目点击播放按钮会把它暂停） */
+const ensurePlaying = async () => {
+  const state = await page.locator('.transport__play').getAttribute('data-state')
+  if (state !== 'playing') await page.locator('.transport__play').click()
+}
+
+/** 确保处于暂停状态（seek 结束会自动恢复播放） */
+const ensurePaused = async () => {
+  const state = await page.locator('.transport__play').getAttribute('data-state')
+  if (state === 'playing') await page.locator('.transport__play').click()
 }
 
 const hoverPractice = async () => {
@@ -306,8 +360,19 @@ try {
   const bar = await brightestInPedal(2, geo.noteAreaH - 16)
   console.log('延音列最亮像素:', JSON.stringify(bar))
   if (!isGrayBar(bar)) problems.push(`延音列应出现银灰踏板条，实际 rgb(${bar.r},${bar.g},${bar.b})`)
-  const softCol = await brightestInPedal(0, geo.noteAreaH - 16)
-  if (isGrayBar(softCol)) problems.push('本曲无弱音踏板数据，弱音列不应出现踏板条')
+  // 本曲只有延音（CC64）与弱音（CC67）数据：两列都有事件条，中选择延音（CC66）列没有
+  const sustainBarPx = await longestBarRun(2)
+  const softBarPx = await longestBarRun(0)
+  const sostenutoBarPx = await longestBarRun(1)
+  console.log(
+    '各列踏板条最长连续段（弱音/选择延音/延音）:',
+    softBarPx,
+    sostenutoBarPx,
+    sustainBarPx,
+  )
+  if (sustainBarPx < 20) problems.push('延音列应出现踏板事件条')
+  if (softBarPx < 20) problems.push('弱音列应出现踏板事件条（本曲有 CC67 数据）')
+  if (sostenutoBarPx > 10) problems.push('本曲无选择延音踏板数据，中列不应出现踏板事件条')
 
   // 3.5 没有踏板事件的列：不应有任何"踏板轨道"背景（与画布普通背景一致）
   const midLane = await samplePedal(1, Math.round(geo.noteAreaH * 0.6))
@@ -418,7 +483,7 @@ try {
   const dimGlow = await samplePedal(2, 3)
   if (isSilverGlow(dimGlow)) problems.push('压暗（无需关注）的踏板条不应显示触发光晕')
 
-  // 6. 练习：切到"全部踏板"（自动全开全部轨）→ 踏板条恢复、播放冻结在和弦处等踏板
+  // 6. 练习：切到"全部踏板"（自动全开全部轨）
   await hoverPractice()
   await page.locator('.transport__practice-pedal').nth(2).click()
   await page.waitForTimeout(200)
@@ -433,41 +498,169 @@ try {
   if (activeRows !== 2) problems.push(`踏板练习应自动全开全部轨（2），实际 ${activeRows}`)
 
   await seekTo(0, duration)
-  await page.locator('.transport__play').click()
+
+  // 6.5 非判定位置误踩（尚未开始播放、没有闸门等待）：只红显、不阻塞
+  await page.evaluate(() => globalThis.__fakeAccess.input.control(67, 127))
+  await page.waitForTimeout(200)
+  const idleWrong = await samplePedal(0, 3)
+  console.log('非判定位置误踩弱音:', JSON.stringify(idleWrong))
+  if (!isRed(idleWrong)) problems.push('非判定位置踩错踏板也应显示红色光晕')
+  await page.evaluate(() => globalThis.__fakeAccess.input.control(67, 0))
+  await page.waitForTimeout(150)
+
+  // 7. 练习中「没踩踏板就不亮光晕」：按齐琴键、未踩任何踏板 → 冻结等待且判定线处无银白光晕
+  await ensurePlaying()
   await page.waitForTimeout(400)
-  // 只按和弦键（0.5s 处和弦含 Melody 60/64/67 与 Bass 36 四个音）、不踩踏板：
-  // 应冻结在和弦起点（0.5s）
   for (const pitch of [36, 60, 64, 67]) {
     await page.evaluate((p) => globalThis.__fakeAccess.input.note(p, true), pitch)
   }
   await page.waitForTimeout(700)
   const frozen = Number(await page.locator('.transport__seek').inputValue())
   const expectedFrozen = 0.5 / duration
-  console.log('按齐琴键但未踩踏板的位置:', frozen.toFixed(4), '期望≈', expectedFrozen.toFixed(4))
+  console.log('未踩踏板 + 按齐琴键的位置:', frozen.toFixed(4), '期望≈', expectedFrozen.toFixed(4))
   if (Math.abs(frozen - expectedFrozen) > 0.02)
-    problems.push(
-      `缺少踏板时应冻结在和弦起点 ${expectedFrozen.toFixed(3)}，实际 ${frozen.toFixed(3)}`,
-    )
+    problems.push(`缺少踏板时应冻结在 ${expectedFrozen.toFixed(3)}，实际 ${frozen.toFixed(3)}`)
+  const noGlow = await samplePedal(2, 3)
+  console.log('未踩踏板时判定线处:', JSON.stringify(noGlow))
+  if (isSilverGlow(noGlow))
+    problems.push('练习模式下没踩踏板时不应显示踏板光晕（光晕是踩下的反馈）')
 
-  // 7. 误踩弱音：踏板列判定线处红色光晕；松开消失
+  // 8. 现踩延音 → 放行；光晕作为「已踩下」的反馈亮起；松开即消失
+  await page.evaluate(() => globalThis.__fakeAccess.input.control(64, 127))
+  await page.waitForTimeout(400)
+  const heldGlow = await samplePedal(2, 3)
+  console.log('现踩后判定线处:', JSON.stringify(heldGlow))
+  if (!isSilverGlow(heldGlow)) problems.push('现踩踏板后应显示银白光晕（踩下反馈）')
+  await page.waitForTimeout(500)
+  const after = Number(await page.locator('.transport__seek').inputValue())
+  console.log('现踩延音后位置:', after.toFixed(4))
+  if (after <= expectedFrozen + 0.02) problems.push('现踩要求踏板后播放未继续推进')
+  await page.evaluate(() => globalThis.__fakeAccess.input.control(64, 0))
+  await page.waitForTimeout(200)
+  const releasedGlow = await samplePedal(2, 3)
+  if (isSilverGlow(releasedGlow)) problems.push('松开踏板后光晕应消失')
+
+  // 8.5 非判定位置误踩不阻塞：闸门已放行、播放正在推进时踩弱音 → 红显但位置照常前进
   await page.evaluate(() => globalThis.__fakeAccess.input.control(67, 127))
-  await page.waitForTimeout(200)
-  const wrongGlow = await samplePedal(0, 3)
-  console.log('误踩弱音判定线处:', JSON.stringify(wrongGlow))
-  if (!isRed(wrongGlow)) problems.push(`误踩弱音应显示红色光晕，实际 ${JSON.stringify(wrongGlow)}`)
-  const stillFrozen = Number(await page.locator('.transport__seek').inputValue())
-  if (stillFrozen > expectedFrozen + 0.02) problems.push('误踩踏板不应放行（播放不得推进）')
+  await page.waitForTimeout(150)
+  const movingWrong = await samplePedal(0, 3)
+  const posA = Number(await page.locator('.transport__seek').inputValue())
+  await page.waitForTimeout(500)
+  const posB = Number(await page.locator('.transport__seek').inputValue())
+  console.log(
+    '播放中误踩弱音（红显）:',
+    JSON.stringify(movingWrong),
+    '位置',
+    posA.toFixed(3),
+    '→',
+    posB.toFixed(3),
+  )
+  if (!isRed(movingWrong)) problems.push('播放中误踩踏板应显示红色光晕')
+  if (!(posB > posA)) problems.push('非判定位置误踩踏板不应阻塞播放')
   await page.evaluate(() => globalThis.__fakeAccess.input.control(67, 0))
-  await page.waitForTimeout(200)
-  const wrongCleared = await samplePedal(0, 3)
-  if (isRed(wrongCleared)) problems.push('松开误踩踏板后红色光晕应消失')
+  await page.waitForTimeout(150)
 
-  // 8. 踩下正确踏板（延音）：与琴键同时满足 → 放行，播放继续推进
+  // 8.7 边缘触发：闸门开始前就踩住延音 → 即使琴键已按住也不放行（一直踩着不能过）。
+  //     注意顺序：练习模式下按任意琴键会自动开始播放，所以必须先踩踏板、再按琴键。
+  await seekTo(0, duration)
+  await ensurePaused() // 闸门必须在踩踏板之前还没建立
+  for (const pitch of [36, 60, 64, 67]) {
+    await page.evaluate((p) => globalThis.__fakeAccess.input.note(p, false), pitch)
+  }
+  await page.evaluate(() => globalThis.__fakeAccess.input.control(64, 127)) // 闸门开始前就踩着
+  for (const pitch of [36, 60, 64, 67]) {
+    await page.evaluate((p) => globalThis.__fakeAccess.input.note(p, true), pitch) // 自动开始播放
+  }
+  await page.waitForTimeout(700)
+  const edgeFrozen = Number(await page.locator('.transport__seek').inputValue())
+  console.log(
+    '一直踩着 + 琴键已按住的位置:',
+    edgeFrozen.toFixed(4),
+    '期望≈',
+    expectedFrozen.toFixed(4),
+  )
+  if (Math.abs(edgeFrozen - expectedFrozen) > 0.02)
+    problems.push(
+      `一直踩着踏板不能通过：应冻结在 ${expectedFrozen.toFixed(3)}，实际 ${edgeFrozen.toFixed(3)}`,
+    )
+  await page.evaluate(() => globalThis.__fakeAccess.input.control(64, 0))
   await page.evaluate(() => globalThis.__fakeAccess.input.control(64, 127))
   await page.waitForTimeout(800)
-  const after = Number(await page.locator('.transport__seek').inputValue())
-  console.log('踩下延音踏板后位置:', after.toFixed(4))
-  if (after <= expectedFrozen + 0.02) problems.push('踩下要求踏板后播放未继续推进')
+  const edgeAfter = Number(await page.locator('.transport__seek').inputValue())
+  console.log('抬起再踩后位置:', edgeAfter.toFixed(4))
+  if (edgeAfter <= expectedFrozen + 0.02) problems.push('抬起再踩后播放未继续推进')
+  await page.evaluate(() => globalThis.__fakeAccess.input.control(64, 0))
+  await page.waitForTimeout(150)
+
+  // 8.9 长踏板持续期间：松开再踩不算错（长踏板与长音符同等处理）。
+  //     延音 2.9–4.5 的持续期间内，3.6s 处有一个只要求琴键的和弦闸门（单音 24）：
+  //     闸门等待时重踩延音 → 不红显、不阻塞（按对琴键即放行）
+  await seekTo(3.3, duration)
+  await ensurePaused() // 闸门必须在踩踏板之前还没建立
+  await page.evaluate(() => globalThis.__fakeAccess.input.control(64, 127)) // 一直踩着（2.9 起）
+  await ensurePlaying()
+  await page.waitForTimeout(900) // 落到 3.6 的和弦闸门 → 冻结等待琴键
+  const longPedalFrozen = Number(await page.locator('.transport__seek').inputValue())
+  const expectedLongPedalGate = 3.6 / duration
+  console.log(
+    '长踏板持续期间的和弦闸门位置:',
+    longPedalFrozen.toFixed(4),
+    '期望≈',
+    expectedLongPedalGate.toFixed(4),
+  )
+  if (Math.abs(longPedalFrozen - expectedLongPedalGate) > 0.02)
+    problems.push(
+      `长踏板持续期间内的和弦闸门应冻结在 3.6，实际 ${(longPedalFrozen * duration).toFixed(3)}`,
+    )
+  // 持续期间内松开再踩（真实演奏的换踩）：文件此刻仍踩着 → 不算误踩
+  await page.evaluate(() => globalThis.__fakeAccess.input.control(64, 0))
+  await page.evaluate(() => globalThis.__fakeAccess.input.control(64, 127))
+  await page.waitForTimeout(200)
+  const rePressedGlow = await samplePedal(2, 3)
+  console.log('持续期间内松开再踩（延音列）:', JSON.stringify(rePressedGlow))
+  if (isRed(rePressedGlow)) problems.push('踏板持续期间内松开再踩不应判为误踩（红色光晕）')
+  if (!isSilverGlow(rePressedGlow)) problems.push('持续期间内重踩后应显示银白光晕（踩下反馈）')
+  // 不阻塞：按对该和弦要求的琴键即放行
+  await page.evaluate(() => globalThis.__fakeAccess.input.note(24, true))
+  await page.waitForTimeout(600)
+  const afterLongPedal = Number(await page.locator('.transport__seek').inputValue())
+  console.log('持续期间内重踩后按对琴键的位置:', afterLongPedal.toFixed(4))
+  if (!(afterLongPedal > longPedalFrozen + 0.02))
+    problems.push('踏板持续期间内重踩不应阻塞：按对要求的琴键后播放应继续推进')
+  await page.evaluate(() => globalThis.__fakeAccess.input.note(24, false))
+  await page.evaluate(() => globalThis.__fakeAccess.input.control(64, 0))
+  await page.waitForTimeout(150)
+
+  // 9. 独立踏板闸门：没有音符要按的时刻（弱音 4.2s，离最近音符 0.6s）也会冻结等待
+  await seekTo(3.8, duration)
+  await ensurePlaying()
+  await page.waitForTimeout(900)
+  const pedalGatePos = Number(await page.locator('.transport__seek').inputValue())
+  const expectedPedalGate = 4.2 / duration
+  console.log(
+    '独立踏板闸门处的位置:',
+    pedalGatePos.toFixed(4),
+    '期望≈',
+    expectedPedalGate.toFixed(4),
+  )
+  if (Math.abs(pedalGatePos - expectedPedalGate) > 0.02)
+    problems.push(
+      `没有音符要按的踏板时刻也应冻结等待（期望 ${expectedPedalGate.toFixed(3)}，实际 ${pedalGatePos.toFixed(3)}）`,
+    )
+  const gateGlowBefore = await samplePedal(0, 3)
+  console.log('独立踏板闸门处（未踩）:', JSON.stringify(gateGlowBefore))
+  if (isSilverGlow(gateGlowBefore)) problems.push('独立踏板闸门未踩下时不应显示光晕')
+  await page.evaluate(() => globalThis.__fakeAccess.input.control(67, 127))
+  await page.waitForTimeout(400)
+  const gateGlowAfter = await samplePedal(0, 3)
+  console.log('独立踏板闸门处（已现踩）:', JSON.stringify(gateGlowAfter))
+  if (!isSilverGlow(gateGlowAfter)) problems.push('现踩后独立闸门处应显示银白光晕')
+  await page.waitForTimeout(400)
+  const afterPedalGate = Number(await page.locator('.transport__seek').inputValue())
+  console.log('现踩弱音后位置:', afterPedalGate.toFixed(4))
+  if (afterPedalGate <= expectedPedalGate + 0.02)
+    problems.push('现踩要求踏板后（独立闸门）播放未继续推进')
+  await page.evaluate(() => globalThis.__fakeAccess.input.control(67, 0))
 
   if (problems.length === 0) {
     console.log('\n✅ 踏板轨道与踏板练习探针全部通过')

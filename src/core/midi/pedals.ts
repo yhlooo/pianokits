@@ -268,22 +268,82 @@ export function isSegmentFocused(seg: PedalSegment, focus: PedalFocus): boolean 
 }
 
 /**
- * 和弦时刻要求踩下的踏板：分段与 `[time, time + windowSec]` 有交集
- * （覆盖和弦起点，或在此窗口内踩下）时，该踏板即本和弦的要求。
- * 判定只看**当前是否踩下**（不要求新鲜重踩），因此早已踩住的长踏板天然满足。
+ * 时刻 `at` 时**关注范围内、文件正处于踩下状态**的踏板（踩下区间的持续期间：`start ≤ at < end`，
+ * 曲终未抬起的段一直踩着）。
+ *
+ * 练习判定用它把**长踏板**与**长音符**同等对待（设计文档
+ * 20260912-midi-pedal-lane-and-practice.md §3.5 的 2026-09-12 修订）：持续期间内松开再踩、
+ * 或本来就没踩时补踩，都是在"文件正踩着"的时刻踩下 → 正确，不记误踩。
+ * 与 `isSegmentFocused` 同一关注范围口径（模式 ∩ 练习通道），因此未被压暗的踏板才可能算"踩着"。
  */
-export function requiredPedalsAt(
+export function pedalsDownAt(
   segments: readonly PedalSegment[],
-  time: number,
+  focus: PedalFocus,
+  at: number,
+): Set<PedalId> {
+  const down = new Set<PedalId>()
+  for (const seg of segments) {
+    if (seg.start <= at && at < seg.end && isSegmentFocused(seg, focus)) down.add(seg.pedalId)
+  }
+  return down
+}
+
+/**
+ * 同一次踩下判为「同一瞬间」的容差（秒）：与和弦分组的 CHORD_EPSILON_SEC 同量级，
+ * 用于把同一时刻踩下的多个踏板并成一个要求。
+ */
+export const PEDAL_EVENT_EPSILON_SEC = 0.03
+
+/** 练习闸门点里的踏板要求（由 `mergePedalGates` 产出） */
+export interface PedalGatePoint {
+  /** 判定时刻：合并到和弦时 = 和弦起点，独立踏板闸门 = 踏板踩下时刻 */
+  start: number
+  /** 本闸门要求「现踩」的踏板（边缘触发） */
+  pedals: PedalId[]
+}
+
+/**
+ * 把「关注范围内的踏板踩下事件」并入和弦时间轴，得到练习闸门点（设计文档
+ * 20260912-midi-pedal-lane-and-practice.md §3.5）：
+ * - 与某个和弦起点相差 ≤ `windowSec` 的踏板事件 → **并入该和弦闸门**（与琴键一起踩，
+ *   判定时刻取和弦起点）；
+ * - 其余踏板事件各自成为**独立闸门**——踏板与按键同等地位：没有音符要按的时刻也能单独判定；
+ * - 同一瞬间（≤ `PEDAL_EVENT_EPSILON_SEC`）踩下的多个踏板并成同一个要求。
+ *
+ * 返回按 start 排序；不含踏板要求的和弦闸门也会保留（`pedals` 为空数组）。
+ */
+export function mergePedalGates(
+  chordStarts: readonly number[],
+  segments: readonly PedalSegment[],
   focus: PedalFocus,
   windowSec: number,
-): ReadonlySet<PedalId> {
-  const required = new Set<PedalId>()
-  for (const seg of segments) {
-    if (seg.start > time + windowSec) break // 按 start 排序，越界即止
-    if (seg.end <= time) continue
-    if (!isSegmentFocused(seg, focus)) continue
-    required.add(seg.pedalId)
+): PedalGatePoint[] {
+  // 1) 关注范围内的踏板踩下事件 → 时刻 + 该时刻踩下的踏板
+  const pedalDowns: { start: number; pedals: PedalId[] }[] = []
+  if (focus.pedals.size > 0) {
+    for (const seg of segments) {
+      if (!isSegmentFocused(seg, focus)) continue
+      const last = pedalDowns[pedalDowns.length - 1]
+      if (last !== undefined && seg.start - last.start <= PEDAL_EVENT_EPSILON_SEC) {
+        if (!last.pedals.includes(seg.pedalId)) last.pedals.push(seg.pedalId)
+        continue
+      }
+      pedalDowns.push({ start: seg.start, pedals: [seg.pedalId] })
+    }
   }
-  return required
+
+  // 2) 和弦闸门 + 并入靠近的踏板事件；远离和弦的踏板事件独立成闸门
+  const gates: PedalGatePoint[] = chordStarts.map((start) => ({ start, pedals: [] }))
+  for (const down of pedalDowns) {
+    const near = gates.find((g) => Math.abs(g.start - down.start) <= windowSec)
+    if (near === undefined) {
+      gates.push({ start: down.start, pedals: [...down.pedals] })
+      continue
+    }
+    for (const pedal of down.pedals) {
+      if (!near.pedals.includes(pedal)) near.pedals.push(pedal)
+    }
+  }
+  gates.sort((a, b) => a.start - b.start)
+  return gates
 }

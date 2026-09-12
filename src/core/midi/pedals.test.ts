@@ -12,10 +12,11 @@ import {
   isSegmentFocused,
   pedalChannelScope,
   pedalFocus,
+  mergePedalGates,
   pedalLevelPercent,
   pedalMode,
+  pedalsDownAt,
   pedalsForMode,
-  requiredPedalsAt,
 } from './pedals'
 
 const state = (
@@ -241,33 +242,53 @@ describe('pedalChannelScope / pedalFocus（归属规则）', () => {
   })
 })
 
-describe('requiredPedalsAt / isSegmentFocused', () => {
+describe('mergePedalGates / isSegmentFocused（练习闸门）', () => {
   const segments = buildPedalSegments([
     pedalEvent(1, 64, 127, 0, 0), // 1–3 秒踩着延音
     pedalEvent(3, 64, 0, 0, 0),
-    pedalEvent(5, 67, 127, 0, 0), // 5 秒起弱音（与练习轨通道无关的用例另测）
+    pedalEvent(5, 67, 127, 0, 0), // 5 秒起弱音
   ])
   const tracks = [track(0, 0)]
+  const focusAll = () => pedalFocus(segments, tracks, new Set([0]), 'all')!
 
-  it('覆盖和弦起点的长踏板算要求；和弦后 120ms 内新踩下的也算', () => {
-    const focus = pedalFocus(segments, tracks, new Set([0]), 'all')!
-    expect([...requiredPedalsAt(segments, 2, focus, 0.12)]).toEqual(['sustain'])
-    expect([...requiredPedalsAt(segments, 4.95, focus, 0.12)]).toEqual(['soft'])
+  it('踏板踩下事件并入相近的和弦闸门；远离和弦的独立成闸门（踏板与按键同等地位）', () => {
+    // 和弦 1.1s（与踏板 1.0s 相差 0.1 ≤ 窗口）→ 并入；和弦 3.5s 与踏板 5.0s 相差 1.5 → 独立
+    const gates = mergePedalGates([1.1, 3.5], segments, focusAll(), 0.2)
+    expect(gates).toEqual([
+      { start: 1.1, pedals: ['sustain'] },
+      { start: 3.5, pedals: [] },
+      { start: 5.0, pedals: ['soft'] },
+    ])
   })
 
-  it('和弦前已抬起 / 窗口外才踩下的踏板不算要求', () => {
-    const focus = pedalFocus(segments, tracks, new Set([0]), 'all')!
-    expect([...requiredPedalsAt(segments, 3.5, focus, 0.12)]).toEqual([])
-    expect([...requiredPedalsAt(segments, 4.5, focus, 0.12)]).toEqual([])
+  it('窗口外的和弦保持无踏板要求；没有和弦时全部踏板事件都独立成闸门', () => {
+    expect(mergePedalGates([2.5], segments, focusAll(), 0.2)).toEqual([
+      { start: 1.0, pedals: ['sustain'] },
+      { start: 2.5, pedals: [] },
+      { start: 5.0, pedals: ['soft'] },
+    ])
+    expect(mergePedalGates([], segments, focusAll(), 0.2)).toEqual([
+      { start: 1.0, pedals: ['sustain'] },
+      { start: 5.0, pedals: ['soft'] },
+    ])
   })
 
-  it('关注范围外的踏板不算要求（练习轨通道无踏板 / 模式外）', () => {
-    // 两轨都有音符（通道 1 / 0），踏板归属通道 0 → 练通道 1 的轨时无踏板要求
+  it('同一瞬间踩下的多个踏板并成同一个要求', () => {
+    const both = buildPedalSegments([pedalEvent(1, 64, 127, 0, 0), pedalEvent(1.01, 67, 127, 0, 0)])
+    expect(mergePedalGates([], both, pedalFocus(both, tracks, new Set([0]), 'all')!, 0.2)).toEqual([
+      { start: 1, pedals: ['sustain', 'soft'] },
+    ])
+  })
+
+  it('关注范围外的踏板不进闸门（练习轨通道无踏板 / 模式外）', () => {
+    // 两轨都有音符（通道 1 / 0），踏板归属通道 0 → 练通道 1 的轨时没有踏板闸门
     const other = [track(0, 1), track(1, 0)]
     const noMatch = pedalFocus(segments, other, new Set([0]), 'all')!
-    expect([...requiredPedalsAt(segments, 2, noMatch, 0.12)]).toEqual([])
+    expect(mergePedalGates([2], segments, noMatch, 0.2)).toEqual([{ start: 2, pedals: [] }])
     const sustainOnly = pedalFocus(segments, tracks, new Set([0]), 'sustain')!
-    expect([...requiredPedalsAt(segments, 4.95, sustainOnly, 0.12)]).toEqual([])
+    expect(mergePedalGates([], segments, sustainOnly, 0.2)).toEqual([
+      { start: 1, pedals: ['sustain'] },
+    ])
   })
 
   it('isSegmentFocused：踏板类型与通道都在范围内才算关注', () => {
@@ -276,5 +297,31 @@ describe('requiredPedalsAt / isSegmentFocused', () => {
     expect(isSegmentFocused(sustainSeg, focus)).toBe(true)
     expect(isSegmentFocused(softSeg, focus)).toBe(false)
     expect(isSegmentFocused({ ...sustainSeg, channel: 1 }, focus)).toBe(false)
+  })
+})
+
+describe('pedalsDownAt（踩下区间的持续期间）', () => {
+  const segments = buildPedalSegments([
+    pedalEvent(1, 64, 127, 0, 0), // 延音 1–3 秒
+    pedalEvent(3, 64, 0, 0, 0),
+    pedalEvent(4, 67, 127, 0, 0), // 弱音 4 秒起（曲终未抬起 → 一直踩着）
+  ])
+  const focusAll = pedalFocus(segments, [track(0, 0)], new Set([0]), 'all')!
+
+  it('持续期间内（含踩下时刻、不含抬起时刻）为「文件正踩着」', () => {
+    expect([...pedalsDownAt(segments, focusAll, 0.9)]).toEqual([])
+    expect([...pedalsDownAt(segments, focusAll, 1)]).toEqual(['sustain']) // 踩下时刻
+    expect([...pedalsDownAt(segments, focusAll, 2.5)]).toEqual(['sustain'])
+    expect([...pedalsDownAt(segments, focusAll, 3)]).toEqual([]) // 抬起时刻起不再踩着
+    expect([...pedalsDownAt(segments, focusAll, 4)]).toEqual(['soft'])
+    expect([...pedalsDownAt(segments, focusAll, 99)]).toEqual(['soft']) // 曲终未抬起
+  })
+
+  it('关注范围外的踏板/通道不算「踩着」（与压暗同一口径）', () => {
+    const sustainOnly = pedalFocus(segments, [track(0, 0)], new Set([0]), 'sustain')!
+    expect([...pedalsDownAt(segments, sustainOnly, 4.5)]).toEqual([]) // 弱音不在模式内
+    const noMatch = pedalFocus(segments, [track(0, 1), track(1, 0)], new Set([0]), 'all')!
+    expect([...pedalsDownAt(segments, noMatch, 2)]).toEqual([]) // 练习轨通道与踏板通道无交集
+    expect([...pedalsDownAt(segments, { pedals: new Set(), channels: null }, 2)]).toEqual([])
   })
 })

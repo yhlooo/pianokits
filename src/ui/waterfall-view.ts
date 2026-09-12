@@ -82,6 +82,8 @@ export interface WaterfallViewCallbacks {
 export interface WaterfallFeedback {
   held: ReadonlySet<number>
   wrong: ReadonlySet<number>
+  /** 当前踩下的踏板（实际状态）：练习中踏板光晕只作为「踩下」的反馈，没踩就不亮 */
+  heldPedals: ReadonlySet<PedalId>
   /** 误踩的踏板（红晕，与按错键同语义；松开即清除） */
   wrongPedals: ReadonlySet<PedalId>
 }
@@ -459,29 +461,43 @@ export class WaterfallView implements View {
 
   /**
    * 判定线（= 键盘上沿）处的踏板光晕：
-   * - 银白：文件踏板正在踩下（关注范围内）——接触瞬间亮起，抬起后 120ms 渐隐；
-   * - 红色：练习等待期间误踩的踏板（与按错键同色，位置与银白光晕完全一致）。
+   * - **非练习（pedalFocus === null）**：银白光晕由**文件踏板事件**驱动——条底接触判定线的那段
+   *   踩下期间常亮，抬起后 120ms 渐隐（播放时用来看"谱面什么时候踩了踏板"）；
+   * - **练习中**：光晕只作为**实际踩下**的反馈（`feedback.heldPedals`）——没踩就不亮，
+   *   否则"到了判定位置就是踩下状态"会误导（2026-09-12 用户口径）；无需关注的踏板不反馈；
+   * - 红色：误踩的踏板（占同位置，两种模式都画）。
    */
   private drawPedalGlows(w: number, noteAreaH: number): void {
-    const wrongPedals = this.feedback?.wrongPedals
+    const feedback = this.feedback
+    const wrongPedals = feedback?.wrongPedals
+    const focus = this.pedalFocus
     if (this.pedalSegments.length === 0 && (wrongPedals === undefined || wrongPedals.size === 0)) {
       return
     }
     const cols = this.pedalColumns(w)
-    const now = this.playhead
 
-    for (const seg of this.pedalSegments) {
-      if (seg.start > now) break
-      if (!this.pedalFocused(seg)) continue
-      let strength: number
-      if (now <= seg.end) {
-        strength = 1
-      } else if (now - seg.end < PEDAL_GLOW_FADE_SEC) {
-        strength = 1 - (now - seg.end) / PEDAL_GLOW_FADE_SEC
-      } else {
-        continue
+    if (focus === null) {
+      // 非练习：光晕由文件踏板事件驱动
+      const now = this.playhead
+      for (const seg of this.pedalSegments) {
+        if (seg.start > now) break
+        if (!this.pedalFocused(seg)) continue
+        let strength: number
+        if (now <= seg.end) {
+          strength = 1
+        } else if (now - seg.end < PEDAL_GLOW_FADE_SEC) {
+          strength = 1 - (now - seg.end) / PEDAL_GLOW_FADE_SEC
+        } else {
+          continue
+        }
+        this.drawPedalGlow(cols[pedalColumn(seg.pedalId)], noteAreaH, PEDAL_GLOW_RGB, strength)
       }
-      this.drawPedalGlow(cols[pedalColumn(seg.pedalId)], noteAreaH, PEDAL_GLOW_RGB, strength)
+    } else if (feedback !== null) {
+      // 练习中：只反馈实际踩下的踏板（参与判定的才反馈；误踩由红晕表达）
+      for (const id of feedback.heldPedals) {
+        if (!focus.pedals.has(id) || feedback.wrongPedals.has(id)) continue
+        this.drawPedalGlow(cols[pedalColumn(id)], noteAreaH, PEDAL_GLOW_RGB, 1)
+      }
     }
 
     // 误踩红晕最后画：覆盖同列银光，位置一致

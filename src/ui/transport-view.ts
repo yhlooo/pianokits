@@ -1,4 +1,5 @@
 import type { MidiUiState, PracticeUiState } from '../core/practice'
+import type { PedalPracticeMode } from '../core/midi/pedals'
 import type { TransportState } from '../core/transport'
 import { el, formatTime } from './dom'
 import {
@@ -36,10 +37,19 @@ export interface TransportViewCallbacks {
   onPracticeToggle(): void
   /** 点击悬浮菜单中的某轨：开关该轨练习（可多选） */
   onPracticeTrack(index: number): void
+  /** 切换踏板练习模式（三选一单选框：无踏板 / 延音 / 全部） */
+  onPedalPractice(mode: PedalPracticeMode): void
 }
 
 const RING_R = 15
 const RING_C = 2 * Math.PI * RING_R
+
+/** 踏板练习三选一（数组顺序即显示顺序；off = 关，默认） */
+const PEDAL_MODE_OPTIONS: readonly { mode: PedalPracticeMode; label: string }[] = [
+  { mode: 'off', label: '关' },
+  { mode: 'sustain', label: '仅延音踏板' },
+  { mode: 'all', label: '全部踏板' },
+]
 
 /** 底部播放坞：上沿通栏进度条 + 控制行（播放/暂停/停止、时间、音量、瀑布/乐谱视图开关、
  *  MIDI 连接、练习模式）；顶部只保留外壳栏，不放任何控制按钮 */
@@ -76,6 +86,8 @@ export class TransportView implements View {
     number,
     { item: HTMLButtonElement; name: HTMLSpanElement }
   >()
+  /** 踏板练习模式 → 单选框（三选一，菜单内原地同步选中/禁用态） */
+  private readonly pedalRadios = new Map<PedalPracticeMode, HTMLInputElement>()
   private readonly ring: SVGSVGElement
   private readonly ringCircle: SVGCircleElement
   private seeking = false
@@ -258,12 +270,40 @@ export class TransportView implements View {
       { class: 'transport__practice-menu__empty' },
       '载入曲目后，这里可以按轨开启练习',
     )
+    // 踏板：三选一单选框（默认"关"）；判定与压暗由控制器/瀑布流处理
+    const pedalRows = PEDAL_MODE_OPTIONS.map(({ mode, label }) => {
+      const input = el('input', {
+        type: 'radio',
+        name: 'pedal-practice',
+        value: mode,
+        class: 'transport__practice-radio',
+      })
+      input.disabled = true
+      input.addEventListener('change', () => {
+        if (input.checked) cbs.onPedalPractice(mode)
+      })
+      this.pedalRadios.set(mode, input)
+      return el(
+        'label',
+        { class: 'transport__practice-pedal' },
+        input,
+        el('span', { class: 'transport__practice-pedal__label' }, label),
+      )
+    })
+    const pedalSection = el(
+      'div',
+      { class: 'transport__practice-menu__pedals' },
+      el('div', { class: 'transport__practice-menu__subtitle' }, '踏板'),
+      ...pedalRows,
+    )
     const practiceMenu = el(
       'div',
       { class: 'transport__practice-menu', role: 'menu' },
-      el('div', { class: 'transport__practice-menu__title' }, '分轨练习'),
+      el('div', { class: 'transport__practice-menu__title' }, '练习音轨'),
+      el('div', { class: 'transport__practice-menu__desc' }, '仅对选择开启的音轨进行按键判定'),
       this.practiceMenuList,
       this.practiceMenuEmpty,
+      pedalSection,
     )
     this.practiceWrap = el(
       'div',
@@ -484,6 +524,10 @@ export class TransportView implements View {
       row.item.disabled = !connected
       row.item.title = connected ? '开关该轨练习' : '需先连接 MIDI 键盘'
     }
+    for (const input of this.pedalRadios.values()) {
+      input.disabled = !connected
+      input.title = connected ? '切换踏板判定范围' : '需先连接 MIDI 键盘'
+    }
     this.refreshPracticeTitle()
   }
 
@@ -543,12 +587,17 @@ export class TransportView implements View {
   }
 
   /**
-   * 同步分轨练习状态（设计文档 §4.1）：任一轨开启时按钮琥珀高亮；
-   * 悬浮菜单行同步轨名 / 瀑布流颜色图例 / 开关圆点，未连接时行禁用但菜单仍可查看。
+   * 同步分轨练习状态（设计文档 20260906-…-and-practice.md §4.1、
+   * 20260912-midi-pedal-lane-and-practice.md §3.6）：任一轨开启时按钮琥珀高亮；
+   * 悬浮菜单行同步轨名 / 瀑布流颜色图例 / 开关圆点，踏板练习单选组同步选中态；
+   * 未连接时行与单选框禁用但菜单仍可查看。
    */
   setPractice(ui: PracticeUiState): void {
     this.practiceUi = ui
     this.practiceBtn.classList.toggle('is-active', ui.active)
+    for (const [mode, input] of this.pedalRadios) {
+      input.checked = ui.pedalMode === mode
+    }
     const seen = new Set<number>()
     for (const t of ui.tracks) {
       seen.add(t.index)

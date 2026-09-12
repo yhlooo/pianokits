@@ -1,5 +1,14 @@
 import type { Note, Song } from './model'
 import type { AudioEngine, ScheduledNote } from './engine/types'
+import {
+  buildPedalSegments,
+  pedalFocus,
+  requiredPedalsAt,
+  type PedalFocus,
+  type PedalId,
+  type PedalPracticeMode,
+  type PedalSegment,
+} from './midi/pedals'
 
 export type TransportState = 'empty' | 'ready' | 'playing' | 'paused'
 
@@ -34,6 +43,13 @@ const LATENCY_SEC = 0.015
  */
 export const CHORD_EPSILON_SEC = 0.03
 
+/**
+ * 踏板要求和弦窗口（秒）：和弦起点后此时长内「仍踩着」或「新踩下」的踏板，计为该和弦的要求
+ * （设计文档 20260912-midi-pedal-lane-and-practice.md §3.5）。120ms 约等于 120bpm 的 32 分音符，
+ * 足以容下真实演奏中踏板略早/略晚于和弦的偏移，又不会跨到下一个和弦。
+ */
+export const PEDAL_CHORD_WINDOW_SEC = 0.12
+
 /** 练习模式等待中的和弦（进入提前触发窗口后回调、到达判定线冻结直到放行） */
 export interface PracticeChord {
   /** 和弦起点（秒） */
@@ -46,6 +62,16 @@ export interface PracticeChord {
    * 不算错（已触发的长音符重复按、分轨练习中非练习轨音符），也不重复触发（见 chord-gate）。
    */
   excused: ReadonlySet<number>
+  /**
+   * 本和弦要求踩下的踏板（判定范围内、文件在该和弦处处于踩下状态；见 requiredPedalsAt）。
+   * 练习模式（踏板练习开启）下，全部踩着才放行。
+   */
+  requiredPedals: ReadonlySet<PedalId>
+  /**
+   * 本和弦参与判定的踏板（练习模式 ∩ 练习范围）：等待期间新踩这些踏板而非要求踏板 → 误踩红显
+   * 并阻止放行；不在集合内的踏板完全忽略（不判定、不标红）。
+   */
+  judgedPedals: ReadonlySet<PedalId>
 }
 
 type StateListener = (state: TransportState) => void
@@ -56,6 +82,10 @@ type PracticeChordListener = (chord: PracticeChord | null) => void
  *
  * 唯一时钟：AudioContext.currentTime。position = now - offset。
  * 调度器只负责声音准时；视觉由视图每帧读 position（不依赖任何音频回调）。
+ *
+ * 练习模式（分轨门控 + 踏板要求，设计文档 20260906-…-and-practice.md §3.3、
+ * 20260912-midi-pedal-lane-and-practice.md §3.5）：门控和弦携带参与判定的音符、豁免音高
+ * 与踏板要求；走带在判定线冻结直到 ChordGate 放行，踏板关注范围经 `pedalFocus` 外发。
  */
 export class Transport {
   private song: Song | null = null
@@ -82,6 +112,12 @@ export class Transport {
    * 与门控和弦同 onset 时随和弦一起等待/放行，其余照常排期播放。
    */
   private gatedTracks = new Set<number>()
+  /** 踏板练习模式（off/sustain/all；设计文档 20260912-midi-pedal-lane-and-practice.md §3.5） */
+  private pedalMode: PedalPracticeMode = 'off'
+  /** 曲目踏板踩下区间（load 时构建；门控和弦的踏板要求与瀑布流共用同一数据） */
+  private pedalSegments: PedalSegment[] = []
+  /** 当前踏板关注范围缓存（门控集合/踏板模式/曲目变化时重算）；null = 练习未开启 */
+  private pedalFocusCache: PedalFocus | null = null
   /** 练习模式等待中的和弦（仅含门控轨音符）；null = 未等待 */
   private waitingChord: PracticeChord | null = null
   /** 当前等待的和弦是否冻结视觉位置（position 恒停在和弦起点，音符条底贴判定线） */
@@ -159,6 +195,8 @@ export class Transport {
     this.cancelWaiting()
     this.song = song
     this.notes = song.notes
+    this.pedalSegments = buildPedalSegments(song.pedalEvents)
+    this.applyPedalFocus()
     this._duration = song.duration
     this.pausedAt = 0
     this.offset = this.host.now()
@@ -271,6 +309,26 @@ export class Transport {
   }
 
   /**
+   * 当前踏板关注范围（练习模式下踏板轨道的高亮/判定范围；设计文档 §3.5）：
+   * null = 分轨练习未开启；非 null 但 pedals 为空 = 练习中但不判定任何踏板
+   * （踏板练习为 off，或练习轨通道内没有踏板数据）——此时踏板轨道全部压暗、和弦无踏板要求。
+   */
+  get pedalFocus(): PedalFocus | null {
+    return this.pedalFocusCache
+  }
+
+  /**
+   * 设置踏板练习模式（off/sustain/all）：关注范围变化会取消当前等待（放行条件已变），
+   * 下一 tick 按新范围重新进入等待；无变化时为空操作。
+   */
+  setPedalPracticeMode(mode: PedalPracticeMode): void {
+    if (this.pedalMode === mode) return
+    this.pedalMode = mode
+    this.cancelWaiting()
+    this.applyPedalFocus()
+  }
+
+  /**
    * 设置分轨练习门控集合（设计文档 20260906-midi-keyboard-and-practice.md §3.3）：
    * - 进入/调整集合：清掉已排期与发声中的音符，取消当前等待，两个流指针按
    *   “第一个 start ≥ 当前位置”重定位（放弃已开始的音符，同全局练习进入语义）；
@@ -281,6 +339,7 @@ export class Transport {
     const next = new Set(tracks)
     if (this.sameSet(this.gatedTracks, next)) return
     this.gatedTracks = next
+    this.applyPedalFocus()
     if (next.size === 0) {
       // 退出：取消等待，正常流从第一个未排期音符继续（已排期的自由轨音符不重复发声）
       this.cancelWaiting()
@@ -336,6 +395,8 @@ export class Transport {
     this.practiceChordCb = null
     this.waitingChord = null
     this.waitingFrozen = false
+    this.pedalSegments = []
+    this.pedalFocusCache = null
     this.setState('empty')
   }
 
@@ -460,9 +521,32 @@ export class Transport {
       start: first.start,
       notes: group,
       excused: this.excusedPitches(first.start, until),
+      requiredPedals: this.chordRequiredPedals(first.start),
+      judgedPedals: this.pedalFocusCache?.pedals ?? new Set(),
     }
     this.waitingFrozen = false
     this.practiceChordCb?.(this.waitingChord)
+  }
+
+  /** 本和弦要求的踏板（关注范围内的文件踩下状态；设计文档 §3.5） */
+  private chordRequiredPedals(start: number): ReadonlySet<PedalId> {
+    const focus = this.pedalFocusCache
+    if (focus === null || focus.pedals.size === 0) return new Set()
+    return requiredPedalsAt(this.pedalSegments, start, focus, PEDAL_CHORD_WINDOW_SEC)
+  }
+
+  /** 重算踏板关注范围（曲目/门控集合/踏板模式变化时；瀑布流经 pedalFocus 读取同一结论） */
+  private applyPedalFocus(): void {
+    if (this.song === null) {
+      this.pedalFocusCache = null
+      return
+    }
+    this.pedalFocusCache = pedalFocus(
+      this.pedalSegments,
+      this.song.tracks,
+      this.gatedTracks,
+      this.pedalMode,
+    )
   }
 
   /**

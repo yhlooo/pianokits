@@ -88,6 +88,33 @@
 
 （来源：MIDI Manufacturers Association《Standard MIDI Files 1.0》附录）
 
+### 1.8 轨道（MTrk）与通道（channel）的关系
+
+> 以下引文获取日期 **2026-09-12**，取自《Standard MIDI Files 1.0 July, 1988》规范全文的公开副本
+> （<http://gnese.free.fr/Projects/KaraokeTime/Fichiers/format5.html>，与 §1 的官方 RP-001 PDF 内容一致）。
+
+> A track chunk contains a sequential stream of MIDI data which **may contain information for up to
+> 16 MIDI channels**. The concepts of multiple tracks, multiple MIDI outputs, patterns, sequences,
+> and songs may all be implemented using several track chunks.
+
+> `<event> = <MIDI event> | <sysex event> | <meta-event>`
+> `<MIDI event>` **is any MIDI channel message.** Running status is used: status bytes of MIDI
+> channel messages may be omitted if the preceding event is a MIDI channel message with the same status.
+
+> **FF 20 01 cc MIDI Channel Prefix**
+> The MIDI channel (0-15) contained in this event may be used to associate a MIDI channel with all
+> events which follow, including System Exclusive and meta-events. This channel is "effective" until
+> the next normal MIDI event (which contains a channel) or the next MIDI Channel Prefix meta-event.
+> **If MIDI channels refer to "tracks", this message may help jam several tracks into a format 0 file**,
+> keeping their non-MIDI data associated with a track.
+
+Header 块对 format 0 的描述（§1.3 引文之外）：
+
+> `0` — the file contains a **single multi-channel track**
+
+（即：SMF 规范中「轨道」是时间流容器，可承载最多 16 个通道的事件；通道号在每条通道消息
+（如 CC 的状态字节 `1011nnnn`）里，而非轨道属性。「通道前缀」元事件的存在本身就说明二者是两个维度。）
+
 ## 2. JS MIDI 解析库：README / 源码摘录
 
 ### 2.1 @tonejs/midi
@@ -230,6 +257,48 @@ npm 注册表数据（registry.npmjs.org，2026-09-05 查询）：
 - unpackedSize：287,668 字节
 - 周下载量：64,094（统计区间 2026-08-23 ~ 2026-08-29，api.npmjs.org）
 - GitHub 仓库：1,001 stars，最近一次 push `2023-07-19`
+
+#### 2.1.1 CC（踏板）事件的通道与值域（源码摘录，2026-09-12 补充）
+
+- 版本：`2.0.28`（node_modules 实测），源码 `dist/Track.js`、`dist/ControlChange.d.ts`、`dist/Encode.js`。
+
+`Track.channel` 由轨内 **noteOn** 推导（取最后一个 noteOn 的通道；无音符轨保持默认 0），CC 不参与：
+
+> ```javascript
+> // Set the channel based on the note.
+> this_1.channel = currentNote.channel
+> ```
+
+CC 事件的通道在 `addCC()` 时被丢弃（`midi-file` 的 `MidiControllerEvent.channel` 未被保留），
+且值被归一化为 0–1：
+
+> ```javascript
+> controlChanges.forEach(function (event) {
+>   _this.addCC({
+>     number: event.controllerType,
+>     ticks: event.absoluteTime,
+>     value: event.value / 127,
+>   })
+> })
+> ```
+
+`ControlChangeInterface` 只有 `number / ticks / time / value`，**无 channel**：
+
+> ```typescript
+> export interface ControlChangeInterface {
+>   number: number
+>   ticks: number
+>   time: number
+>   value: number
+> }
+> ```
+
+写出（`dist/Encode.js`）时按 127 还原：
+
+> ```javascript
+> controllerType: cc.number,
+> value: Math.floor(cc.value * 127),
+> ```
 
 ### 2.2 midi-file
 

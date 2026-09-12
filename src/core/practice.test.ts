@@ -7,7 +7,7 @@ import { Transport, type TransportHost } from './transport'
 import {
   PracticeController,
   practiceTracksOf,
-  type KeyFeedback,
+  type PracticeFeedback,
   type PracticeUiState,
 } from './practice'
 
@@ -75,7 +75,7 @@ function makeSong(): Song {
       { index: 2, name: 'Drums', channel: 9, instrument: 0, percussion: true, noteCount: 5 },
     ],
     notes,
-    sustainEvents: [],
+    pedalEvents: [],
   }
 }
 
@@ -132,16 +132,28 @@ function stubNavigator(request: () => Promise<FakeAccess>): void {
 }
 
 /** 反馈快照（Set → 排序数组，便于断言） */
-const snap = (fb: KeyFeedback | null) =>
+const snap = (fb: PracticeFeedback | null) =>
   fb === null
     ? null
-    : { held: [...fb.held].sort((a, b) => a - b), wrong: [...fb.wrong].sort((a, b) => a - b) }
+    : {
+        held: [...fb.held].sort((a, b) => a - b),
+        wrong: [...fb.wrong].sort((a, b) => a - b),
+        wrongPedals: [...fb.wrongPedals].sort(),
+      }
 
 /** 练习 UI 状态快照 */
 const snapUi = (ui: PracticeUiState) => ({
   tracks: ui.tracks.map((t) => ({ ...t })),
   active: ui.active,
   allOn: ui.allOn,
+  pedalMode: ui.pedalMode,
+  pedalFocus:
+    ui.pedalFocus === null
+      ? null
+      : {
+          pedals: [...ui.pedalFocus.pedals].sort(),
+          channels: ui.pedalFocus.channels === null ? null : [...ui.pedalFocus.channels].sort(),
+        },
 })
 
 /** 建立已连接的控制器（含输入设备；可选输出设备） */
@@ -195,7 +207,13 @@ describe('PracticeController 编排', () => {
     const access = new FakeAccess()
     const { c, input, practices, feedbacks, errors } = await connectController(transport, access)
     // 构造期初始同步
-    expect(practices[0]).toEqual({ tracks: [], active: false, allOn: false })
+    expect(practices[0]).toEqual({
+      tracks: [],
+      active: false,
+      allOn: false,
+      pedalMode: 'off',
+      pedalFocus: null,
+    })
     expect(feedbacks[0]).toBeNull()
 
     c.setTracks([
@@ -209,6 +227,8 @@ describe('PracticeController 编排', () => {
       ],
       active: false,
       allOn: false,
+      pedalMode: 'off',
+      pedalFocus: null,
     })
     expect(errors).toHaveLength(0)
 
@@ -235,25 +255,25 @@ describe('PracticeController 编排', () => {
     input.send([0x90, 60, 100])
     input.send([0x90, 64, 100])
     expect(engine.scheduled).toHaveLength(0)
-    expect(feedbacks.at(-1)).toEqual({ held: [60, 64], wrong: [] })
+    expect(feedbacks.at(-1)).toEqual({ held: [60, 64], wrong: [], wrongPedals: [] })
 
     // 按错键：红显、阻止触发
     input.send([0x90, 62, 100])
-    expect(feedbacks.at(-1)).toEqual({ held: [60, 62, 64], wrong: [62] })
+    expect(feedbacks.at(-1)).toEqual({ held: [60, 62, 64], wrong: [62], wrongPedals: [] })
     input.send([0x90, 67, 100])
     expect(engine.scheduled).toHaveLength(0) // 错键仍按住 → 不触发
 
     // 松开错键：条件齐备 → 立即放行（门控音符由回送发声，不排期到引擎）
     input.send([0x80, 62, 0])
     expect(engine.scheduled).toHaveLength(0)
-    expect(feedbacks.at(-1)).toEqual({ held: [60, 64, 67], wrong: [] })
+    expect(feedbacks.at(-1)).toEqual({ held: [60, 64, 67], wrong: [], wrongPedals: [] })
 
     // 继续推进：下一和弦进入等待
     host.advance(0.7) // pos = 1.25 >= 1.2
     host.fireTicks()
     input.send([0x90, 62, 100])
     expect(engine.scheduled).toHaveLength(0)
-    expect(feedbacks.at(-1)).toEqual({ held: [60, 62, 64, 67], wrong: [] })
+    expect(feedbacks.at(-1)).toEqual({ held: [60, 62, 64, 67], wrong: [], wrongPedals: [] })
 
     // 拔出 MIDI 键盘：强制退出练习模式（清空分轨选择）、反馈清空
     access.inputs.clear()
@@ -284,6 +304,8 @@ describe('PracticeController 编排', () => {
       ],
       active: true,
       allOn: false,
+      pedalMode: 'off',
+      pedalFocus: null,
     })
     c.toggleTrack(2)
     expect([...transport.practiceTracks].sort((a, b) => a - b)).toEqual([0, 2])
@@ -387,7 +409,7 @@ describe('PracticeController 编排', () => {
     expect(transport.state).toBe('playing')
     // 该键同时参与判定：按错红显、不触发
     expect(engine.scheduled).toHaveLength(0)
-    expect(feedbacks.at(-1)).toEqual({ held: [72], wrong: [72] })
+    expect(feedbacks.at(-1)).toEqual({ held: [72], wrong: [72], wrongPedals: [] })
     // 按对和弦全部琴键：错键仍按住 → 不触发
     input.send([0x90, 60, 100])
     input.send([0x90, 64, 100])
@@ -396,7 +418,7 @@ describe('PracticeController 编排', () => {
     // 松开错键 → 立即放行（门控音符由回送发声，不排期到引擎）
     input.send([0x80, 72, 0])
     expect(engine.scheduled).toHaveLength(0)
-    expect(feedbacks.at(-1)).toEqual({ held: [60, 64, 67], wrong: [] })
+    expect(feedbacks.at(-1)).toEqual({ held: [60, 64, 67], wrong: [], wrongPedals: [] })
     c.dispose()
   })
 
@@ -424,7 +446,7 @@ describe('PracticeController 编排', () => {
         { pitch: 62, start: 0.5, end: 1.5, velocity: 100, trackIndex: 0 }, // 长音符
         { pitch: 60, start: 0.8, end: 1.0, velocity: 100, trackIndex: 1 }, // 短和弦
       ],
-      sustainEvents: [],
+      pedalEvents: [],
     }
     transport.load(song)
     transport.play()
@@ -433,7 +455,7 @@ describe('PracticeController 编排', () => {
     // 触发长音符（门控音符由回送发声，不排期到引擎）
     input.send([0x90, 62, 100])
     expect(engine.scheduled).toHaveLength(0)
-    expect(feedbacks.at(-1)).toEqual({ held: [62], wrong: [] })
+    expect(feedbacks.at(-1)).toEqual({ held: [62], wrong: [], wrongPedals: [] })
 
     // 推进到第二个和弦（60 @ 0.8）：长音符仍在键盘上
     host.advance(0.3) // now = 0.85 → pos = 0.8
@@ -441,7 +463,7 @@ describe('PracticeController 编排', () => {
     // 松开再按长音符键：不判错、不重复触发
     input.send([0x80, 62, 0])
     input.send([0x90, 62, 100])
-    expect(feedbacks.at(-1)).toEqual({ held: [62], wrong: [] })
+    expect(feedbacks.at(-1)).toEqual({ held: [62], wrong: [], wrongPedals: [] })
     expect(engine.scheduled).toHaveLength(0)
     // 按对短和弦键触发（不排期到引擎）
     input.send([0x90, 60, 100])
@@ -473,7 +495,7 @@ describe('PracticeController 编排', () => {
         { pitch: 60, start: 0.5, end: 0.8, velocity: 100, trackIndex: 0 }, // 练习轨
         { pitch: 64, start: 0.5, end: 0.8, velocity: 100, trackIndex: 1 }, // 非练习轨（同 onset）
       ],
-      sustainEvents: [],
+      pedalEvents: [],
     }
     transport.load(song)
     transport.play()
@@ -481,11 +503,11 @@ describe('PracticeController 编排', () => {
     host.fireTicks()
     // 非练习轨音符：不判错
     input.send([0x90, 64, 100])
-    expect(feedbacks.at(-1)).toEqual({ held: [64], wrong: [] })
+    expect(feedbacks.at(-1)).toEqual({ held: [64], wrong: [], wrongPedals: [] })
     // 练习轨和弦键：触发（门控音符由回送发声，不排期到引擎；同 onset 非练习轨下一 tick 排期）
     input.send([0x90, 60, 100])
     expect(engine.scheduled).toHaveLength(0)
-    expect(feedbacks.at(-1)).toEqual({ held: [60, 64], wrong: [] })
+    expect(feedbacks.at(-1)).toEqual({ held: [60, 64], wrong: [], wrongPedals: [] })
     c.dispose()
   })
 
@@ -677,6 +699,94 @@ describe('PracticeController 编排', () => {
       { pitch: 99, velocity: 64 },
     ])
     expect(engine.noteOffs).toEqual([99])
+    c.dispose()
+  })
+})
+
+describe('PracticeController 踏板练习', () => {
+  /** 带延音踏板的曲目：Melody(ch0) 的和弦 0.5s 处要求踩下延音（0.3–1.0s） */
+  function makePedalSong(): Song {
+    const song = makeSong()
+    song.pedalEvents = [
+      { time: 0.3, controller: 64, value: 127, trackIndex: 0, channel: 0 },
+      { time: 1.0, controller: 64, value: 0, trackIndex: 0, channel: 0 },
+    ]
+    return song
+  }
+
+  it('从 off 切到非 off 且无练习轨 → 自动全开全部轨并暂停；UI 状态带踏板模式与关注范围', async () => {
+    const transport = new Transport(new FakeEngine(), new FakeHost())
+    const { c, practices } = await connectController(transport, new FakeAccess())
+    const song = makePedalSong()
+    transport.load(song)
+    c.setTracks(practiceTracksOf(song))
+    transport.play()
+    expect(transport.state).toBe('playing')
+
+    c.setPedalPractice('sustain')
+    expect([...transport.practiceTracks].sort((a, b) => a - b)).toEqual([0, 1])
+    expect(transport.state).toBe('paused') // 练习设置变化自动暂停
+    expect(practices.at(-1)?.pedalMode).toBe('sustain')
+    expect(practices.at(-1)?.pedalFocus).toEqual({ pedals: ['sustain'], channels: [0] })
+    c.dispose()
+  })
+
+  it('和弦要求踏板：只按琴键不放行；踩下要求踏板才继续；误踩红显且阻塞', async () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const transport = new Transport(engine, host)
+    const access = new FakeAccess()
+    const { c, input, feedbacks } = await connectController(transport, access)
+    const song = makePedalSong()
+    transport.load(song)
+    c.setTracks(practiceTracksOf(song))
+    c.setPedalPractice('all')
+
+    // 三个和弦键都按下 → 但延音踏板没踩：位置冻结在和弦起点，不放行（不排期发声）
+    input.send([0x90, 60, 100])
+    input.send([0x90, 64, 100])
+    input.send([0x90, 67, 100])
+    host.advance(0.6) // 进入提前触发窗口后到达和弦起点 → 冻结
+    host.fireTicks()
+    expect(transport.state).toBe('playing')
+    expect(transport.position).toBeCloseTo(0.5)
+    expect(engine.scheduled).toHaveLength(0)
+
+    // 误踩弱音（参与判定、本和弦不需要）：红显并继续阻塞
+    input.send([0xb0, 67, 127])
+    expect(feedbacks.at(-1)?.wrongPedals).toEqual(['soft'])
+    expect(transport.position).toBeCloseTo(0.5)
+    // 松开误踩踏板：红显消失，但仍缺延音踏板
+    input.send([0xb0, 67, 0])
+    expect(feedbacks.at(-1)?.wrongPedals).toEqual([])
+    expect(transport.position).toBeCloseTo(0.5)
+
+    // 踩下延音踏板 → 满足放行条件，播放继续推进
+    input.send([0xb0, 64, 127])
+    host.advance(0.6)
+    host.fireTicks()
+    expect(transport.position).toBeGreaterThan(0.9)
+    c.dispose()
+  })
+
+  it('踏板练习为 off（默认）：和弦不带踏板要求，琴键到位即放行', async () => {
+    const host = new FakeHost()
+    const transport = new Transport(new FakeEngine(), host)
+    const access = new FakeAccess()
+    const { c, input } = await connectController(transport, access)
+    const song = makePedalSong()
+    transport.load(song)
+    c.setTracks(practiceTracksOf(song))
+    expect(c.practiceActive).toBe(false)
+    input.send([0x90, 60, 100]) // 任意按键启动练习
+    expect(c.practiceActive).toBe(false) // 没有轨在练 → 仍在实时演奏
+    c.togglePractice() // 全开
+    input.send([0x90, 60, 100])
+    input.send([0x90, 64, 100])
+    input.send([0x90, 67, 100])
+    host.advance(0.6)
+    host.fireTicks()
+    expect(transport.position).toBeGreaterThan(0.9) // 无踏板要求 → 已放行
     c.dispose()
   })
 })

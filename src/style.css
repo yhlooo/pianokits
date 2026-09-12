@@ -648,7 +648,8 @@ input[type='range']::-moz-range-thumb {
   flex-direction: column;
   min-width: 208px;
   max-width: 280px;
-  max-height: 320px;
+  /* 分轨列表 + 踏板练习单选组（设计文档 20260912-midi-pedal-lane-and-practice.md §3.6） */
+  max-height: 380px;
   padding: 4px 6px 6px;
   background: var(--bg-3);
   border: 1px solid var(--line-strong);
@@ -685,6 +686,15 @@ input[type='range']::-moz-range-thumb {
   letter-spacing: 0.04em;
   color: var(--text-2);
   white-space: nowrap;
+}
+
+/* 分组说明（练习音轨下方）：比标题更淡的小字，可换行 */
+.transport__practice-menu__desc {
+  padding: 0 10px 6px;
+  font-size: 0.6875rem;
+  line-height: 1.4;
+  color: var(--text-2);
+  opacity: 0.75;
 }
 
 .transport__practice-menu__list {
@@ -773,6 +783,74 @@ input[type='range']::-moz-range-thumb {
 
 .transport__practice-menu__empty.is-visible {
   display: block;
+}
+
+/* 踏板练习单选组（设计文档 20260912-midi-pedal-lane-and-practice.md §3.6）：
+   音轨列表下方一段分隔区，三选一原生单选框；默认"关"。 */
+.transport__practice-menu__pedals {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.transport__practice-menu__subtitle {
+  padding: 4px 10px 6px;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.transport__practice-pedal {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  color: var(--text-1);
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .transport__practice-pedal:hover {
+    background: var(--bg-2);
+    color: var(--text-0);
+  }
+}
+
+.transport__practice-radio {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.transport__practice-pedal__label {
+  font-size: 0.8125rem;
+  white-space: nowrap;
+}
+
+/* 选中项琥珀高亮（与分轨行一致）；未连接 MIDI 键盘时整行置灰禁用 */
+.transport__practice-pedal:has(.transport__practice-radio:checked) {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.transport__practice-pedal:has(.transport__practice-radio:disabled) {
+  color: var(--text-2);
+  opacity: 0.5;
+  cursor: default;
+}
+
+.transport__practice-pedal:has(.transport__practice-radio:disabled):hover {
+  background: transparent;
+  color: var(--text-2);
 }
 
 /* MIDI 键盘连接状态图标 + 状态浮层（设计文档 20260907-midi-auto-connect.md §6）：

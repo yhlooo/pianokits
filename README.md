@@ -7,10 +7,10 @@ MIDI 钢琴工具箱，在线体验： [https://yhlooo.github.io/pianokits](http
 **已实现工具：**
 
 - MIDI 播放器：播放 MIDI 文件（ .mid ）
-  - 瀑布流展示音符
+  - 瀑布流展示音符与踏板轨道
   - MIDI 转五线谱 (beta)
   - 连接 MIDI 键盘播放
-  - 连接 MIDI 键盘进行按键练习，支持分轨练习
+  - 连接 MIDI 键盘进行按键练习，支持分轨练习与踏板练习（关 / 仅延音踏板 / 全部踏板）
 
 ## 连接 MIDI 键盘
 

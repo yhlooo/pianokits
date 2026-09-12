@@ -1,7 +1,7 @@
 # 设计：MIDI 键盘连接与练习模式
 
 - 日期：2026-09-06
-- 状态：**正式生效（2026-09-06 实现；连接部分由 `20260907-midi-auto-connect.md` 修订；2026-09-12 由 `20260912-midi-debug-velocity-pedal.md` 扩展：新增 `onControl` 回调与只读诊断 getter，调试页接入改为复用本共享层）**
+- 状态：**正式生效（2026-09-06 实现；连接部分由 `20260907-midi-auto-connect.md` 修订；2026-09-12 由 `20260912-midi-debug-velocity-pedal.md` 扩展：新增 `onControl` 回调与只读诊断 getter，调试页接入改为复用本共享层；同日由 `20260912-midi-pedal-lane-and-practice.md` 扩展：`KeyFeedback` → `PracticeFeedback`（含误踩踏板）、练习模式新增踏板练习三选一与踏板判定，瀑布流新增踏板轨道）**
 - 关联文档：
   - `20260905-midi-import-player.md`（MIDI 播放工具主设计；本功能对其 M1 非目标的一次扩展）
   - `docs/development/research/20260905-web-midi-input.md`（Web MIDI 接入调查结论）
@@ -213,9 +213,11 @@ class ChordGate {
 ### 3.5 编排控制器（core/practice.ts）
 
 ```ts
-interface KeyFeedback {
+// 反馈类型 2026-09-12 更名为 PracticeFeedback 并新增误踩踏板（见 20260912-midi-pedal-lane-and-practice.md §3.5）
+interface PracticeFeedback {
   held: ReadonlySet<number>
   wrong: ReadonlySet<number>
+  wrongPedals: ReadonlySet<PedalId> // 误踩的踏板（红晕，与按错键同语义；松开即清除）
 }
 
 interface MidiUiState {
@@ -233,12 +235,14 @@ interface PracticeUiState {
   tracks: readonly (PracticeTrackInfo & { on: boolean })[] // 可练习轨及每轨开关
   active: boolean // 至少一轨开启练习（练习按钮高亮）
   allOn: boolean // 全部轨都已开启（再点练习按钮 = 全部关闭）
+  pedalMode: PedalPracticeMode // 踏板练习模式（off/sustain/all，默认 off）——2026-09-12 新增
+  pedalFocus: PedalFocus | null // 踏板轨道关注范围（判定 + 高亮）；null = 练习未开启
 }
 
 interface PracticeCallbacks {
   onStatus(ui: MidiUiState): void
   onPractice(ui: PracticeUiState): void // 分轨练习状态（轨列表 / 每轨开关 / active / allOn）
-  onFeedback(fb: KeyFeedback | null): void // null = 非练习模式（隐藏键盘反馈）
+  onFeedback(fb: PracticeFeedback | null): void // null = 非练习模式（隐藏键盘与踏板反馈）
   onConnectError(message: string): void // 连接失败（被拒/不支持等）→ 右下角报错通知
 }
 
@@ -248,6 +252,7 @@ class PracticeController {
   setTracks(tracks: readonly PracticeTrackInfo[]): void // 切换曲目：更新轨列表，与旧开关求交
   togglePractice(): void // 非全开（含全关）→ 全开；全开 → 全关
   toggleTrack(index: number): void // 开关单轨（可多选）
+  setPedalPractice(mode: PedalPracticeMode): void // 踏板练习三选一（2026-09-12 新增）
   get practiceActive(): boolean
   dispose(): void
 }
@@ -366,7 +371,10 @@ class MidiOutputSink {
 
 - 按住键：琥珀 `#d9a45b` 半透明点亮（含黑键），画在轨色点亮之上；
 - 按错键：语义色 `#e0695e` 高不透明 + 同色光晕，画在最上层；
-- 数据来自 `onFeedback`，`setKeyFeedback(null)` 清除（退出练习模式）；
+- 数据来自 `onFeedback`，`setFeedback(null)` 清除（退出练习模式）；
+- （2026-09-12）误踩踏板：等待期间新踩「参与判定但本和弦不需要」的踏板 → 同色红晕画在
+  踏板列与键盘交界处（位置与银白触发光晕一致），松开即清除；见
+  `20260912-midi-pedal-lane-and-practice.md` §3.4/§3.5；
 - **分轨压暗**：有轨开启练习时，app 把开启练习的轨集合传给
   `waterfall.setPracticeTracks(gated)`——练习轨正常显示，**非练习轨**的瀑布流音符条
   与琴键点亮按亮度 0.6 / 不透明度 0.62 压暗（比正常暗淡一点、仍清晰可辨），突出正在
@@ -412,6 +420,7 @@ class MidiOutputSink {
   - 练习开启时暂停：按下 MIDI 键盘任意琴键即恢复播放（该按键仍参与判定）；
   - 开关练习（练习按钮全开/全关、菜单开关单轨）自动暂停；
   - 连接 MIDI 键盘不改变播放/暂停状态；断开（点击断开/设备拔出）自动暂停；
+- （2026-09-12 增补）踏板轨道与踏板练习的验收见 `20260912-midi-pedal-lane-and-practice.md` §4；
 - `pnpm test` / `pnpm typecheck` / `pnpm lint` / `pnpm build` 全绿。
 
 ## 6. 非目标
@@ -420,8 +429,9 @@ class MidiOutputSink {
 - 不做按错统计、评分、练习记录持久化；
 - **不回送实时（非练习）按键**到输出端口（Local Control Off 后键盘自带音源已静默，实时演奏
   仅经电脑引擎发声；如需让键盘自带音源也随实时演奏发声，可留待后续加“回送按键”开关）；
-- **不镜像延音踏板**（CC64）：走带目前不处理 sustainEvents，键盘音源听感无踏板；后续
-  若做 CC64 调度可一并镜像。共享层已能收到 CC（`onControl`，2026-09-12），练习模式暂不消费；
+- **不镜像延音踏板**（CC64）：走带仍不向输出端口调度 CC，键盘音源听感无踏板；后续
+  若做 CC64 调度可一并镜像。共享层已能收到 CC（`onControl`，2026-09-12），练习模式自
+  2026-09-12 起消费 CC 做踏板判定（`20260912-midi-pedal-lane-and-practice.md`），但不外发；
 - ~~不改调试工具“MIDI 键盘”页面（其接入逻辑未来可迁移到 `MidiConnection`，本次不迁移）~~
   —— **2026-09-12 已完成迁移**（见 `20260912-midi-debug-velocity-pedal.md` §3.3）：调试页不再自持
   `requestMIDIAccess` 流程，改用 `MidiConnection`；诊断面板/5s 超时/重试/文案仍留在调试页。

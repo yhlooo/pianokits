@@ -43,6 +43,9 @@ for (let p = MIN_PITCH; p <= MAX_PITCH; p++) {
   }
 }
 
+/** 白键数量（52）：瀑布流踏板轨道按「白键宽」计算条宽与间隔，与键盘几何同源 */
+export const WHITE_KEY_COUNT = WHITE_PITCHES.length
+
 type Rgb = readonly [number, number, number]
 
 /**

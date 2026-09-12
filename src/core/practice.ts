@@ -1,14 +1,21 @@
-import type { MidiNoteEvent } from './midi/input'
+import type { MidiControlChange, MidiNoteEvent } from './midi/input'
 import type { Song } from './model'
 import { MidiConnection, type MidiConnectionStatus } from './midi/connection'
 import { ChordGate } from './midi/chord-gate'
+import type { PedalFocus, PedalId, PedalPracticeMode } from './midi/pedals'
 import { MidiOutputSink } from './midi/output'
 import type { Transport } from './transport'
 
-/** 练习模式键盘反馈：按住键 + 按错键（推给瀑布流渲染，设计文档 20260906-midi-keyboard-and-practice.md §4.2） */
-export interface KeyFeedback {
+/**
+ * 练习模式反馈（推给瀑布流渲染，设计文档 20260906-midi-keyboard-and-practice.md §4.2、
+ * 20260912-midi-pedal-lane-and-practice.md §3.5）：按住键琥珀、按错键红 + 光晕、
+ * 误踩踏板红 + 光晕。
+ */
+export interface PracticeFeedback {
   held: ReadonlySet<number>
   wrong: ReadonlySet<number>
+  /** 误踩的踏板（等待期间新踩参与判定但本和弦不需要的踏板；松开即清除） */
+  wrongPedals: ReadonlySet<PedalId>
 }
 
 /** MIDI 状态图标 UI 状态（推给播放坞钢琴状态图标渲染，设计文档 20260907-midi-auto-connect.md §4.3） */
@@ -36,14 +43,22 @@ export interface PracticeUiState {
   active: boolean
   /** 全部轨都已开启练习（此时再点练习按钮 = 全部关闭） */
   allOn: boolean
+  /** 踏板练习模式（三选一，默认 off） */
+  pedalMode: PedalPracticeMode
+  /**
+   * 练习模式下踏板轨道的关注范围（判定 + 高亮）；null = 练习未开启或未载入曲目
+   * （踏板轨道正常显示）。非 null 但 `pedals` 为空 = 练习中但不判定踏板
+   * （踏板练习 off / 练习轨通道内无踏板数据）→ 踏板条全部压暗。
+   */
+  pedalFocus: PedalFocus | null
 }
 
 export interface PracticeCallbacks {
   onStatus(ui: MidiUiState): void
-  /** 分轨练习状态（轨列表 / 每轨开关 / 是否激活）；任何变化都会回调 */
+  /** 分轨练习状态（轨列表 / 每轨开关 / 是否激活 / 踏板练习）；任何变化都会回调 */
   onPractice(ui: PracticeUiState): void
-  /** null = 非练习模式（隐藏键盘反馈） */
-  onFeedback(fb: KeyFeedback | null): void
+  /** null = 非练习模式（隐藏键盘与踏板反馈） */
+  onFeedback(fb: PracticeFeedback | null): void
   /** 连接失败报错（超时/被拒/不支持等）：右下角通知胶囊 */
   onConnectError(message: string): void
 }
@@ -77,10 +92,13 @@ export function practiceTracksOf(song: Song): PracticeTrackInfo[] {
  *   输出端口（键盘 Local Control 开启时会造成叠音/回授）；
  * - 分轨练习：每轨独立开关（悬浮菜单多选，可多轨同时练习）；开启练习的轨到达判定线
  *   时等待琴键放行（和弦需同时按住全部对应琴键），其余轨照常直接播放；
+ * - 踏板练习（设计文档 20260912-midi-pedal-lane-and-practice.md §3.5）：三选一模式
+ *   （off/sustain/all）随分轨练习生效；和弦放行还要求「文件在该和弦处踩下的踏板」全部踩着，
+ *   等待期间误踩参与判定的踏板红显并阻止放行；
  * - 练习按钮语义：非全开（含全关）→ 全部开启；全开 → 全部关闭；
- * - 暂停/播放联动：开关任意轨练习都会自动暂停；练习开启时按下任意琴键即从暂停
- *   恢复播放；连接键盘不影响播放状态，设备拔出自动暂停；
- * - 连接状态离开 connected（设备拔出/销毁）时清空全部轨的练习开关（强制退出练习）。
+ * - 暂停/播放联动：开关任意轨练习（或切换踏板练习模式）都会自动暂停；练习开启时按下任意琴键即从
+ *   暂停恢复播放；连接键盘不影响播放状态，设备拔出自动暂停；
+ * - 连接状态离开 connected（设备拔出/销毁）时清空全部轨的练习开关与踏板状态（强制退出练习）。
  */
 export class PracticeController {
   private readonly transport: Transport
@@ -92,6 +110,8 @@ export class PracticeController {
   private tracks: readonly PracticeTrackInfo[] = []
   /** 开启练习的轨 index 集合；空 = 练习关闭 */
   private readonly practiceTracks = new Set<number>()
+  /** 踏板练习模式（三选一，默认 off = 无踏板练习） */
+  private pedalMode: PedalPracticeMode = 'off'
   /** 上一次连接状态（区分“断开”（connected → 非 connected）与连接尝试的中间状态） */
   private lastStatus: MidiConnectionStatus = 'idle'
   private disposed = false
@@ -106,7 +126,8 @@ export class PracticeController {
         const wasConnected = this.lastStatus === 'connected'
         this.lastStatus = status
         if (status !== 'connected') {
-          // 连接状态离开 connected（断开/设备拔出）：强制清空练习开关
+          // 连接状态离开 connected（断开/设备拔出）：清空踏板状态（物理踏板已不可信）与练习开关
+          this.gate.resetPedals()
           if (this.practiceTracks.size > 0) {
             this.practiceTracks.clear()
             this.applyPractice()
@@ -122,6 +143,7 @@ export class PracticeController {
         this.emitMidiState()
       },
       onNote: (ev) => this.onNote(ev),
+      onControl: (ev) => this.onControl(ev),
       onOutputs: (outputs) => this.syncOutputs(outputs),
     })
     this.transport.onPracticeChord((chord) => {
@@ -131,8 +153,8 @@ export class PracticeController {
         return
       }
       const pitches = new Set(chord.notes.map((n) => n.pitch))
-      if (this.gate.setChord(pitches, chord.excused)) {
-        // 预先已按住全部琴键：进入等待即放行
+      if (this.gate.setChord(pitches, chord.excused, chord.requiredPedals, chord.judgedPedals)) {
+        // 预先已按住全部琴键（且要求踏板已踩着）：进入等待即放行
         this.release()
       }
       this.emitFeedback()
@@ -202,9 +224,32 @@ export class PracticeController {
     if (!this.sameTrackSet(before, this.practiceTracks)) this.transport.pause()
   }
 
+  /**
+   * 切换踏板练习模式（设计文档 20260912-midi-pedal-lane-and-practice.md §3.6）：
+   * - 三选一（off/sustain/all），推给 Transport 重算关注范围；
+   * - 从 off 切到非 off、且当前没有任何轨在练时**自动全开全部轨**——否则该设置无从生效；
+   * - 与分轨开关一致：模式确有变化时自动暂停播放，并外发练习 UI 状态。
+   */
+  setPedalPractice(mode: PedalPracticeMode): void {
+    if (this.pedalMode === mode) return
+    this.pedalMode = mode
+    if (
+      mode !== 'off' &&
+      this.midi.status === 'connected' &&
+      this.tracks.length > 0 &&
+      !this.hasAnyOn()
+    ) {
+      for (const t of this.tracks) this.practiceTracks.add(t.index)
+    }
+    this.applyPractice()
+    this.transport.pause()
+  }
+
   dispose(): void {
     this.disposed = true
+    this.gate.reset()
     this.transport.setPracticeTracks(new Set())
+    this.transport.setPedalPracticeMode('off')
     this.transport.setMidiOutput(null)
     this.sink.dispose()
     this.midi.dispose()
@@ -219,10 +264,11 @@ export class PracticeController {
     this.transport.setMidiOutput(outputs.length > 0 ? this.sink : null)
   }
 
-  /** 把当前分轨开关推给 Transport（空集 = 关闭练习），并外发键盘反馈与练习 UI 状态 */
+  /** 把当前分轨开关与踏板练习模式推给 Transport，并外发反馈与练习 UI 状态 */
   private applyPractice(): void {
     const gating = this.isGating()
     this.transport.setPracticeTracks(gating ? new Set(this.practiceTracks) : new Set())
+    this.transport.setPedalPracticeMode(this.pedalMode)
     this.emitFeedback()
     this.emitPractice()
   }
@@ -268,6 +314,18 @@ export class PracticeController {
     else this.transport.liveNoteOff(ev.pitch)
   }
 
+  /**
+   * 踏板 CC（CC64/66/67）：并入 gate 的踏板状态并参与判定。
+   * 练习中满足放行条件即放行；未开启练习时也照常并入（进入练习时能识别"踏板已经踩着"）。
+   */
+  private onControl(ev: MidiControlChange): void {
+    if (this.disposed) return
+    const triggered = this.gate.control(ev)
+    if (!this.isGating()) return
+    if (triggered) this.release()
+    else this.emitFeedback()
+  }
+
   /** 放行当前等待的和弦：走带继续（门控轨音符已由 echoNote 发声）；gate 清空等待直至下一和弦 */
   private release(): void {
     this.transport.releaseChord()
@@ -277,7 +335,11 @@ export class PracticeController {
   private emitFeedback(): void {
     this.cbs.onFeedback(
       this.isGating()
-        ? { held: new Set(this.gate.heldKeys), wrong: new Set(this.gate.wrongKeys) }
+        ? {
+            held: new Set(this.gate.heldKeys),
+            wrong: new Set(this.gate.wrongKeys),
+            wrongPedals: new Set(this.gate.wrongPedalKeys),
+          }
         : null,
     )
   }
@@ -287,6 +349,8 @@ export class PracticeController {
       tracks: this.tracks.map((t) => ({ ...t, on: this.practiceTracks.has(t.index) })),
       active: this.isGating(),
       allOn: this.allOn(),
+      pedalMode: this.pedalMode,
+      pedalFocus: this.isGating() ? this.transport.pedalFocus : null,
     })
   }
 

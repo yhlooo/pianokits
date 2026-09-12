@@ -50,12 +50,22 @@ export interface Note {
   trackIndex: number
 }
 
-/** CC64 延音踏板事件（value > 0 为踩下，0 为抬起） */
-export interface SustainEvent {
+/**
+ * 三踏板 CC 事件（设计文档 20260912-midi-pedal-lane-and-practice.md §3.2）。
+ * 踏板在 MIDI 里是**通道消息**（CC64 延音 / CC66 选择延音 / CC67 弱音），轨道只是容器，
+ * 因此同时保留来源轨与其通道，供归属规则使用（研究文档 20260912-midi-pedal-track-relationship.md）。
+ */
+export interface PedalEvent {
   /** 秒 */
   time: number
-  /** 0~127 */
+  /** 踏板控制器号：64 延音 / 66 选择延音 / 67 弱音 */
+  controller: number
+  /** 0~127（CC 第二数据字节；`>= 64` 为踩下） */
   value: number
+  /** 来源轨道 index（对应 Song.tracks） */
+  trackIndex: number
+  /** 来源轨道通道（@tonejs/midi 由轨内音符推导；无音符轨为 0） */
+  channel: number
 }
 
 export interface Song {
@@ -69,6 +79,6 @@ export interface Song {
   tracks: Track[]
   /** 播放用事件流：默认合并所有非打击乐轨，按 start 排序 */
   notes: Note[]
-  /** 延音踏板事件（CC64，合并所有非打击乐轨、按 time 排序），供记谱延长长音 */
-  sustainEvents: SustainEvent[]
+  /** 三踏板事件（CC64/66/67，合并所有非打击乐轨、按 time 排序），供瀑布流踏板轨道与练习判定 */
+  pedalEvents: PedalEvent[]
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { Song, SustainEvent } from '../model'
+import type { PedalEvent, Song } from '../model'
 import { beatBounds, GRID_STEP, decomposeBeats, quantizeToScore, spellPitch } from './quantize'
 
 interface NoteSpec {
@@ -13,7 +13,7 @@ interface NoteSpec {
 
 function makeSong(
   notes: NoteSpec[],
-  opts: { sf?: number; mi?: 0 | 1; sustainEvents?: SustainEvent[]; noKeySig?: boolean } = {},
+  opts: { sf?: number; mi?: 0 | 1; pedalEvents?: PedalEvent[]; noKeySig?: boolean } = {},
 ): Song {
   const trackOf = (n: NoteSpec): number => n.trackIndex ?? 0
   const indices = [...new Set(notes.map(trackOf))].sort((a, b) => a - b)
@@ -39,7 +39,7 @@ function makeSong(
       velocity: n.velocity ?? 100,
       trackIndex: trackOf(n),
     })),
-    sustainEvents: opts.sustainEvents ?? [],
+    pedalEvents: opts.pedalEvents ?? [],
   }
 }
 
@@ -170,9 +170,9 @@ describe('quantizeToScore', () => {
 
   it('踏板延音：长音延长到踏板抬起，不被切碎', () => {
     const song = makeSong([{ pitch: 60, start: 0, end: 0.25 }], {
-      sustainEvents: [
-        { time: 0, value: 127 },
-        { time: 2, value: 0 },
+      pedalEvents: [
+        { time: 0, controller: 64, value: 127, trackIndex: 0, channel: 0 },
+        { time: 2, controller: 64, value: 0, trackIndex: 0, channel: 0 },
       ],
     })
     const score = quantizeToScore(song)

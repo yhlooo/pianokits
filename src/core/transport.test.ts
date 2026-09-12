@@ -71,7 +71,7 @@ function makeSong(notes: Array<{ pitch: number; start: number; end: number }>): 
     keySignatures: [],
     tracks: [],
     notes: notes.map((n, i) => ({ ...n, velocity: 100, trackIndex: i })),
-    sustainEvents: [],
+    pedalEvents: [],
   }
 }
 
@@ -87,7 +87,7 @@ function makeSongT(
     keySignatures: [],
     tracks: [],
     notes: notes.map((n) => ({ ...n, velocity: 100 })),
-    sustainEvents: [],
+    pedalEvents: [],
   }
 }
 
@@ -700,6 +700,123 @@ describe('Transport 分轨练习（部分门控）', () => {
     host.advance(0.6) // now = 1.25, pos = 1.2
     host.fireTicks()
     expect(engine.scheduled.map((n) => n.pitch)).toEqual([60, 65, 62])
+  })
+})
+
+describe('Transport 踏板练习', () => {
+  /** 单轨（通道 0）曲目 + 延音踏板 0.4–1.0s；音符 0.5 与 1.5 */
+  function makePedalSong(): Song {
+    return {
+      ppq: 480,
+      duration: 2,
+      tempos: [{ time: 0, bpm: 60 }], // 1 拍 = 1 秒（提前触发窗口 = 1 秒）
+      timeSignatures: [{ time: 0, numerator: 4, denominator: 4 }],
+      keySignatures: [],
+      tracks: [
+        { index: 0, name: 'Piano', channel: 0, instrument: 0, percussion: false, noteCount: 2 },
+      ],
+      notes: [
+        { pitch: 60, start: 0.5, end: 0.9, velocity: 100, trackIndex: 0 },
+        { pitch: 62, start: 1.5, end: 1.9, velocity: 100, trackIndex: 0 },
+      ],
+      pedalEvents: [
+        { time: 0.4, controller: 64, value: 127, trackIndex: 0, channel: 0 },
+        { time: 1.0, controller: 64, value: 0, trackIndex: 0, channel: 0 },
+      ],
+    }
+  }
+
+  it('pedalFocus：未练习 → null；练习中 off → 空关注（全部压暗）；开启模式 → 判定范围', () => {
+    const t = new Transport(new FakeEngine(), new FakeHost())
+    t.load(makePedalSong())
+    expect(t.pedalFocus).toBeNull()
+    t.setPracticeTracks(new Set([0]))
+    expect(t.pedalFocus).toEqual({ pedals: new Set(), channels: null })
+    t.setPedalPracticeMode('sustain')
+    expect(t.pedalFocus).toEqual({ pedals: new Set(['sustain']), channels: new Set([0]) })
+    // 退出练习 → 关注范围为 null（踏板条恢复正常显示）
+    t.setPracticeTracks(new Set())
+    expect(t.pedalFocus).toBeNull()
+  })
+
+  it('门控和弦携带踏板要求（覆盖和弦起点的踏板）与参与判定的踏板', () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    t.load(makePedalSong())
+    t.setPracticeTracks(new Set([0]))
+    t.setPedalPracticeMode('sustain')
+    const chords: Array<PracticeChord | null> = []
+    t.onPracticeChord((c) => chords.push(c))
+    t.play()
+    host.fireTicks() // pos=0：进入和弦 60（0.5s）的提前触发窗口
+    const chord = chords.at(-1)
+    expect(chord?.notes.map((n) => n.pitch)).toEqual([60])
+    expect([...(chord?.requiredPedals ?? [])]).toEqual(['sustain'])
+    expect([...(chord?.judgedPedals ?? [])]).toEqual(['sustain'])
+    // 放行后推进到第二个和弦（1.5s）：踏板 1.0s 已抬起 → 无踏板要求
+    t.releaseChord()
+    host.advance(1.6)
+    host.fireTicks()
+    const next = chords.at(-1)
+    expect(next?.notes.map((n) => n.pitch)).toEqual([62])
+    expect([...(next?.requiredPedals ?? [])]).toEqual([])
+  })
+
+  it('踏板练习为 off：和弦不带踏板要求（等价于既有行为）', () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    t.load(makePedalSong())
+    t.setPracticeTracks(new Set([0]))
+    const chords: Array<PracticeChord | null> = []
+    t.onPracticeChord((c) => chords.push(c))
+    t.play()
+    host.fireTicks()
+    expect([...(chords.at(-1)?.requiredPedals ?? [])]).toEqual([])
+    expect([...(chords.at(-1)?.judgedPedals ?? [])]).toEqual([])
+  })
+
+  it('切换踏板练习模式：取消当前等待并按新范围重新进入', () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    t.load(makePedalSong())
+    t.setPracticeTracks(new Set([0]))
+    const chords: Array<PracticeChord | null> = []
+    t.onPracticeChord((c) => chords.push(c))
+    t.play()
+    host.fireTicks()
+    expect(chords.at(-1)).not.toBeNull()
+    t.setPedalPracticeMode('all')
+    expect(chords.at(-1)).toBeNull() // 取消等待
+    host.fireTicks()
+    // all 模式：三踏板都参与判定（本曲只有 CC64 数据，额外踩弱音/选择延音也会被判错）
+    expect([...(chords.at(-1)?.judgedPedals ?? [])].sort()).toEqual([
+      'soft',
+      'sostenuto',
+      'sustain',
+    ])
+  })
+
+  it('踏板落在无音符轨（纯控制轨）→ 全曲踏板（channels = null，任何练习轨都判定）', () => {
+    const song = makePedalSong()
+    song.tracks = [
+      { index: 0, name: 'Piano', channel: 0, instrument: 0, percussion: false, noteCount: 2 },
+      { index: 1, name: 'Control', channel: 3, instrument: 0, percussion: false, noteCount: 0 },
+    ]
+    song.pedalEvents = [
+      { time: 0.4, controller: 64, value: 127, trackIndex: 1, channel: 3 },
+      { time: 1.0, controller: 64, value: 0, trackIndex: 1, channel: 3 },
+    ]
+    const t = new Transport(new FakeEngine(), new FakeHost())
+    t.load(song)
+    t.setPracticeTracks(new Set([0]))
+    t.setPedalPracticeMode('all')
+    expect(t.pedalFocus).toEqual({
+      pedals: new Set(['soft', 'sostenuto', 'sustain']),
+      channels: null,
+    })
   })
 })
 

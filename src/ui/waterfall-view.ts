@@ -1,9 +1,19 @@
-import type { Note } from '../core/model'
+import type { Note, PedalEvent } from '../core/model'
+import {
+  PEDALS,
+  buildPedalSegments,
+  isSegmentFocused,
+  pedalColumn,
+  type PedalFocus,
+  type PedalId,
+  type PedalSegment,
+} from '../core/midi/pedals'
 import { el } from './dom'
 import {
   KEYBOARD_H_RATIO,
   MAX_PITCH,
   MIN_PITCH,
+  WHITE_KEY_COUNT,
   buildPiano,
   keyGeometry,
   type PianoLit,
@@ -17,11 +27,42 @@ const DEFAULT_PX_PER_SEC = 140
 const KEY_FADE_MS = 80
 /** 练习反馈配色（设计文档 20260906-midi-keyboard-and-practice.md §4.2） */
 const HELD_RGB = [217, 164, 91] as const // 按住键琥珀 #d9a45b
-const WRONG_RGB = [224, 105, 94] as const // 按错键红 #e0695e
+const WRONG_RGB = [224, 105, 94] as const // 按错键/误踩踏板红 #e0695e
 /** 练习模式下非练习轨瀑布流的压暗系数（设计文档 20260906-midi-keyboard-and-practice.md §4.2）：
  *  亮度 0.6 / 不透明度 0.62——比正常暗淡一点、仍清晰可辨，突出正在练习的轨 */
 const PRACTICE_DIM_VF = 0.6
 const PRACTICE_DIM_ALPHA = 0.62
+
+// ---------- 踏板轨道（设计文档 20260912-midi-pedal-lane-and-practice.md §3.4） ----------
+/** 踏板条宽 = 4 个白键、相邻间隔 = 2 个白键（用户口径）；三列总宽 16 白键、整体居中 */
+const PEDAL_BAR_WHITE_KEYS = 4
+const PEDAL_GAP_WHITE_KEYS = 2
+/**
+ * 踏板条：接近灰度的银灰，**上下渐变**（顶亮底暗）+ 顶部 1px 高光（银灰金属感）。
+ * 明度明显低于音符条（用户反馈：太突出）。不随轨色/力度变化。
+ */
+const PEDAL_SILVER_TOP = [188, 192, 198] as const
+const PEDAL_SILVER_BOTTOM = [128, 133, 140] as const
+/** 判定线处触发光晕的银白（比条本身更亮，保证"明显"表示触发） */
+const PEDAL_GLOW_RGB = [228, 234, 242] as const
+/**
+ * 触发光晕：**以判定线为高度中心**的圆角矩形光斑（只画光晕本身，不画发光条）。
+ * - 圆角矩形的高度中点在判定线上 → 可见部分只有上半块（底边平直、上方圆角），
+ *   下半块落在钢琴键盘区域，绘制时裁掉不画；
+ * - 宽度：与踏板轨同宽或只略微宽（PEDAL_GLOW_SPREAD_X 每侧几 px）；
+ * - 亮度：高度中点（判定线）最亮，向上下两侧对称渐隐，顶边仍留一点亮度 → 轮廓可辨；
+ * - 边缘：整块做一次高斯模糊（PEDAL_GLOW_BLUR）柔化成光。
+ */
+const PEDAL_GLOW_HALF = 15
+const PEDAL_GLOW_SPREAD_X = 8
+const PEDAL_GLOW_RADIUS = 8
+const PEDAL_GLOW_BLUR = 4
+/** 贴图四周留白（容纳模糊外溢；内容高度中点 = 判定线） */
+const PEDAL_GLOW_PAD = 14
+const PEDAL_GLOW_FADE_SEC = 0.12
+/** 踏板条不透明度：正常 / 练习中"无需关注"的压暗值 */
+const PEDAL_BAR_ALPHA = 0.35
+const PEDAL_DIM_ALPHA = 0.14
 
 type Rgb = readonly [number, number, number]
 
@@ -34,10 +75,15 @@ export interface WaterfallViewCallbacks {
   onScrubEnd(): void
 }
 
-/** 练习模式键盘反馈：按住键 + 按错键（设计文档 20260906-midi-keyboard-and-practice.md §4.2） */
-export interface WaterfallKeyFeedback {
+/**
+ * 练习模式反馈（设计文档 20260906-midi-keyboard-and-practice.md §4.2、
+ * 20260912-midi-pedal-lane-and-practice.md §3.5）：按住键 + 按错键 + 误踩踏板。
+ */
+export interface WaterfallFeedback {
   held: ReadonlySet<number>
   wrong: ReadonlySet<number>
+  /** 误踩的踏板（红晕，与按错键同语义；松开即清除） */
+  wrongPedals: ReadonlySet<PedalId>
 }
 
 /** 按系数压暗 RGB 颜色（力度映射：弱音更暗） */
@@ -64,6 +110,54 @@ function overTuple(c: Rgb, over: Rgb, t: number): Rgb {
   ]
 }
 
+/** 圆角矩形路径（画布与光晕贴图共用） */
+function roundRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+): void {
+  const rr = Math.max(0, Math.min(r, w / 2, h / 2))
+  ctx.beginPath()
+  ctx.moveTo(x + rr, y)
+  ctx.arcTo(x + w, y, x + w, y + h, rr)
+  ctx.arcTo(x + w, y + h, x, y + h, rr)
+  ctx.arcTo(x, y + h, x, y, rr)
+  ctx.arcTo(x, y, x + w, y, rr)
+  ctx.closePath()
+}
+
+/**
+ * 踏板触发光晕贴图（宽度可变，按宽度缓存）：只画光晕，不画发光条。
+ * 内容是**以判定线为高度中心**的圆角矩形（高度 2 × PEDAL_GLOW_HALF，判定线在高度中点）：
+ * 亮度由中心（判定线）向上下对称渐隐，顶边仍留一点亮度让轮廓可辨；四周做一次高斯模糊化成光。
+ */
+function buildPedalGlowSprite(width: number, rgb: Rgb): HTMLCanvasElement {
+  const scale = 2 // 按 2 倍分辨率绘制，避免光晕糊；模糊半径同按设备像素给
+  const w = Math.max(8, Math.round(width))
+  const h = PEDAL_GLOW_HALF * 2
+  const pad = PEDAL_GLOW_PAD
+  const canvas = document.createElement('canvas')
+  canvas.width = (w + pad * 2) * scale
+  canvas.height = (h + pad * 2) * scale
+  const ctx = canvas.getContext('2d')
+  if (ctx === null) throw new Error('canvas 2d context unavailable')
+  const px = (v: number): number => v * scale
+
+  ctx.filter = `blur(${px(PEDAL_GLOW_BLUR)}px)`
+  // 亮度以高度中点（= 判定线）为峰，向上下两侧对称渐隐
+  const g = ctx.createLinearGradient(0, px(pad), 0, px(pad + h))
+  g.addColorStop(0, rgba(rgb, 0.3)) // 顶边仍留亮度 → 圆角矩形轮廓可辨
+  g.addColorStop(0.5, rgba(rgb, 1)) // 高度中点 = 判定线：最亮
+  g.addColorStop(1, rgba(rgb, 0.3))
+  ctx.fillStyle = g
+  roundRectPath(ctx, px(pad), px(pad), px(w), px(h), px(PEDAL_GLOW_RADIUS))
+  ctx.fill()
+  return canvas
+}
+
 /**
  * 钢琴瀑布流（音符区自绘 Canvas 2D，设计文档 §6.4）：
  * 底部为 88 键钢琴键盘（与「MIDI 键盘」调试页共用 DOM 组件；判定线即键盘上沿，
@@ -72,6 +166,9 @@ function overTuple(c: Rgb, over: Rgb, t: number): Rgb {
  * 视觉（视觉风格指南 §6.4）：按轨五色循环（一轨一色，第 6 轨复用第 1 色）+ 力度→明度映射 + 音区参考线。
  * 横向几何：音符条与音区参考线按键盘几何绘制（keyGeometry，与 DOM 键盘同一套公式）——
  * 白键音符宽 = 白键宽、黑键音符宽 = 黑键宽（按组外扩定位），与底部键盘严格对齐、边缘不漂移。
+ * 踏板事件条（设计文档 20260912-midi-pedal-lane-and-practice.md §3.4）：画面中央三列银灰条
+ * （左弱音 / 中选择延音 / 右延音，条宽 4 白键、间隔 2 白键），置于音符条之下；只画有事件的
+ * 条、不画轨道背景；踩下时刻在与键盘交界处亮起银白光晕，练习误踩时同位置变红。
  * 交互：点击跳转、拖拽平移（联动进度条，松手后恢复跟随）、双击恢复跟随。
  */
 export class WaterfallView implements View {
@@ -95,13 +192,22 @@ export class WaterfallView implements View {
   private prevActive = new Map<number, number>()
   /** 释放中的键：pitch → { 轨号, 释放时刻 } */
   private readonly releasedAt = new Map<number, { track: number; at: number }>()
-  /** 练习模式键盘反馈（按住/按错键）；null = 不显示 */
-  private keyFeedback: WaterfallKeyFeedback | null = null
+  /** 练习模式反馈（按住/按错键、误踩踏板）；null = 不显示 */
+  private feedback: WaterfallFeedback | null = null
   /**
    * 练习模式开启练习的轨集合（分轨压暗）：集合内的轨正常显示，其余轨的
    * 音符条与琴键点亮压暗；null = 练习关闭（全部正常显示）
    */
   private practiceTracks: ReadonlySet<number> | null = null
+  /** 曲目踏板踩下区间（setPedals 构建，按 start 排序） */
+  private pedalSegments: PedalSegment[] = []
+  /**
+   * 练习模式下踏板轨道的关注范围（判定 + 高亮）：范围外的踏板条压暗、不显示触发光晕；
+   * null = 练习未开启（踏板条全部正常显示）
+   */
+  private pedalFocus: PedalFocus | null = null
+  /** 触发光晕贴图缓存（键 = 宽度|颜色；resize 时清空，按需重建） */
+  private readonly glowSprites = new Map<string, HTMLCanvasElement>()
   private readonly resizeObserver: ResizeObserver
 
   constructor(cbs: WaterfallViewCallbacks) {
@@ -188,6 +294,8 @@ export class WaterfallView implements View {
 
   clear(): void {
     this.notes = []
+    this.pedalSegments = []
+    this.pedalFocus = null
     this.playhead = 0
     this.viewTopSec = 0
     this.prevActive.clear()
@@ -195,9 +303,18 @@ export class WaterfallView implements View {
     this.render()
   }
 
-  /** 练习模式键盘反馈：按住键琥珀点亮、按错键红色（null 清除） */
-  setKeyFeedback(fb: WaterfallKeyFeedback | null): void {
-    this.keyFeedback = fb
+  /**
+   * 踏板轨道数据（设计文档 20260912-midi-pedal-lane-and-practice.md §3.4）：
+   * 曲目三踏板 CC 事件 → 踩下区间（时值），与音符条同一条时间轴坠落。
+   */
+  setPedals(events: readonly PedalEvent[]): void {
+    this.pedalSegments = buildPedalSegments(events)
+    this.render()
+  }
+
+  /** 练习模式反馈：按住键琥珀点亮、按错键红色、误踩踏板红色光晕（null 清除） */
+  setFeedback(fb: WaterfallFeedback | null): void {
+    this.feedback = fb
     this.render()
   }
 
@@ -208,6 +325,15 @@ export class WaterfallView implements View {
    */
   setPracticeTracks(tracks: ReadonlySet<number> | null): void {
     this.practiceTracks = tracks
+    this.render()
+  }
+
+  /**
+   * 练习模式踏板关注范围（设计文档 20260912-midi-pedal-lane-and-practice.md §3.4）：
+   * 范围外的踏板条压暗（"无需关注"）、不显示触发光晕；null = 练习未开启，全部正常显示。
+   */
+  setPedalFocus(focus: PedalFocus | null): void {
+    this.pedalFocus = focus
     this.render()
   }
 
@@ -233,6 +359,8 @@ export class WaterfallView implements View {
     this.canvas.width = Math.round(w * dpr)
     this.canvas.height = Math.round(h * dpr)
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    // 宽度变化 → 踏板光晕贴图（按宽度缓存）作废，下一帧按新宽度重建
+    this.glowSprites.clear()
     // 背景微渐变缓存：自上而下 #121110 → #161514
     const g = this.ctx.createLinearGradient(0, 0, 0, h)
     g.addColorStop(0, '#121110')
@@ -265,10 +393,140 @@ export class WaterfallView implements View {
     const yAt = (t: number): number => noteAreaH - (t - tKey) * this.pxPerSecond
 
     this.drawLaneGuides(w, noteAreaH)
+    // 踏板条置于最底下：先画踏板，音符条覆盖其上（不阻挡其它音符）
+    this.drawPedals(w, noteAreaH, yAt)
     this.drawNotes(w, noteAreaH, yAt)
     this.drawJudgmentGlow(w, noteAreaH)
+    // 触发/误踩光晕画在音符之上：光带很薄且半透明，不会遮住音符，但必须清晰可见
+    this.drawPedalGlows(w, noteAreaH)
     // 底部键盘是共享 DOM 组件，这里只同步它的点亮状态
     this.applyKeyLights()
+  }
+
+  /** 三列踏板（左弱音 / 中选择延音 / 右延音）的横向几何：条宽 4 白键、间隔 2 白键、整体居中 */
+  private pedalColumns(w: number): { left: number; width: number }[] {
+    const keyW = w / WHITE_KEY_COUNT
+    const barW = PEDAL_BAR_WHITE_KEYS * keyW
+    const step = (PEDAL_BAR_WHITE_KEYS + PEDAL_GAP_WHITE_KEYS) * keyW
+    const groupW = PEDALS.length * barW + (PEDALS.length - 1) * PEDAL_GAP_WHITE_KEYS * keyW
+    const left0 = (w - groupW) / 2
+    return PEDALS.map((_, i) => ({ left: left0 + i * step, width: barW }))
+  }
+
+  /** 某分段是否落在练习关注范围内；练习未开启（focus = null）→ 全部关注 */
+  private pedalFocused(seg: PedalSegment): boolean {
+    return this.pedalFocus === null || isSegmentFocused(seg, this.pedalFocus)
+  }
+
+  /**
+   * 踏板条（银灰，置底）：与音符条同一时间映射，条底 = 踩下时刻、条顶 = 抬起时刻。
+   * 无踏板事件时画布上不出现任何踏板相关背景（用户口径：只显示事件条本身）；
+   * 练习模式下关注范围外的条压暗（"无需关注"，不判定也不显示触发光晕）。
+   */
+  private drawPedals(w: number, noteAreaH: number, yAt: (t: number) => number): void {
+    if (this.pedalSegments.length === 0) return
+    const ctx = this.ctx
+    const cols = this.pedalColumns(w)
+
+    for (const seg of this.pedalSegments) {
+      if (seg.start > this.viewTopSec + 0.5) break // 按 start 排序，越界即止
+      const bottomEdge = yAt(seg.start)
+      const topEdge = yAt(seg.end)
+      if (bottomEdge <= 0 || topEdge >= noteAreaH) continue
+      const y0 = Math.max(0, topEdge)
+      const y1 = Math.min(noteAreaH, bottomEdge)
+      if (y1 - y0 < 1) continue
+
+      const col = cols[pedalColumn(seg.pedalId)]
+      const alpha = this.pedalFocused(seg) ? PEDAL_BAR_ALPHA : PEDAL_DIM_ALPHA
+      // 上下渐变（顶亮底暗，银灰金属感）+ 顶部 1px 高光
+      const g = ctx.createLinearGradient(0, y0, 0, y1)
+      g.addColorStop(0, shade(PEDAL_SILVER_TOP, 1))
+      g.addColorStop(1, shade(PEDAL_SILVER_BOTTOM, 1))
+      ctx.globalAlpha = alpha
+      ctx.fillStyle = g
+      const radius = Math.min(3, col.width / 4, (y1 - y0) / 2)
+      this.roundRect(col.left, y0, col.width, y1 - y0, radius)
+      ctx.fill()
+      if (y1 - y0 > 4) {
+        ctx.fillStyle = 'rgba(255,255,255,0.22)'
+        this.roundRect(col.left, y0, col.width, 1, 0.5)
+        ctx.fill()
+      }
+      ctx.globalAlpha = 1
+    }
+  }
+
+  /**
+   * 判定线（= 键盘上沿）处的踏板光晕：
+   * - 银白：文件踏板正在踩下（关注范围内）——接触瞬间亮起，抬起后 120ms 渐隐；
+   * - 红色：练习等待期间误踩的踏板（与按错键同色，位置与银白光晕完全一致）。
+   */
+  private drawPedalGlows(w: number, noteAreaH: number): void {
+    const wrongPedals = this.feedback?.wrongPedals
+    if (this.pedalSegments.length === 0 && (wrongPedals === undefined || wrongPedals.size === 0)) {
+      return
+    }
+    const cols = this.pedalColumns(w)
+    const now = this.playhead
+
+    for (const seg of this.pedalSegments) {
+      if (seg.start > now) break
+      if (!this.pedalFocused(seg)) continue
+      let strength: number
+      if (now <= seg.end) {
+        strength = 1
+      } else if (now - seg.end < PEDAL_GLOW_FADE_SEC) {
+        strength = 1 - (now - seg.end) / PEDAL_GLOW_FADE_SEC
+      } else {
+        continue
+      }
+      this.drawPedalGlow(cols[pedalColumn(seg.pedalId)], noteAreaH, PEDAL_GLOW_RGB, strength)
+    }
+
+    // 误踩红晕最后画：覆盖同列银光，位置一致
+    if (wrongPedals !== undefined) {
+      for (const id of wrongPedals) {
+        this.drawPedalGlow(cols[pedalColumn(id)], noteAreaH, WRONG_RGB, 0.95)
+      }
+    }
+  }
+
+  /**
+   * 单列踏板光晕：圆角矩形光斑的**高度中点落在判定线上**（只画光晕本身，不画发光条）。
+   * 可见部分只有上半块（底边平直、上方圆角）；下半块在钢琴键盘区域，被裁掉不画。
+   */
+  private drawPedalGlow(
+    col: { left: number; width: number },
+    noteAreaH: number,
+    rgb: Rgb,
+    strength: number,
+  ): void {
+    const ctx = this.ctx
+    const width = col.width + PEDAL_GLOW_SPREAD_X * 2
+    const key = `${Math.round(width)}|${rgb[0]},${rgb[1]},${rgb[2]}`
+    let sprite = this.glowSprites.get(key)
+    if (sprite === undefined) {
+      sprite = buildPedalGlowSprite(width, rgb)
+      this.glowSprites.set(key, sprite)
+    }
+    const pad = PEDAL_GLOW_PAD
+    const h = PEDAL_GLOW_HALF * 2
+    ctx.save()
+    // 只画判定线以上：光晕下半块（钢琴键盘区域）不画，模糊外溢也不越过判定线
+    ctx.beginPath()
+    ctx.rect(0, 0, this.el.clientWidth, noteAreaH)
+    ctx.clip()
+    ctx.globalAlpha = Math.max(0, Math.min(1, strength))
+    // 贴图内容（圆角矩形）高度中点对齐判定线，四周留白 pad 容纳模糊外溢
+    ctx.drawImage(
+      sprite,
+      col.left - PEDAL_GLOW_SPREAD_X - pad,
+      noteAreaH - PEDAL_GLOW_HALF - pad,
+      width + pad * 2,
+      h + pad * 2,
+    )
+    ctx.restore()
   }
 
   /** 音区参考线：每个 C 音位置 1px 发丝竖线，画在 C 键左边缘（B|C 键缝），与键盘严格对齐 */
@@ -339,7 +597,7 @@ export class WaterfallView implements View {
     }
 
     // 练习反馈叠在轨色点亮之上：按住键琥珀半透明（55%）、按错键红（92%）+ 光晕
-    const fb = this.keyFeedback
+    const fb = this.feedback
     if (fb !== null) {
       for (const p of fb.held) {
         if (fb.wrong.has(p)) continue
@@ -415,14 +673,6 @@ export class WaterfallView implements View {
   }
 
   private roundRect(x: number, y: number, w: number, h: number, r: number): void {
-    const ctx = this.ctx
-    const rr = Math.max(0, Math.min(r, w / 2, h / 2))
-    ctx.beginPath()
-    ctx.moveTo(x + rr, y)
-    ctx.arcTo(x + w, y, x + w, y + h, rr)
-    ctx.arcTo(x + w, y + h, x, y + h, rr)
-    ctx.arcTo(x, y + h, x, y, rr)
-    ctx.arcTo(x, y, x + w, y, rr)
-    ctx.closePath()
+    roundRectPath(this.ctx, x, y, w, h, r)
   }
 }

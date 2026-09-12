@@ -1,12 +1,7 @@
 import { Midi } from '@tonejs/midi'
 
-import type {
-  KeySignatureEvent,
-  Song,
-  SustainEvent,
-  TempoEvent,
-  TimeSignatureEvent,
-} from '../model'
+import type { KeySignatureEvent, PedalEvent, Song, TempoEvent, TimeSignatureEvent } from '../model'
+import { PEDALS } from './pedals'
 
 /** GM 打击乐通道（channel 9 = 第 10 通道） */
 const PERCUSSION_CHANNEL = 9
@@ -64,7 +59,8 @@ function minorKeySf(minorTonicName: string): number {
 
 /**
  * 解析 MIDI 文件字节为领域模型 Song。
- * 合并所有非打击乐轨道的音符为单一事件流（按 start 排序）。
+ * 合并所有非打击乐轨道的音符为单一事件流（按 start 排序），
+ * 三踏板 CC（64/66/67）另存为踏板事件（按 time 排序，保留来源轨与通道）。
  */
 export function parseMidi(bytes: ArrayBuffer): Song {
   const midi = new Midi(bytes)
@@ -108,14 +104,26 @@ export function parseMidi(bytes: ArrayBuffer): Song {
   }))
 
   const notes: Song['notes'] = []
-  const sustainEvents: SustainEvent[] = []
+  const pedalEvents: PedalEvent[] = []
   for (let i = 0; i < midi.tracks.length; i++) {
     const t = midi.tracks[i]
     if (t.instrument.percussion || t.channel === PERCUSSION_CHANNEL) continue
-    // 延音踏板（CC64）：记谱用它延长长音，避免长音被量化切成休止符碎片
-    const cc64 = t.controlChanges[64]
-    if (cc64 !== undefined) {
-      for (const c of cc64) sustainEvents.push({ time: c.time, value: c.value })
+    // 三踏板（CC64 延音 / CC66 选择延音 / CC67 弱音）：瀑布流踏板轨道与练习判定用。
+    // @tonejs/midi 的 CC 值已归一化为 0–1，这里还原成 MIDI 的 0–127（`>= 64` 为踩下）；
+    // 事件不带通道（库丢弃），用轨内音符推导出的 t.channel 归属（研究文档
+    // 20260912-midi-pedal-track-relationship.md §5）。
+    for (const pedal of PEDALS) {
+      const changes = t.controlChanges[pedal.cc]
+      if (changes === undefined) continue
+      for (const c of changes) {
+        pedalEvents.push({
+          time: c.time,
+          controller: pedal.cc,
+          value: Math.max(0, Math.min(127, Math.round(c.value * 127))),
+          trackIndex: i,
+          channel: t.channel,
+        })
+      }
     }
     for (const n of t.notes) {
       // velocity 0 的 note-on 等价 note-off，@tonejs/midi 一般已处理，这里兜底过滤
@@ -130,7 +138,11 @@ export function parseMidi(bytes: ArrayBuffer): Song {
     }
   }
   notes.sort((a, b) => a.start - b.start || a.pitch - b.pitch)
-  sustainEvents.sort((a, b) => a.time - b.time)
+  // 同一时刻的踏板事件按轨号/控制器号定序（sort 稳定：同踏板同通道的先后顺序保持不变，
+  // 踏板换踩的 0/127 同刻事件不会被重排）
+  pedalEvents.sort(
+    (a, b) => a.time - b.time || a.trackIndex - b.trackIndex || a.controller - b.controller,
+  )
 
   const duration = notes.reduce((m, n) => Math.max(m, n.end), 0)
 
@@ -142,6 +154,6 @@ export function parseMidi(bytes: ArrayBuffer): Song {
     keySignatures: keySigsDedup,
     tracks,
     notes,
-    sustainEvents,
+    pedalEvents,
   }
 }

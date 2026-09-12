@@ -142,6 +142,7 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
     onMidiRetry: () => practiceController.autoConnect(),
     onPracticeToggle: () => practiceController.togglePractice(),
     onPracticeTrack: (index) => practiceController.toggleTrack(index),
+    onPedalPractice: (mode) => practiceController.setPedalPractice(mode),
   })
 
   // ---------- MIDI 键盘 + 练习模式 ----------
@@ -190,9 +191,11 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
         // 分轨压暗：练习轨正常显示，非练习轨瀑布流暗淡（练习关闭时传 null 恢复）
         const gated = new Set(ui.tracks.filter((t) => t.on).map((t) => t.index))
         waterfall.setPracticeTracks(ui.active ? gated : null)
+        // 踏板轨道关注范围：范围外的踏板条压暗、不显示触发光晕（练习关闭时传 null 恢复）
+        waterfall.setPedalFocus(ui.pedalFocus)
         transportView.setPractice(ui)
       },
-      onFeedback: (fb) => waterfall.setKeyFeedback(fb),
+      onFeedback: (fb) => waterfall.setFeedback(fb),
       onConnectError: (message) => showMidiError(message),
     },
   })
@@ -271,6 +274,7 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
       const score = quantizeToScore(song)
       transport.load(song)
       waterfall.setNotes(song.notes)
+      waterfall.setPedals(song.pedalEvents)
       practiceController.setTracks(practiceTracksOf(song))
       const sv = await ensureScoreView()
       sv.setScore(score)

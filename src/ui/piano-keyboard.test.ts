@@ -7,6 +7,7 @@ import {
   MIN_PITCH,
   WHITE_INDEX,
   keyGeometry,
+  keyPressStyle,
 } from './piano-keyboard'
 
 const W = 960
@@ -80,5 +81,62 @@ describe('keyGeometry（与 .piano CSS 同一套键盘几何公式）', () => {
   it('超出 A0–C8 抛 RangeError', () => {
     expect(() => keyGeometry(W, MIN_PITCH - 1)).toThrow(RangeError)
     expect(() => keyGeometry(W, MAX_PITCH + 1)).toThrow(RangeError)
+  })
+})
+
+/** linear-gradient 里的一个颜色端点 */
+interface RgbTriplet {
+  top: readonly [number, number, number]
+  bottom: readonly [number, number, number]
+}
+
+/** 解析 keyPressStyle 的 background：linear-gradient(rgb(顶), rgb(底)) */
+function parseGradient(css: string): RgbTriplet {
+  const found = [...css.matchAll(/rgb\((\d+),(\d+),(\d+)\)/g)].map(
+    (m) => [Number(m[1]), Number(m[2]), Number(m[3])] as const,
+  )
+  if (found.length !== 2) throw new Error(`无法解析渐变色：${css}`)
+  return { top: found[0], bottom: found[1] }
+}
+
+/** 三元组亮度均值（越大越亮；琥珀叠加越多 → 白键越暗、黑键越亮） */
+const luma = ([r, g, b]: readonly [number, number, number]): number => (r + g + b) / 3
+
+describe('keyPressStyle（按下键色按力度叠加）', () => {
+  it('白键：力度越大琥珀叠加越多 → 亮度越低；最轻力度仍是明显琥珀', () => {
+    const soft = luma(parseGradient(keyPressStyle(1, false).background).top)
+    const hard = luma(parseGradient(keyPressStyle(127, false).background).top)
+    // 白键本色顶色 #f4f1eb 亮度约 240；最重力度应明显更深
+    expect(hard).toBeLessThan(soft - 30)
+    // 最轻力度也不退化成白键本色（仍是琥珀，亮度明显低于白键本色约 240）
+    expect(soft).toBeLessThan(225)
+  })
+
+  it('白键力度单调：越重越深', () => {
+    const at = (v: number): number => luma(parseGradient(keyPressStyle(v, false).background).top)
+    expect(at(20)).toBeGreaterThan(at(60))
+    expect(at(60)).toBeGreaterThan(at(100))
+    expect(at(100)).toBeGreaterThan(at(127))
+  })
+
+  it('黑键：力度越大越亮（琥珀透出），常态投影由 CSS 保留', () => {
+    const soft = keyPressStyle(0, true)
+    const hard = keyPressStyle(127, true)
+    expect(luma(parseGradient(hard.background).top)).toBeGreaterThan(
+      luma(parseGradient(soft.background).top),
+    )
+    // 键色由内联渐变表达；黑键常态投影留在 .piano__bkey 的 CSS 里（不被内联覆盖）
+    expect(soft.alpha).toBeLessThan(hard.alpha)
+  })
+
+  it('光晕峰值随力度增强，最轻力度为 0（无光晕）', () => {
+    expect(keyPressStyle(0, false).glow).toBe(0)
+    expect(keyPressStyle(64, false).glow).toBeCloseTo(0.6 * (64 / 127) ** 0.4, 12)
+    expect(keyPressStyle(127, false).glow).toBeCloseTo(0.6, 12)
+  })
+
+  it('越界力度收敛到 0–127', () => {
+    expect(keyPressStyle(-5, false)).toEqual(keyPressStyle(0, false))
+    expect(keyPressStyle(200, false)).toEqual(keyPressStyle(127, false))
   })
 })

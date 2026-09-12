@@ -178,3 +178,14 @@ MIDI 1.0 通道声音消息（channel voice messages）的状态字节高 4 位�
 > （依据 MIDI 1.0 消息概要 <https://midi.org/summary-of-midi-1-0-messages>）
 
 音符号 60 = 中央 C（C4，科学音高记号），69 = A4（标准音 440 Hz）。
+
+### 8.1 力度与幅度的换算（外部资料摘录，2026-09-12）
+
+Csound `ampmidid` opcode 手册（<https://csound.com/manual/opcodes/ampmidid/>，引 Roger Dannenberg,
+"The Interpretation of MIDI Velocity", ICMC 2006, pp. 193–196）：
+
+> Musically map MIDI velocity to peak amplitude within a specified dynamic range in decibels:
+> `a = (mv + b) ^ 2`, where `a` = amplitude, `v` = MIDI velocity, `r = 10 ^ (R / 20)`,
+> `b = 127 / (126 √r) − 1 / 126`, `m = (1 − b) / 127`, and `R` = specified dynamic range in decibels.
+
+即力度→幅度为**平方律**（力度 1 落在动态范围最低端、127 为 0 dB 峰值），不是线性。

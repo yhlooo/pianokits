@@ -18,7 +18,8 @@ import { el } from './dom'
  * 瀑布流画布用它画音符条与音区参考线，保证画布内容与底部 DOM 键盘严格对齐。
  *
  * 点亮态有两种：
- * - `setPressed`：简单的“按下”态（琥珀渐变 class），调试页用；
+ * - `setPressed`：调试页的“按下”态——收 `pitch → velocity`，按下键以琥珀色按力度叠加
+ *   （力度越大越不透明、越深，并带一点光晕），因此键色的浓淡就是这次按键的力度；
  * - `setLit`：逐键点亮样式（颜色 / 强度 / 光晕），瀑布流用——点亮色按 alpha
  *   混合到键的基础渐变上（等效于画布时代的同色半透明覆盖），逐帧调用即可驱动
  *   释放渐隐；此时禁用该键的 CSS 过渡，避免与逐帧 alpha 打架。
@@ -124,6 +125,48 @@ function rgba(c: Rgb, a: number): string {
   return `rgba(${c[0]},${c[1]},${c[2]},${a})`
 }
 
+/** 按下键的琥珀色（调试页按下态 #d9a45b；与风格文档的 --accent 同色） */
+const PRESS_RGB = [217, 164, 91] as const
+/**
+ * 按力度叠加的不透明度下限：0.30 保证极轻的按键也明显是琥珀色（而不是“几乎没按下”），
+ * 上限 1 = 全琥珀。不透明度越高 → 键色越深，即“力度越大越深、越小越浅”。
+ */
+const PRESS_ALPHA_MIN = 0.3
+/** 按下键的光晕系数：最强力度时的外发光峰值不透明度（0 = 无光晕） */
+const PRESS_GLOW_MAX = 0.6
+/** 按下键的呼吸光晕参数：CSS 的 `piano-press-glow` keyframes 直接读它决定明暗摆幅 */
+const PRESS_ALPHA_VAR = '--press-alpha'
+
+/**
+ * 按下键的视觉：力度（0–127）→ 键色渐变、琥珀叠加不透明度与光晕峰值。
+ * 琥珀色按 alpha 叠加在键的基础渐变上：白键变琥珀深浅、黑键透出琥珀光泽。
+ *
+ * 力度→强度走**幂曲线**（指数 0.4，低力度拉开、高力度压缩），与
+ * `debug/midi-debug-state.ts` 的 `velocityIntensity` 同一口径——依据是 MIDI 力度与音量的
+ * 平方律关系（Dannenberg, ICMC 2006；见该文件注释）。线性映射会让 1 与 30 的键色几乎一样深。
+ *
+ * 呼吸光晕交给 CSS 动画（`piano-press-glow`）：keyframes 读取元素当前的 `--press-alpha`
+ * 决定明暗摆幅（该写法在 CSS 变量规范内是允许的），所以光晕也随力度变亮。
+ */
+export function keyPressStyle(
+  velocity: number,
+  black: boolean,
+): { background: string; alpha: number; glow: number } {
+  const clamped = Math.max(0, Math.min(127, velocity))
+  const intensity = (clamped / 127) ** 0.4
+  const alpha = PRESS_ALPHA_MIN + (1 - PRESS_ALPHA_MIN) * intensity
+  const base = black ? BLACK_BASE : WHITE_BASE
+  return {
+    background: `linear-gradient(${mix(PRESS_RGB, base[0], alpha)}, ${mix(
+      PRESS_RGB,
+      base[1],
+      alpha,
+    )})`,
+    alpha,
+    glow: PRESS_GLOW_MAX * intensity,
+  }
+}
+
 export interface PianoLit {
   /** 点亮色（RGB 三元组，0~255） */
   color: Rgb
@@ -135,8 +178,8 @@ export interface PianoLit {
 
 export interface PianoView {
   el: HTMLElement
-  /** 按下态（琥珀点亮）：Map 之外的键恢复常态 */
-  setPressed(pitches: readonly number[]): void
+  /** 按下态（琥珀按力度叠加）：pitch → velocity，Map 之外的键恢复常态 */
+  setPressed(pressed: ReadonlyMap<number, number>): void
   /** 逐键点亮态：Map 之外的键恢复常态 */
   setLit(lit: ReadonlyMap<number, PianoLit>): void
 }
@@ -172,15 +215,30 @@ export function buildPiano(): PianoView {
     blacks.append(key)
   }
 
-  let prevPressed = new Set<number>()
+  let prevPressed = new Map<number, number>()
   return {
     el: el('div', { class: 'piano' }, whites, blacks),
-    setPressed(pitches) {
-      const next = new Set(pitches)
-      for (const p of prevPressed)
-        if (!next.has(p)) keyByPitch.get(p)?.classList.remove('is-pressed')
-      for (const p of next) if (!prevPressed.has(p)) keyByPitch.get(p)?.classList.add('is-pressed')
-      prevPressed = next
+    setPressed(pressed) {
+      // 抬起的键：清内联覆盖，回到 CSS 里的常态渐变
+      for (const p of prevPressed.keys()) {
+        if (pressed.has(p)) continue
+        const key = keyByPitch.get(p)
+        if (key === undefined) continue
+        key.style.removeProperty('background')
+        key.style.removeProperty(PRESS_ALPHA_VAR)
+      }
+      // 新按下 / 力度变化的键：写按力度合成的键色（未变的键不重复写，省一次样式重算）
+      for (const [p, velocity] of pressed) {
+        if (prevPressed.get(p) === velocity) continue
+        const key = keyByPitch.get(p)
+        if (key === undefined) continue
+        const style = keyPressStyle(velocity, isBlack.has(p))
+        key.style.background = style.background
+        // 呼吸光晕：亮度摆幅与键色都出自同一 alpha（力度越大越亮越深）；
+        // 动画本身由 `.is-pressed` 的 CSS 定义（style.css 的 piano-press-glow keyframes）
+        key.style.setProperty(PRESS_ALPHA_VAR, String(style.alpha))
+      }
+      prevPressed = new Map(pressed)
     },
     setLit(lit) {
       for (const [p, key] of keyByPitch) {

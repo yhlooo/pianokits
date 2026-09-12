@@ -1,10 +1,21 @@
 import { sortedHeldPitches } from '../core/midi/held-keys'
-import { parseMidiMessage } from '../core/midi/input'
 import { midiNoteName } from '../core/midi/note-name'
-import { CONNECT_TIMEOUT_MS } from '../core/midi/connection'
+import { CONNECT_TIMEOUT_MS, MidiConnection } from '../core/midi/connection'
+import { PEDALS, pedalMode } from '../core/midi/pedals'
+import type { MidiControlChange, MidiNoteEvent } from '../core/midi/input'
 import { el } from '../ui/dom'
 import { chevronDownIcon, chevronUpIcon } from '../ui/icons'
 import { BLACK_PCS, WHITE_INDEX, buildPiano } from '../ui/piano-keyboard'
+import {
+  DebugMidiState,
+  pedalBorderAlpha,
+  pedalBoxText,
+  pedalFillAlpha,
+  pedalTextAlpha,
+  velocityFillAlpha,
+  velocityTextAlpha,
+  type DebugPedalSnapshot,
+} from './midi-debug-state'
 
 // ---------- 大谱表（自绘 SVG）坐标 ----------
 // 纵向全部由 S 推导（谱表高、轨间距、谱号、符头、视窗边距都按线间距的比例），
@@ -444,12 +455,71 @@ function setDiag(row: DiagRow, text: string, tone: DiagTone = 'neutral'): void {
   row.value.dataset.tone = tone
 }
 
+/** 音名方块（音名 + 右上角力度角标）：力度角标在无按键时留空占位 */
+interface KeyChip {
+  el: HTMLElement
+  set(pitch: number, velocity: number): void
+}
+
+function buildKeyChip(): KeyChip {
+  const nameEl = el('span', { class: 'midi-debug__key-name' })
+  const velocityEl = el('span', { class: 'midi-debug__velocity' })
+  const el0 = el('div', { class: 'midi-debug__key' }, nameEl, velocityEl)
+  return {
+    el: el0,
+    set(pitch, velocity) {
+      nameEl.textContent = midiNoteName(pitch)
+      velocityEl.textContent = String(velocity)
+      // 文字亮度与背景底色同源：力度越大越亮、底色越明显（整块面积都能看出差异）
+      const alpha = String(velocityTextAlpha(velocity))
+      nameEl.style.opacity = alpha
+      velocityEl.style.opacity = alpha
+      el0.style.backgroundColor = `rgba(244, 241, 235, ${velocityFillAlpha(velocity)})`
+    },
+  }
+}
+
+/** 踏板方块：中间大字百分比 + 右上角原始 0–127 值（不论是否触发都显示，不带 CC 号字样） */
+interface PedalBox {
+  /** 整体不透明度：未收到消息时压暗，其余保持正常 */
+  el: HTMLElement
+  set(snapshot: DebugPedalSnapshot): void
+}
+
+function buildPedalBox(def: (typeof PEDALS)[number]): PedalBox {
+  const rawEl = el('span', { class: 'midi-debug__pedal-raw' })
+  const percentEl = el('span', { class: 'midi-debug__pedal-percent' })
+  const boxEl = el('div', { class: 'midi-debug__pedal-box' }, rawEl, percentEl)
+  const nameEl = el('span', { class: 'midi-debug__pedal-name' }, def.name)
+  return {
+    el: el('div', { class: 'midi-debug__pedal' }, boxEl, nameEl),
+    set({ state }) {
+      const text = pedalBoxText(state)
+      percentEl.textContent = text.percent
+      rawEl.textContent = text.raw
+      boxEl.style.background = `rgba(90, 190, 130, ${pedalFillAlpha(state.value)})`
+      boxEl.style.borderColor = `rgba(90, 190, 130, ${pedalBorderAlpha(state.value)})`
+      boxEl.style.color = `rgba(244, 241, 235, ${pedalTextAlpha(state.value)})`
+      boxEl.classList.toggle('is-level', pedalMode(state) === 'level')
+      // 没收到过该踏板的任何消息 → 压暗提示“未接入/未踩过”
+      boxEl.classList.toggle('is-idle', !state.seen)
+    },
+  }
+}
+
 /**
- * “MIDI 键盘”调试工具：识别连接电脑的 USB MIDI 键盘，按键时实时反馈——
- * 大谱表上显示音符位置（只显不记）、音名 chips（并显所有按住键）、88 键钢琴键盘点亮。
- * 三处反馈自上而下为：五线谱 / 音高符号 / 钢琴键盘。
- * 与正常工具一样挂载到内容区，占据一个完整页面。
- * 2026-09-06 起状态行下增加连接诊断面板（安全上下文 / API 可用性 / midi 权限 / 连接阶段），
+ * 「MIDI 键盘」调试工具：识别连接电脑的 USB MIDI 键盘，按键时实时反馈——
+ * 大谱表上显示音符位置（只显不记）、音名方块（并显所有按住键与力度）、88 键钢琴键盘点亮。
+ * 自 2026-09-12 起增加：
+ * - **力度**：音名方块右上角显示力度数值，方块文字亮度与键盘键色深浅同步按力度线性变化；
+ * - **踏板**：音名方块下方单独一行显示 CC64/66/67 三踏板（中间大字百分比 + 右上角小字原始值，
+ *   绿色背景表示踩下、越深越浓；未观察到幅度值也照显数值）——见设计文档
+ *   docs/development/design/20260912-midi-debug-velocity-pedal.md；
+ * - **接入层**：改用共享的 core/midi/connection.ts（不再自持 requestMIDIAccess 流程），
+ *   诊断数据经其只读 getter 取得，呈现（面板、超时、重试）留在本页。
+ *
+ * 调试工具与正常工具一样挂载到内容区，占据一个完整页面。
+ * 状态行下是连接诊断面板（安全上下文 / API 可用性 / midi 权限 / 连接阶段），
  * 连接请求 5s 未返回时提示“连接超时”并可重试；各状态变化同时写入浏览器 Console
  * （前缀 `[midi-debug]`）。依据设计文档 docs/development/design/20260905-debug-tools.md §4.3
  * 与研究结论 docs/development/research/20260906-web-midi-connect-hang.md。
@@ -478,13 +548,22 @@ export function mountMidiKeyboard(host: HTMLElement): () => void {
   const statusRow = el('div', { class: 'midi-debug__status-row' }, statusEl, diagToggle)
   const hintEl = el('div', { class: 'midi-debug__hint', hidden: true })
   const retryEl = el('button', { class: 'midi-debug__retry', hidden: true }, '重试连接')
-  retryEl.addEventListener('click', start)
   const devicesEl = el('ul', { class: 'midi-debug__devices' })
   const keysEl = el('div', { class: 'midi-debug__keys' })
+  const keysPlaceholder = el('div', { class: 'midi-debug__note' }, '—')
+  const pedalRow = el('div', { class: 'midi-debug__pedals' })
+  const pedalBoxes: PedalBox[] = []
+  const pedalsEl = el('div', { class: 'midi-debug__pedal-section' }, pedalRow)
+  for (const def of PEDALS) {
+    const box = buildPedalBox(def)
+    pedalBoxes.push(box)
+    pedalRow.append(box.el)
+  }
   const piano = buildPiano()
   const score = buildScore()
-  // 自上而下：状态行（含折叠开关）→ 诊断面板 → 排查提示 → 重试 → 设备列表 → 五线谱 → 音高符号 → 钢琴键盘
-  const stageEl = el('div', { class: 'midi-debug__stage' }, score.el, keysEl, piano.el)
+  // 自上而下：状态行（含折叠开关）→ 诊断面板 → 排查提示 → 重试 → 设备列表 → 五线谱 →
+  // 音名方块（含力度）→ 踏板行 → 钢琴键盘
+  const stageEl = el('div', { class: 'midi-debug__stage' }, score.el, keysEl, pedalsEl, piano.el)
   const innerEl = el(
     'div',
     { class: 'midi-debug__inner' },
@@ -497,105 +576,107 @@ export function mountMidiKeyboard(host: HTMLElement): () => void {
   )
   host.append(el('div', { class: 'midi-debug' }, innerEl))
 
+  /**
+   * 输入状态（按住键力度 + 踏板）与视觉映射，见 debug/midi-debug-state.ts。
+   * 状态容器先建（连接层回调会用到），MIDI 连接对象在其后创建。
+   */
   let disposed = false
-  let access: MIDIAccess | null = null
-  const attachedInputs: MIDIInput[] = []
-  /** 当前按住的键：pitch → velocity（Map 插入顺序即按下顺序） */
-  const held = new Map<number, number>()
+  const state = new DebugMidiState()
   /** Permissions API 查询到的 midi 权限对象（change 事件实时刷新诊断面板） */
   let permStatus: PermissionStatus | null = null
   let permState: PermissionState | null = null
-  /** 连接尝试序号：dispose / 重试时自增，作废在途的授权请求结果 */
-  let attempt = 0
-  let requestStart = 0
-  let pending = false
+  /** 连接超过阈值仍未落定：仅影响提示文案与重试按钮，不放弃在途请求 */
   let timedOut = false
   let elapsedTimer: number | undefined
   let timeoutTimer: number | undefined
-  /**
-   * 是否第三方 Web MIDI shim（如 iPad 的 Web MIDI Browser / cordova-plugin-webmidi）。
-   * shim 可运行于 HTTP 与 HTTPS，不能仅凭安全上下文判断：
-   * - 非安全上下文下仍存在 requestMIDIAccess 必为 shim（原生 Web MIDI 只在安全上下文暴露）；
-   * - 安全上下文下改用 shim 注入的非标准全局构造器 MIDIEventDispatcher 识别（原生浏览器无此全局，
-   *   见 WebMIDIAPIShimForiOS 的 WebMIDIAPIPolyfill.js）。
-   */
-  const isShimmedMidi =
-    typeof navigator.requestMIDIAccess === 'function' &&
-    (!window.isSecureContext ||
-      typeof (window as unknown as { MIDIEventDispatcher?: unknown }).MIDIEventDispatcher ===
-        'function')
 
-  function renderAll(): void {
-    const pitches = sortedHeldPitches(held)
-    keysEl.replaceChildren()
-    if (pitches.length === 0) {
-      keysEl.append(el('div', { class: 'midi-debug__note' }, '—'))
-    } else {
-      for (const p of pitches)
-        keysEl.append(el('div', { class: 'midi-debug__key' }, midiNoteName(p)))
+  /** shim（Web MIDI Browser）原生桥是否就绪：同步抛错时用来分辨“桥缺失”与其它异常 */
+  const supportBridge = (): boolean => {
+    const w = window as unknown as {
+      webkit?: { messageHandlers?: { onready?: { postMessage?: unknown } } }
     }
-    piano.setPressed(pitches)
-    score.setNotes(pitches)
+    return typeof w.webkit?.messageHandlers?.onready?.postMessage === 'function'
   }
 
-  function deviceLabel(input: MIDIInput): string {
-    const name = input.name?.trim() || '未命名设备'
-    const manufacturer = input.manufacturer?.trim()
-    return manufacturer ? `${manufacturer} ${name}` : name
+  /** chips 与踏板行复用同一批 DOM（不整段重建），按键 / 踩踏板时只改文本与颜色 */
+  const chipByPitch = new Map<number, KeyChip>()
+  let placeholderShown = true
+
+  function renderHeld(held: ReadonlyMap<number, number>): void {
+    const pitches = sortedHeldPitches(held)
+    if (pitches.length === 0) {
+      for (const chip of chipByPitch.values()) chip.el.remove()
+      chipByPitch.clear()
+      if (!placeholderShown) {
+        keysEl.append(keysPlaceholder)
+        placeholderShown = true
+      }
+      return
+    }
+    if (placeholderShown) {
+      keysPlaceholder.remove()
+      placeholderShown = false
+    }
+    const wanted = new Set(pitches)
+    for (const [pitch, chip] of chipByPitch) {
+      if (wanted.has(pitch)) continue
+      chip.el.remove()
+      chipByPitch.delete(pitch)
+    }
+    for (const pitch of pitches) {
+      // 音高升序：新键插到第一个更大音高的 chip 之前（与既有音名 chips 的顺序一致）
+      const next = pitches.find((p) => p > pitch)
+      const anchor = next === undefined ? null : (chipByPitch.get(next)?.el ?? null)
+      let chip = chipByPitch.get(pitch)
+      if (chip === undefined) {
+        chip = buildKeyChip()
+        keysEl.insertBefore(chip.el, anchor)
+        chipByPitch.set(pitch, chip)
+      } else if (chip.el.nextElementSibling !== anchor) {
+        keysEl.insertBefore(chip.el, anchor)
+      }
+      chip.set(pitch, held.get(pitch) ?? 127)
+    }
+  }
+
+  function renderPedals(pedals: readonly DebugPedalSnapshot[]): void {
+    pedals.forEach((snapshot, i) => pedalBoxes[i]?.set(snapshot))
+  }
+
+  function renderSnapshot(): void {
+    const snap = state.snapshot()
+    renderHeld(snap.held)
+    renderPedals(snap.pedals)
+    // 键盘按下态：色深即力度（白键琥珀深浅、黑键琥珀光泽），与音名方块亮度同源
+    piano.setPressed(snap.held)
+    // 大谱表只表达音高（不写力度、不改墨色，2026-09-12 与用户确认）
+    score.setNotes(sortedHeldPitches(snap.held))
+  }
+
+  function onNote(ev: MidiNoteEvent): void {
+    state.feed(ev)
+    renderSnapshot()
+  }
+
+  function onControl(ev: MidiControlChange): void {
+    // 踏板（CC64/66/67）由状态容器接管；其余 CC 不影响显示，仅调试留痕
+    console.debug(`[midi-debug] CC${ev.controller} = ${ev.value}`)
+    state.feed(ev)
+    renderSnapshot()
   }
 
   function renderDevices(): void {
     devicesEl.replaceChildren()
-    if (access === null) return
-    // 用 forEach 收集而非 [...values()]：shim 的端口表不可迭代（见 connection.ts sync 注释）
-    const inputs: MIDIInput[] = []
-    access.inputs.forEach((input) => inputs.push(input))
-    if (inputs.length === 0) {
+    const labels = connection.connectedLabels
+    if (labels.length === 0) {
       devicesEl.append(
         el('li', { class: 'midi-debug__device midi-debug__device--empty' }, '（无）'),
       )
       return
     }
-    for (const input of inputs) {
-      devicesEl.append(el('li', { class: 'midi-debug__device' }, deviceLabel(input)))
+    for (const label of labels) {
+      devicesEl.append(el('li', { class: 'midi-debug__device' }, label))
     }
-  }
-
-  function onMessage(e: MIDIMessageEvent): void {
-    const data = e.data
-    if (data === null) return
-    const ev = parseMidiMessage(data)
-    if (ev === null) return
-    if (ev.type === 'noteOn') held.set(ev.pitch, ev.velocity)
-    else held.delete(ev.pitch)
-    renderAll()
-  }
-
-  function detachInputs(): void {
-    for (const input of attachedInputs) input.removeEventListener('midimessage', onMessage)
-    attachedInputs.length = 0
-  }
-
-  function attachInputs(): void {
-    detachInputs()
-    if (access === null) return
-    access.inputs.forEach((input) => {
-      input.addEventListener('midimessage', onMessage)
-      attachedInputs.push(input)
-    })
-  }
-
-  function sync(): void {
-    if (access === null) return
-    attachInputs()
-    renderDevices()
-    const count = access.inputs.size
-    setStatus(count > 0 ? `已连接 · ${count} 台输入` : '未检测到 MIDI 设备')
-    setDiag(
-      rowPhase,
-      count > 0 ? '已连接，监听按键中' : '已授权，未检测到输入设备（插入设备后自动刷新）',
-      count > 0 ? 'ok' : 'neutral',
-    )
   }
 
   function setStatus(text: string): void {
@@ -618,149 +699,134 @@ export function mountMidiKeyboard(host: HTMLElement): () => void {
     }
   }
 
-  function elapsed(): number {
-    return (performance.now() - requestStart) / 1000
+  /** 连接阶段行：进行中显示已耗时与权限状态，帮助定位“一直连接中” */
+  function updatePhase(): void {
+    const status = connection.status
+    if (status === 'connecting') {
+      const started = connection.requestStartedAt
+      const sec = started === null ? 0 : (performance.now() - started) / 1000
+      let text = `请求授权中（已 ${sec.toFixed(1)}s）`
+      if (timedOut) text += ` · 已超过 ${CONNECT_TIMEOUT_MS / 1000}s 超时阈值`
+      let tone: DiagTone = timedOut ? 'warn' : 'neutral'
+      if (permState === 'prompt') {
+        text += ' · 等待用户应答授权提示'
+        if (!timedOut) {
+          setHint(
+            '浏览器应已弹出 MIDI 授权提示，请选择允许；若未看到弹窗，点击地址栏左侧的权限图标',
+          )
+        }
+      } else if (permState === 'denied') {
+        text += ' · 权限已被拒绝，浏览器将很快返回错误'
+        tone = 'bad'
+      } else if (timedOut) {
+        text += ' · 若浏览器未弹出授权提示，请检查站点权限'
+      }
+      setDiag(rowPhase, text, tone)
+      return
+    }
+    if (status === 'connected') {
+      setDiag(rowPhase, '已连接，监听按键与踏板中', 'ok')
+    } else if (status === 'no-devices') {
+      setDiag(rowPhase, '已授权，未检测到输入设备（插入设备后自动刷新）')
+    } else if (status === 'idle') {
+      setDiag(rowPhase, '尚未发起请求')
+    } else {
+      const name = connection.errorName ?? '未知错误'
+      const message = connection.errorMessage ?? ''
+      setDiag(rowPhase, `失败：${name}${message ? `：${message}` : ''}`, 'bad')
+    }
   }
 
-  /** 连接阶段行：请求中实时显示耗时与权限状态，帮助定位“一直连接中” */
-  function updatePhase(): void {
-    if (!pending) return
-    const sec = elapsed()
-    let text = `请求授权中（已 ${sec.toFixed(1)}s）`
-    if (timedOut) text += ` · 已超过 ${CONNECT_TIMEOUT_MS / 1000}s 超时阈值`
-    let tone: DiagTone = timedOut ? 'warn' : 'neutral'
-    if (permState === 'prompt') {
-      text += ' · 等待用户应答授权提示'
-      if (!timedOut) {
-        setHint('浏览器应已弹出 MIDI 授权提示，请选择允许；若未看到弹窗，点击地址栏左侧的权限图标')
-      }
-    } else if (permState === 'granted') {
-      text += ' · 已授权，等待浏览器返回设备列表'
-    } else if (permState === 'denied') {
-      text += ' · 权限已被拒绝，浏览器将很快返回错误'
-      tone = 'bad'
+  /** 状态行与排查提示（连接事实取自共享接入层，文案与呈现留在本页） */
+  function applyStatus(): void {
+    const status = connection.status
+    const shimmed = connection.isShimmed
+    switch (status) {
+      case 'idle':
+      case 'connecting':
+        setStatus('连接中…')
+        break
+      case 'connected':
+        setStatus(`已连接 · ${connection.inputCount} 台输入`)
+        setHint(null)
+        break
+      case 'no-devices':
+        setStatus('未检测到 MIDI 设备')
+        setHint(null)
+        break
+      case 'unsupported':
+        setStatus('当前浏览器不支持 Web MIDI')
+        setHint(
+          shimmed
+            ? '未检测到 Web MIDI 兼容层：iPad 可安装“Web MIDI Browser”App，桌面端可换用 Chrome / Edge / Firefox。'
+            : 'Safari（含 iPad 上的所有浏览器）不支持 Web MIDI：iPad 可安装“Web MIDI Browser”App，' +
+                '桌面端可换用 Chrome / Edge / Firefox。',
+        )
+        break
+      case 'denied':
+        setStatus('MIDI 授权被拒绝')
+        setHint(
+          '请在浏览器站点设置中把 MIDI 权限改为“允许”（chrome://settings/content/midiDevices），然后点击“重试连接”。',
+        )
+        break
+      case 'error':
+        setStatus(`MIDI 连接失败：${connection.errorMessage ?? '未知错误'}`)
+        setHint(null)
+        break
     }
-    setDiag(rowPhase, text, tone)
+    // 不支持时重试无意义；其余失败/超时都可以重试
+    retryEl.hidden = status !== 'denied' && status !== 'error' && !timedOut
   }
 
   /**
-   * 发起一次连接尝试：`requestMIDIAccess` 的 Promise 可能长时间不落定（授权提示未应答、
-   * 浏览器/系统 MIDI 服务异常等，见研究文档 20260906-web-midi-connect-hang.md）。
-   * 因此启动 5s 计时器先行提示“连接超时”（不放弃在途请求，晚到的结果仍按真实状态呈现），
-   * 并实时刷新阶段行耗时——避免“连接中…”无限期悬挂且无任何线索。
+   * 连接状态变化：刷新诊断、设备列表与状态行；进入 connecting 时启动耗时/超时计时。
+   * 设备全部断开（no-devices）时清空按住键与踏板，避免残留“幽灵按住 / 幽灵踩下”。
    */
-  function start(): void {
-    if (disposed || typeof navigator.requestMIDIAccess !== 'function') return
-    const myAttempt = ++attempt
-    clearTimers()
-    timedOut = false
-    pending = true
-    requestStart = performance.now()
-    retryEl.hidden = true
-    setHint(null)
-    setStatus('连接中…')
-    setDiag(rowPhase, '正在请求授权…')
-    console.info('[midi-debug] 发起 requestMIDIAccess({ sysex: false })')
-    elapsedTimer = window.setInterval(updatePhase, 200)
-    timeoutTimer = window.setTimeout(() => {
-      if (disposed || attempt !== myAttempt || !pending) return
-      timedOut = true
-      console.warn(`[midi-debug] 连接超过 ${CONNECT_TIMEOUT_MS / 1000}s 仍未返回`)
-      setStatus('连接超时')
-      updatePhase()
-      setHint(
-        isShimmedMidi
-          ? '授权请求 5s 未返回：请确认 MIDI 键盘已连接并被 App 识别（USB 键盘需插好并允许外设访问，' +
-              '蓝牙键盘需先配对），或退出重进 App 后再点击“重试连接”。'
-          : '授权请求 5s 未返回：请确认浏览器是否弹出了 MIDI 授权提示（地址栏左侧权限图标），' +
-              '或在 chrome://settings/content/midiDevices 查看本站点权限；若权限无异常，' +
-              '打开 chrome://device-log 查看系统 MIDI 设备枚举日志；' +
-              '若页面嵌在 iframe，宿主需通过 Permissions-Policy 允许 midi。点击“重试连接”可再次发起请求。',
-      )
-      retryEl.hidden = false
-    }, CONNECT_TIMEOUT_MS)
-    try {
-      void navigator.requestMIDIAccess({ sysex: false }).then(
-        (a) => {
-          if (disposed || attempt !== myAttempt) return
-          clearTimers()
-          pending = false
-          console.info(
-            `[midi-debug] requestMIDIAccess 返回：inputs=${a.inputs.size} outputs=${a.outputs.size}` +
-              `（耗时 ${elapsed().toFixed(1)}s）`,
+  function onStatus(): void {
+    const status = connection.status
+    if (status === 'connecting') {
+      if (elapsedTimer === undefined) elapsedTimer = window.setInterval(updatePhase, 200)
+      if (timeoutTimer === undefined) {
+        timeoutTimer = window.setTimeout(() => {
+          timeoutTimer = undefined
+          if (connection.status !== 'connecting') return
+          timedOut = true
+          console.warn(`[midi-debug] 连接超过 ${CONNECT_TIMEOUT_MS / 1000}s 仍未返回`)
+          setStatus('连接超时')
+          setHint(
+            connection.isShimmed
+              ? '授权请求 5s 未返回：请确认 MIDI 键盘已连接并被 App 识别（USB 键盘需插好并允许外设访问，' +
+                  '蓝牙键盘需先配对），或退出重进 App 后再点击“重试连接”。'
+              : '授权请求 5s 未返回：请确认浏览器是否弹出了 MIDI 授权提示（地址栏左侧权限图标），' +
+                  '或在 chrome://settings/content/midiDevices 查看本站点权限；若权限无异常，' +
+                  '打开 chrome://device-log 查看系统 MIDI 设备枚举日志；' +
+                  '若页面嵌在 iframe，宿主需通过 Permissions-Policy 允许 midi。点击“重试连接”可再次发起请求。',
           )
-          access = a
-          a.addEventListener('statechange', onStateChange)
-          sync()
-          if (timedOut) {
-            setDiag(
-              rowPhase,
-              `授权在 ${elapsed().toFixed(1)}s 后返回（超过 5s 超时阈值，最终成功）`,
-              'ok',
-            )
-            setHint(null)
-          }
-        },
-        (err: unknown) => {
-          if (disposed || attempt !== myAttempt) return
-          clearTimers()
-          pending = false
-          handleError(err)
-        },
-      )
-    } catch (err) {
-      // shim（Web MIDI Browser）的 requestMIDIAccess 在构造 MIDIAccess 时同步调用
-      // window.webkit.messageHandlers.onready.postMessage(...)；原生桥缺失时会同步抛错、Promise
-      // 根本不会返回——需同步兜底，否则只能等到 5s 超时、毫无线索。
-      if (disposed || attempt !== myAttempt) return
-      clearTimers()
-      pending = false
-      const w = window as unknown as {
-        webkit?: { messageHandlers?: { onready?: { postMessage?: unknown } } }
+          updatePhase()
+          retryEl.hidden = false
+        }, CONNECT_TIMEOUT_MS)
       }
-      const bridgeMissing = typeof w.webkit?.messageHandlers?.onready?.postMessage !== 'function'
-      console.error('[midi-debug] requestMIDIAccess 同步抛错', err, { bridgeMissing })
-      setStatus('MIDI 连接失败：请求同步抛错')
-      setDiag(
-        rowPhase,
-        bridgeMissing
-          ? '失败：shim 原生桥缺失（window.webkit.messageHandlers.onready 不存在）'
-          : `失败：requestMIDIAccess 同步抛错（${err instanceof Error ? err.message : String(err)}）`,
-        'bad',
-      )
-      retryEl.hidden = false
+    } else {
+      clearTimers()
+      timedOut = false
     }
+    if (status === 'no-devices') state.clearInputs()
+    console.info(
+      `[midi-debug] 连接状态：${status}` +
+        (connection.errorName === null ? '' : `（${connection.errorName}）`),
+    )
+    renderDevices()
+    applyStatus()
+    updatePhase()
+    renderSnapshot()
   }
 
-  function handleError(err: unknown): void {
-    const name = err instanceof DOMException ? err.name : 'Error'
-    const message = err instanceof Error ? err.message : String(err)
-    console.error(
-      `[midi-debug] requestMIDIAccess 失败：${name}${message ? `：${message}` : ''}`,
-      err,
-    )
-    if (err instanceof DOMException && err.name === 'NotAllowedError') {
-      setStatus('MIDI 授权被拒绝')
-      setDiag(
-        rowPhase,
-        '失败：NotAllowedError（用户拒绝 / 站点权限被屏蔽 / Permissions-Policy 不允许）',
-        'bad',
-      )
-      setHint(
-        '请在浏览器站点设置中把 MIDI 权限改为“允许”（chrome://settings/content/midiDevices），然后点击“重试连接”。',
-      )
-    } else if (err instanceof DOMException && err.name === 'NotSupportedError') {
-      setStatus('当前浏览器不支持 Web MIDI')
-      setDiag(rowPhase, '失败：NotSupportedError（浏览器或系统不支持 Web MIDI）', 'bad')
-      setHint(null)
-    } else {
-      setStatus(`MIDI 连接失败：${message}`)
-      setDiag(rowPhase, `失败：${name}${message ? `：${message}` : ''}`, 'bad')
-      setHint(null)
-    }
-    // 不支持时重试无意义；其余失败都可以重试
-    retryEl.hidden = err instanceof DOMException && err.name === 'NotSupportedError'
-  }
+  /**
+   * 共享接入层（core/midi/connection.ts）：授权 / 挂载输入 / 热插拔 / 解码全在它内部，
+   * 本页只消费回调与只读诊断 getter。onStatus 在构造后立即被调用一次（connecting），
+   * 彼时下面的函数声明与 retryEl 均已就绪。
+   */
+  const connection = new MidiConnection({ onStatus, onNote, onControl })
 
   /** 经 Permissions API 查询 midi 权限并订阅变化（诊断面板“MIDI 权限”行） */
   function queryPermission(): void {
@@ -812,35 +878,62 @@ export function mountMidiKeyboard(host: HTMLElement): () => void {
     applyPermState(permStatus.state)
   }
 
-  const onStateChange = (): void => {
-    if (!disposed) sync()
+  retryEl.addEventListener('click', () => {
+    if (disposed) return
+    clearTimers()
+    timedOut = false
+    retryEl.hidden = true
+    setHint(null)
+    setStatus('连接中…')
+    console.info('[midi-debug] 重试连接（作废在途请求，重新发起授权）')
+    void connection.reconnect()
+  })
+
+  /** 发起连接：共享层虽有同步兜底，这里再兜一层同步抛错（shim 原生桥缺失时不会走到 Promise） */
+  function start(): void {
+    try {
+      void connection.connect().catch((err: unknown) => {
+        console.error('[midi-debug] connect 失败', err)
+      })
+    } catch (err) {
+      console.error('[midi-debug] requestMIDIAccess 同步抛错', err, {
+        bridgeMissing: !supportBridge(),
+      })
+      setStatus('MIDI 连接失败：请求同步抛错')
+      setDiag(
+        rowPhase,
+        supportBridge()
+          ? `失败：requestMIDIAccess 同步抛错（${err instanceof Error ? err.message : String(err)}）`
+          : '失败：shim 原生桥缺失（window.webkit.messageHandlers.onready 不存在）',
+        'bad',
+      )
+      retryEl.hidden = false
+    }
   }
 
   function dispose(): void {
     if (disposed) return
     disposed = true
-    attempt++
     clearTimers()
-    detachInputs()
-    if (access !== null) access.removeEventListener('statechange', onStateChange)
-    access = null
+    connection.dispose()
     permStatus?.removeEventListener('change', onPermChange)
     permStatus = null
   }
 
   // —— 初始渲染与诊断信息 ——
   setStatus('连接中…')
-  renderAll()
+  renderSnapshot()
+  renderDevices()
   setDiag(
     rowSecure,
-    isShimmedMidi
+    connection.isShimmed
       ? window.isSecureContext
         ? '是（HTTPS / localhost）——已检测到 Web MIDI 兼容层'
         : '否（HTTP）——已检测到 Web MIDI 兼容层，连接不依赖安全上下文'
       : window.isSecureContext
         ? '是（HTTPS / localhost）'
         : '否——非安全上下文无法使用 Web MIDI',
-    isShimmedMidi ? 'neutral' : window.isSecureContext ? 'ok' : 'bad',
+    connection.isShimmed ? 'neutral' : window.isSecureContext ? 'ok' : 'bad',
   )
   queryPermission()
 
@@ -858,7 +951,6 @@ export function mountMidiKeyboard(host: HTMLElement): () => void {
             '桌面端可换用 Chrome / Edge / Firefox。'
         : '当前页面不是安全上下文（需 HTTPS 或 localhost），请改用受支持的地址访问。',
     )
-    renderDevices()
   }
 
   return dispose

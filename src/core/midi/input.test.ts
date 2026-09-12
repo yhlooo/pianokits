@@ -41,8 +41,28 @@ describe('parseMidiMessage', () => {
     })
   })
 
-  it('忽略非按键消息（CC/弯音/触后/realtime）', () => {
-    expect(parseMidiMessage(msg(0xb0, 64, 127))).toBeNull() // CC64 延音踏板
+  it('Control Change：0xBn + 控制器号 + 值（踏板 CC64/66/67 走这里）', () => {
+    expect(parseMidiMessage(msg(0xb0, 64, 127))).toEqual({
+      type: 'controlChange',
+      channel: 0,
+      controller: 64,
+      value: 127,
+    })
+    expect(parseMidiMessage(msg(0xb2, 66, 40))).toEqual({
+      type: 'controlChange',
+      channel: 2,
+      controller: 66,
+      value: 40,
+    })
+    expect(parseMidiMessage(msg(0xbf, 67, 0))).toEqual({
+      type: 'controlChange',
+      channel: 15,
+      controller: 67,
+      value: 0,
+    })
+  })
+
+  it('忽略其余消息（弯音/触后/program change/realtime）', () => {
     expect(parseMidiMessage(msg(0xe0, 0, 64))).toBeNull() // 弯音
     expect(parseMidiMessage(msg(0xc0, 0))).toBeNull() // program change
     expect(parseMidiMessage(msg(0xf8))).toBeNull() // realtime clock

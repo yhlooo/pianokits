@@ -1,7 +1,7 @@
 # 设计：MIDI 键盘连接与练习模式
 
 - 日期：2026-09-06
-- 状态：**正式生效（2026-09-06 实现；连接部分由 `20260907-midi-auto-connect.md` 修订）**
+- 状态：**正式生效（2026-09-06 实现；连接部分由 `20260907-midi-auto-connect.md` 修订；2026-09-12 由 `20260912-midi-debug-velocity-pedal.md` 扩展：新增 `onControl` 回调与只读诊断 getter，调试页接入改为复用本共享层）**
 - 关联文档：
   - `20260905-midi-import-player.md`（MIDI 播放工具主设计；本功能对其 M1 非目标的一次扩展）
   - `docs/development/research/20260905-web-midi-input.md`（Web MIDI 接入调查结论）
@@ -87,9 +87,17 @@ class MidiConnection {
   readonly status: MidiConnectionStatus
   readonly connectingHint: string | null // connecting 超时软提示；其余状态为 null
   readonly connectedLabels: readonly string[] // 已连接键盘 厂商+名称 列表；未连接为空数组
+  // 只读诊断视图（2026-09-12 新增，供调试页诊断面板；呈现留在调用方）
+  readonly requestStartedAt: number | null // 最近一次授权请求的 performance.now()
+  readonly errorName: string | null // 最近一次失败的 DOMException 名
+  readonly errorMessage: string | null // 最近一次失败的消息文本
+  readonly inputCount: number // 已挂载输入端口数
+  readonly isShimmed: boolean // 是否第三方 Web MIDI shim（isShimmedMidi() 的实例视图）
   connect(): Promise<void> // 自动连接：请求授权并常驻 access；connected/no-devices/connecting 幂等
+  reconnect(): Promise<void> // dispose() 后立刻重连（调试页“重试连接”：作废在途请求）
   dispose(): void // 工具卸载清理：摘监听、移除 statechange、回 idle
-  // 构造回调：onStatus(status)、onNote(MidiNoteEvent)（复用 core/midi/input.ts 的 parseMidiMessage）、
+  // 构造回调：onStatus(status)、onNote(MidiNoteEvent)（按键）、
+  // onControl?(MidiControlChange)（CC：踏板 CC64/66/67 等，2026-09-12 新增）、
   // onOutputs(outputs)（输出端口变化，镜像播放用）
 }
 ```
@@ -413,5 +421,7 @@ class MidiOutputSink {
 - **不回送实时（非练习）按键**到输出端口（Local Control Off 后键盘自带音源已静默，实时演奏
   仅经电脑引擎发声；如需让键盘自带音源也随实时演奏发声，可留待后续加“回送按键”开关）；
 - **不镜像延音踏板**（CC64）：走带目前不处理 sustainEvents，键盘音源听感无踏板；后续
-  若做 CC64 调度可一并镜像；
-- 不改调试工具“MIDI 键盘”页面（其接入逻辑未来可迁移到 `MidiConnection`，本次不迁移）。
+  若做 CC64 调度可一并镜像。共享层已能收到 CC（`onControl`，2026-09-12），练习模式暂不消费；
+- ~~不改调试工具“MIDI 键盘”页面（其接入逻辑未来可迁移到 `MidiConnection`，本次不迁移）~~
+  —— **2026-09-12 已完成迁移**（见 `20260912-midi-debug-velocity-pedal.md` §3.3）：调试页不再自持
+  `requestMIDIAccess` 流程，改用 `MidiConnection`；诊断面板/5s 超时/重试/文案仍留在调试页。

@@ -108,6 +108,8 @@ function stubNavigator(request: (() => Promise<FakeAccess>) | undefined): void {
 
 const NOTE_ON_C4 = Uint8Array.from([0x90, 60, 100])
 const NOTE_OFF_C4 = Uint8Array.from([0x80, 60, 0])
+const CC64_DOWN = Uint8Array.from([0xb0, 64, 127])
+const CC64_HALF = Uint8Array.from([0xb0, 64, 40])
 
 /** 冲刷微任务队列（让 await 的续体跑完） */
 const flush = async (): Promise<void> => {
@@ -154,11 +156,16 @@ describe('MidiConnection 接入层', () => {
     const c = new MidiConnection({ onStatus: (s) => statuses.push(s), onNote: () => {} })
     await c.connect()
     expect(c.status).toBe('denied')
+    // 失败详情对诊断面板可见（错误名 + 请求发起时刻）
+    expect(c.errorName).toBe('NotAllowedError')
+    expect(c.errorMessage).toBe('denied')
+    expect(c.requestStartedAt).not.toBeNull()
 
     stubNavigator(() => Promise.reject(new DOMException('nope', 'NotSupportedError')))
     const c2 = new MidiConnection({ onStatus: () => {}, onNote: () => {} })
     await c2.connect()
     expect(c2.status).toBe('unsupported')
+    expect(c2.errorName).toBe('NotSupportedError')
     expect(statuses).toEqual(['connecting', 'denied'])
   })
 
@@ -247,6 +254,46 @@ describe('MidiConnection 接入层', () => {
     c.dispose()
   })
 
+  it('CC 消息解码后走 onControl，不混入 onNote；诊断 getter 反映端口数', async () => {
+    const access = new FakeAccess()
+    const input = new FakeInput()
+    access.inputs.set('1', input)
+    stubNavigator(() => Promise.resolve(access))
+    const notes: unknown[] = []
+    const controls: unknown[] = []
+    const c = new MidiConnection({
+      onStatus: () => {},
+      onNote: (ev) => notes.push(ev),
+      onControl: (ev) => controls.push(ev),
+    })
+    expect(c.inputCount).toBe(0)
+    await c.connect()
+    expect(c.inputCount).toBe(1)
+    input.send(NOTE_ON_C4)
+    input.send(CC64_DOWN)
+    input.send(CC64_HALF)
+    expect(notes).toEqual([{ type: 'noteOn', channel: 0, pitch: 60, velocity: 100 }])
+    expect(controls).toEqual([
+      { type: 'controlChange', channel: 0, controller: 64, value: 127 },
+      { type: 'controlChange', channel: 0, controller: 64, value: 40 },
+    ])
+    c.dispose()
+    expect(c.inputCount).toBe(0)
+  })
+
+  it('未实现 onControl 时不抛错（练习模式只关心按键）', async () => {
+    const access = new FakeAccess()
+    const input = new FakeInput()
+    access.inputs.set('1', input)
+    stubNavigator(() => Promise.resolve(access))
+    const notes: unknown[] = []
+    const c = new MidiConnection({ onStatus: () => {}, onNote: (ev) => notes.push(ev) })
+    await c.connect()
+    expect(() => input.send(CC64_DOWN)).not.toThrow()
+    expect(notes).toEqual([])
+    c.dispose()
+  })
+
   it('dispose：摘监听回 idle，不再派发按键', async () => {
     const access = new FakeAccess()
     const input = new FakeInput()
@@ -259,6 +306,24 @@ describe('MidiConnection 接入层', () => {
     expect(c.status).toBe('idle')
     input.send(NOTE_ON_C4)
     expect(notes).toHaveLength(0)
+  })
+
+  it('reconnect：作废旧请求并立刻发起新请求（调试页“重试连接”）', async () => {
+    let calls = 0
+    const access = new FakeAccess()
+    const input = new FakeInput()
+    access.inputs.set('1', input)
+    stubNavigator(() => {
+      calls++
+      return Promise.resolve(access)
+    })
+    const c = new MidiConnection({ onStatus: () => {}, onNote: () => {} })
+    await c.connect()
+    expect(calls).toBe(1)
+    await c.reconnect()
+    expect(calls).toBe(2)
+    expect(c.status).toBe('connected')
+    c.dispose()
   })
 
   it('connect 期间 dispose：丢弃迟到的授权结果', async () => {

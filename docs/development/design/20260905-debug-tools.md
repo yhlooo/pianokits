@@ -1,7 +1,7 @@
 # 设计：调试工具集与 MIDI 键盘调试工具
 
 - 日期：2026-09-05
-- 状态：**正式生效（与实现一致）**。2026-09-05 初版实现（浮动面板形态）；同日按“每个调试工具一个页面，跟正常工具一样”调整后与实现一致；同日引入工具路由（见 `20260905-tool-routing.md`），调试工具获得独立 URI `/midi-keyboard`（与常规工具在 URI 上不作区分）；同日移除 `?debug=1` 调试开关，调试工具改为始终加载并显示。2026-09-06 增加连接诊断面板、连接超时提示与重试（§4.3），配合研究结论 `docs/development/research/20260906-web-midi-connect-hang.md`；同日诊断面板改为默认折叠、由状态行右侧三角开关展开。
+- 状态：**正式生效（与实现一致）**。2026-09-05 初版实现（浮动面板形态）；同日按“每个调试工具一个页面，跟正常工具一样”调整后与实现一致；同日引入工具路由（见 `20260905-tool-routing.md`），调试工具获得独立 URI `/midi-keyboard`（与常规工具在 URI 上不作区分）；同日移除 `?debug=1` 调试开关，调试工具改为始终加载并显示。2026-09-06 增加连接诊断面板、连接超时提示与重试（§4.3），配合研究结论 `docs/development/research/20260906-web-midi-connect-hang.md`；同日诊断面板改为默认折叠、由状态行右侧三角开关展开。2026-09-12 增加按键力度与踏板显示（§4.3 第 6/7 项、§5 解析规则扩展为通道事件），并把调试页的 Web MIDI 接入迁移到共享层 `core/midi/connection.ts`（见 `20260912-midi-debug-velocity-pedal.md` §3.3）；同日按试用反馈调整：踏板按钢琴实际位置左→右排列（弱音/选择延音/延音）、音名方块加随力度加深的半透明白底、去掉踏板说明文本与 CC 号字样、力度与踏板数值字号放大到 2 倍。2026-09-12 增加按键力度与踏板显示（§4.3 第 6/7 项、§5 解析规则扩展为通道事件），并把调试页的 Web MIDI 接入迁移到共享层 `core/midi/connection.ts`（见 `20260912-midi-debug-velocity-pedal.md` §3.3）。
 - 关联调查结论：`docs/development/research/20260905-web-midi-input.md`（下称 **R-MIDI**）
 - 参考：`docs/development/reference/midi/webmidi-api.md`
 
@@ -33,7 +33,9 @@ USB MIDI 键盘，按键时实时显示对应音名（例如按下 C4 显示 `C4
 ### 1.3 非目标
 
 - 不把 MIDI 输入接到主播放器的发声/录音（M1 明确不做，见 `20260905-midi-import-player.md` §1.3）。
-- 不做输出（`MIDIOutput`）、sysex、CC/pitch bend 等消息的展示（本工具只识别按键）。
+- 不做输出（`MIDIOutput`）、sysex 与 pitch bend 的展示。
+  ~~不做 CC 消息的展示~~ —— **2026-09-12 起部分放开**：踏板（CC64/66/67）已展示（踩下幅度、开关量），
+  其余 CC（调制轮、音量等）仍不展示，详见 `20260912-midi-debug-velocity-pedal.md`。
 - 不做移动端适配（桌面优先，与现有项目一致）。
 
 ## 2. 关键技术决策
@@ -41,7 +43,7 @@ USB MIDI 键盘，按键时实时显示对应音名（例如按下 C4 显示 `C4
 | #   | 环节         | 决策                                                                                      | 理由                                                                  | 依据          |
 | --- | ------------ | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------------- |
 | 1   | 设备接入     | 原生 Web MIDI API，`navigator.requestMIDIAccess({ sysex: false })`                        | 零依赖、只需读按键；Safari 不支持需显式降级                           | R-MIDI §1、§5 |
-| 2   | 消息解析     | 自研纯函数 `parseMidiMessage`（解码 Note On/Off，velocity 0 归为离键）                    | 无库依赖、可单测；Web MIDI 每条事件是完整消息，无需 running status    | R-MIDI §4     |
+| 2   | 消息解析     | 自研纯函数 `parseMidiMessage`（解码 Note On/Off 与 CC，velocity 0 归为离键）              | 无库依赖、可单测；Web MIDI 每条事件是完整消息，无需 running status    | R-MIDI §4     |
 | 3   | 音名         | 独立纯函数 `midiNoteName(pitch)`，黑键用升号（`C#4`）                                     | 调试需要与调号无关的无歧义命名；不复用记谱语境下的 `spellPitch`       | R-MIDI §1、§4 |
 | 4   | 调试工具加载 | 调试工具模块随外壳启动即 import（`debug/menu`、`debug/tools`），不再有 query 开关         | 调试工具始终可用；具体工具仍按需懒加载                                | 见 §3         |
 | 5   | 调试 UI 形态 | 顶栏右侧“调试”按钮 + hover 下拉；**调试工具与正常工具一样挂载到内容区，一个工具一个页面** | 与正常工具体验一致、有整页空间展示；激活态与页签互斥                  | §4            |
@@ -60,7 +62,9 @@ USB MIDI 键盘，按键时实时显示对应音名（例如按下 C4 显示 `C4
               └─ debug/midi-keyboard.ts   “MIDI 键盘”工具（Web MIDI 接入 + 页面 UI）
 
 core 层（纯逻辑，可单测，与 UI 解耦）
-  ├─ core/midi/input.ts        parseMidiMessage(data) → NoteOn/NoteOff 事件
+  ├─ core/midi/input.ts        parseMidiMessage(data) → NoteOn/NoteOff/ControlChange 事件
+  ├─ core/midi/pedals.ts       三踏板（CC64/66/67）定义、≥64 踩下阈值、幅度判据（2026-09-12）
+  └─ core/midi/connection.ts   共享接入层：按键走 onNote、CC 走 onControl + 只读诊断 getter（2026-09-12）
   ├─ core/midi/note-name.ts    midiNoteName(pitch) → "C4" / "C#4"
   └─ core/midi/held-keys.ts    sortedHeldPitches(held) → 按住键音高升序列表
 ```
@@ -99,11 +103,14 @@ export function attachDebugMenu(
 ```
 
 ```ts
-// core/midi/input.ts
-export type MidiNoteEvent =
+// core/midi/input.ts —— 2026-09-12 起为“通道事件联合类型”，按键事件是它的窄别名
+export type MidiChannelEvent =
   | { type: 'noteOn'; channel: number; pitch: number; velocity: number }
   | { type: 'noteOff'; channel: number; pitch: number; velocity: number }
-export function parseMidiMessage(data: Uint8Array): MidiNoteEvent | null
+  | { type: 'controlChange'; channel: number; controller: number; value: number }
+export function parseMidiMessage(data: Uint8Array): MidiChannelEvent | null
+/** 兼容别名：练习模式/连接层只关心按键 */
+export type MidiNoteEvent = Extract<MidiChannelEvent, { type: 'noteOn' | 'noteOff' }>
 ```
 
 ```ts
@@ -164,12 +171,19 @@ export function sortedHeldPitches(held: ReadonlyMap<number, number>): number[]
 4. 设备列表：输入端口名称（`name` + `manufacturer`，chip 样式、可换行排布）。
 5. 大谱表（自绘 SVG，暖象牙纸卡片，高音谱号 + 低音谱号）：按住键在对应线/间显示实心符头
    （超出五线时补加线），抬起即消失——**只反映当前按住状态，不记录音符历史**。
-6. 音名 chips：**按住的所有键并显**（展示字体大字号、按音高升序排列、位置稳定、**各键同色**）；
-   无按键时显示 `—` 占位。
-7. 88 键钢琴键盘（A0–C8）：按住的键以琥珀色点亮，抬起即熄灭。
+6. 音名方块：**按住的所有键并显**（展示字体大字号、按音高升序排列、位置稳定）；
+   右上角显示该次 Note On 的**力度**（0–127，字号 2 倍），方块文字亮度与**半透明白底**都随
+   力度增强；无按键时显示 `—` 占位。
+7. **踏板行**（2026-09-12 新增，音名方块之下的单独一行，**按钢琴从左到右排列**：
+   弱音 CC67 / 选择延音 CC66 / 延音 CC64）三格恒显；格内中间大字为幅度百分比、右上角为原始
+   0–127 值（不带 CC 号字样），绿色背景表示踩下（`value >= 64`）且越深越浓；未收到幅度值时
+   照显数值并压暗；**不显示说明文本**。详见 `20260912-midi-debug-velocity-pedal.md`。
+8. 88 键钢琴键盘（A0–C8）：按住的键以琥珀色点亮（**色深随力度**：力度越大琥珀叠加越多、越深），
+   抬起即熄灭；按住期间有琥珀呼吸光晕。
 
-三处反馈（5/6/7）共用同一份按住键状态；其音高升序列表由纯函数 `sortedHeldPitches`
-（`core/midi/held-keys.ts`）计算，与 DOM 渲染解耦、可单测。
+三处反馈（5/6/8）共用同一份按住键状态（`pitch → velocity`）；其音高升序列表由纯函数
+`sortedHeldPitches`（`core/midi/held-keys.ts`）计算，与 DOM 渲染解耦、可单测；
+力度与踏板的视觉映射由 `debug/midi-debug-state.ts` 的纯函数给出（同样可单测）。
 
 #### 4.3.1 大谱表排布要点
 
@@ -215,8 +229,10 @@ export function sortedHeldPitches(held: ReadonlyMap<number, number>): number[]
    - velocity > 0 → `noteOn`；
    - velocity = 0 → 按离键 `noteOff`（velocity 记为 0）。
 3. 状态高 4 位 `0x8`（Note Off）→ `noteOff`（保留释放力度）。
-4. 其余状态（CC/弯音/触后/sysex/realtime 等）→ `null`。
-5. 通道号 = 状态低 4 位（0–15）；音符号、力度直接取 data1/data2。
+4. 状态高 4 位 `0xB`（Control Change）→ `controlChange`（data1 = 控制器号，data2 = 值）；
+   踏板（CC64/66/67）的领域解释见 `core/midi/pedals.ts`，阈值 `value >= 64` 为踩下。
+5. 其余状态（弯音/触后/sysex/realtime 等）→ `null`。
+6. 通道号 = 状态低 4 位（0–15）；音符号、力度、控制器号与值直接取 data1/data2。
 
 ## 6. 资源释放
 

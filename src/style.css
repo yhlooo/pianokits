@@ -1544,17 +1544,118 @@ input[type='range']::-moz-range-thumb {
   font-variant-numeric: tabular-nums;
 }
 
-/* 按住键 chip：所有键同色 */
+/* 按住键 chip：同一时刻的各键同色，但亮度与底色各自随力度（越大越亮、底色越明显）。
+   四周内边距收到最小、不为角标预留额外横向空间——音名保持在方框正中，
+   力度角标（1.5rem，音名的 0.43 倍）贴在右上角，与音名墨迹几乎不重叠 */
 .midi-debug__key {
+  position: relative;
   font-family: var(--font-display);
   font-size: 3.5rem;
   line-height: 1;
   color: var(--text-0);
-  padding: 14px 24px;
+  padding: 12px 18px;
   background: var(--bg-2);
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
   font-variant-numeric: tabular-nums;
+  /* 底色（随力度加深的半透明白）由 TS 写在 style 上，走这条过渡 */
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+/* 音名：亮度随力度线性变化（不透明度与方块底色都由 TS 写在 style 上） */
+.midi-debug__key-name {
+  display: inline-block;
+}
+
+/* 力度角标：音名方块内右上角，显示该次 Note On 的力度（0–127）；
+   字号 1.5rem = 之前 1.9rem 的约 80%。左右偏移写死（不写 width/不预留横向空间）——
+   角标覆盖在音名的 em 框右上角，墨迹几乎不重叠，方框尺寸与音名居中都不受影响 */
+.midi-debug__velocity {
+  position: absolute;
+  top: 5px;
+  left: 0;
+  right: 7px;
+  text-align: right;
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  line-height: 1;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 踏板行（音名信息之下的单独一行，按钢琴从左到右：弱音 / 选择延音 / 延音） ----------
+   三格恒显；格子内中间大字为幅度百分比、右上角为原始 0–127 值（不论是否触发都显示），
+   绿色背景表示踩下且越深越浓（不透明度由 TS 按 CC 值算好写在 style 上）。 */
+.midi-debug__pedal-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.midi-debug__pedals {
+  display: flex;
+  gap: 16px;
+}
+
+.midi-debug__pedal {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+}
+
+.midi-debug__pedal-box {
+  position: relative;
+  box-sizing: border-box;
+  width: 84px;
+  height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: transparent;
+  /* 边框颜色与文字亮度都由 TS 按 CC 值写入（越深越亮） */
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+/* 未收到该踏板任何消息：压暗一档，配合下方说明文本提示“未收到踏板消息” */
+.midi-debug__pedal-box.is-idle {
+  opacity: 0.65;
+}
+
+/* 出现过幅度值的踏板：多一圈琥珀细描边，和只有开关量的踏板区分开 */
+.midi-debug__pedal-box.is-level {
+  outline: 1px solid var(--accent-soft);
+  outline-offset: 2px;
+}
+
+.midi-debug__pedal-percent {
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 右上角原始 0–127 值：只留数字（不带 CC 号字样） */
+.midi-debug__pedal-raw {
+  position: absolute;
+  top: 5px;
+  right: 8px;
+  /* 1rem = 之前 1.25rem 的约 80% */
+  font-size: 1rem;
+  line-height: 1;
+  opacity: 0.8;
+  font-variant-numeric: tabular-nums;
+}
+
+.midi-debug__pedal-name {
+  font-size: 0.75rem;
+  color: var(--text-1);
 }
 
 /* ---------- 88 键钢琴键盘（「MIDI 键盘」调试页与瀑布流共用的 DOM 组件） ----------
@@ -1610,8 +1711,21 @@ input[type='range']::-moz-range-thumb {
   border-right: none;
 }
 
-.piano__wkey.is-pressed {
-  background: linear-gradient(#e4b871, #d9a45b);
+/* 按下态：键色（按力度叠加的琥珀渐变）与呼吸光晕由 setPressed 写内联样式，
+   CSS 只负责光晕的明暗节奏——摆幅读元素当前的 --press-alpha，因此力度越大闪得越亮；
+   抬起时移除动画回到 0 强度，由 keyframes 的 to 帧平滑收束，不硬切。 */
+.piano__wkey.is-pressed,
+.piano__bkey.is-pressed {
+  animation: piano-press-glow 900ms ease-in-out infinite alternate;
+}
+
+@keyframes piano-press-glow {
+  from {
+    box-shadow: 0 0 10px rgba(217, 164, 91, calc(var(--press-alpha, 1) * 0.12));
+  }
+  to {
+    box-shadow: 0 0 10px rgba(217, 164, 91, calc(var(--press-alpha, 1) * 0.6));
+  }
 }
 
 .piano__blacks {
@@ -1629,10 +1743,6 @@ input[type='range']::-moz-range-thumb {
   border-radius: 0 0 calc(var(--bkey-w) * 0.25) calc(var(--bkey-w) * 0.25);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
   transition: background var(--dur-fast) var(--ease-out);
-}
-
-.piano__bkey.is-pressed {
-  background: linear-gradient(#a8772e, #8a6126);
 }
 
 /* ---------- 大谱表（自绘 SVG，暖象牙纸卡片） ---------- */

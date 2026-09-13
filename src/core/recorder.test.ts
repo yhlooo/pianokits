@@ -282,6 +282,210 @@ describe('RecorderController：录制', () => {
   })
 })
 
+describe('RecorderController：演奏自动录制（设计文档 20260913-recorder-auto-record.md）', () => {
+  it('空闲时按任意键自动开始录制：这一次按下就是第一个音符，状态切到 recording', async () => {
+    const h = await harness()
+    expect(h.controller.mode).toBe('idle')
+
+    h.host.advance(1) // 空闲期间时间流逝：不算录制
+    h.input.send([0x90, 60, 100])
+    expect(h.controller.mode).toBe('recording')
+    // 视图靠状态回调换"录制/暂停"图标
+    expect(h.states[h.states.length - 1].mode).toBe('recording')
+
+    h.host.advance(0.4)
+    h.input.send([0x80, 60, 0])
+    expect(snap(h.controller.visibleNotes())).toEqual([[60, 0, 0.4]])
+  })
+
+  it('单独踩踏板不触发自动录制（只有按键才开始）', async () => {
+    const h = await harness()
+    h.input.send([0xb0, 64, 127])
+    expect(h.controller.mode).toBe('idle')
+    expect(h.controller.visiblePedals()).toHaveLength(0)
+  })
+
+  it('自动开始的录制：连续 3 秒没有键盘输入后自动暂停', async () => {
+    const h = await harness()
+    h.input.send([0x90, 60, 100])
+    h.host.advance(0.5)
+    h.input.send([0x80, 60, 0])
+    expect(h.controller.mode).toBe('recording')
+
+    h.host.advance(2.9) // 松手后 2.9s：还不到
+    h.host.tick()
+    expect(h.controller.mode).toBe('recording')
+
+    h.host.advance(0.2)
+    h.host.tick()
+    expect(h.controller.mode).toBe('idle') // 3.1s 无输入 → 自动暂停
+    expect(h.states[h.states.length - 1].mode).toBe('idle') // 图标换回"录制"
+    expect(h.controller.position).toBeCloseTo(3.6, 5) // 暂停在静默超时处，不回退
+    expect(snap(h.controller.visibleNotes())).toEqual([[60, 0, 0.5]])
+    expect(h.host.tickerCount).toBe(0) // 自动暂停后定时器停掉，不空转
+  })
+
+  it('自动暂停后再次演奏：从暂停处开始新的一次自动录制', async () => {
+    const h = await harness()
+    h.input.send([0x90, 60, 100])
+    h.host.advance(0.5)
+    h.input.send([0x80, 60, 0])
+    h.host.advance(3.1)
+    h.host.tick()
+    expect(h.controller.mode).toBe('idle')
+
+    h.host.advance(10) // 暂停期间的时间不录制
+    h.input.send([0x90, 64, 100])
+    expect(h.controller.mode).toBe('recording')
+    h.host.advance(0.3)
+    h.input.send([0x80, 64, 0])
+    expect(snap(h.controller.visibleNotes())).toEqual([
+      [60, 0, 0.5],
+      [64, 3.6, 3.9],
+    ])
+  })
+
+  it('手动开始的录制不受自动暂停影响：静默 5 秒仍在录', async () => {
+    const h = await harness()
+    h.controller.toggleRecord()
+    h.input.send([0x90, 60, 100])
+    h.host.advance(0.5)
+    h.input.send([0x80, 60, 0])
+
+    h.host.advance(5)
+    h.host.tick()
+    expect(h.controller.mode).toBe('recording')
+
+    h.host.advance(0.5)
+    h.input.send([0x90, 62, 100])
+    h.host.advance(0.3)
+    h.input.send([0x80, 62, 0])
+    expect(snap(h.controller.visibleNotes())).toEqual([
+      [60, 0, 0.5],
+      [62, 6, 6.3],
+    ])
+  })
+
+  it('自动开始的录制可以手动暂停（图标与走带同手动录制）', async () => {
+    const h = await harness()
+    h.input.send([0x90, 60, 100])
+    h.host.advance(0.3)
+    h.input.send([0x80, 60, 0])
+    h.controller.toggleRecord() // 手动暂停
+
+    expect(h.controller.mode).toBe('idle')
+    expect(h.controller.position).toBeCloseTo(0.3, 5)
+    expect(h.controller.visibleNotes()[0].end).toBeCloseTo(0.3, 5)
+    h.host.advance(5)
+    h.host.tick()
+    expect(h.controller.position).toBeCloseTo(0.3, 5) // 暂停后位置不再推进
+  })
+
+  it('按住键不放不触发自动暂停；长音录到松开为止', async () => {
+    const h = await harness()
+    h.input.send([0x90, 60, 100])
+    h.host.advance(5)
+    h.host.tick()
+    expect(h.controller.mode).toBe('recording') // 键还按着，声音还在
+
+    h.input.send([0x80, 60, 0])
+    h.host.advance(2.5)
+    h.host.tick()
+    expect(h.controller.mode).toBe('recording') // 松开后重新计时
+    h.host.advance(0.6)
+    h.host.tick()
+    expect(h.controller.mode).toBe('idle')
+    expect(snap(h.controller.visibleNotes())).toEqual([[60, 0, 5]])
+  })
+
+  it('踩着踏板不放不触发自动暂停；踏板事件也刷新静默计时', async () => {
+    const h = await harness()
+    h.input.send([0x90, 60, 100])
+    h.host.advance(0.2)
+    h.input.send([0x80, 60, 0])
+    h.input.send([0xb0, 64, 127]) // 踩下延音后不再有音符
+
+    h.host.advance(5)
+    h.host.tick()
+    expect(h.controller.mode).toBe('recording') // 踏板还踩着：区间要录到松开
+
+    h.input.send([0xb0, 64, 0])
+    h.host.advance(2.5)
+    h.host.tick()
+    expect(h.controller.mode).toBe('recording')
+    h.host.advance(0.6)
+    h.host.tick()
+    expect(h.controller.mode).toBe('idle')
+    expect(h.controller.visiblePedals()[0].end).toBeCloseTo(5.2, 5)
+  })
+
+  it('回放中按键不开始录制（只听不录）', async () => {
+    const h = await harness()
+    h.controller.toggleRecord()
+    h.input.send([0x90, 60, 100])
+    h.host.advance(0.5)
+    h.input.send([0x80, 60, 0])
+    h.controller.toggleRecord()
+    h.controller.beginScrub()
+    h.controller.scrub(0)
+    h.controller.endScrub()
+
+    h.controller.togglePlay()
+    expect(h.controller.mode).toBe('playing')
+    h.input.send([0x90, 64, 100])
+    expect(h.controller.mode).toBe('playing')
+    expect(snap(h.controller.visibleNotes())).toEqual([[60, 0, 0.5]])
+  })
+
+  it('拖动音轨期间按键不开始录制；松手后按键照常自动开始', async () => {
+    const h = await harness()
+    h.controller.beginScrub()
+    h.controller.scrub(5)
+    h.input.send([0x90, 60, 100])
+    h.input.send([0x80, 60, 0])
+    expect(h.controller.mode).toBe('idle')
+
+    h.controller.endScrub()
+    h.host.advance(0.1)
+    h.input.send([0x90, 62, 100])
+    expect(h.controller.mode).toBe('recording')
+    h.host.advance(0.2)
+    h.input.send([0x80, 62, 0])
+    expect(snap(h.controller.visibleNotes())).toEqual([[62, 5, 5.2]])
+  })
+
+  it('自动录制中拖动：松手后继续录，并从松手处重新计时', async () => {
+    const h = await harness()
+    h.input.send([0x90, 60, 100])
+    h.host.advance(0.4)
+    h.input.send([0x80, 60, 0])
+
+    h.controller.beginScrub()
+    h.controller.scrub(1)
+    h.controller.endScrub()
+    expect(h.controller.mode).toBe('recording')
+    h.host.advance(2.9) // 拖动后不足 3s：不算静默
+    h.host.tick()
+    expect(h.controller.mode).toBe('recording')
+    h.host.advance(0.2)
+    h.host.tick()
+    expect(h.controller.mode).toBe('idle')
+    expect(snap(h.controller.visibleNotes())).toEqual([[60, 0, 0.4]])
+  })
+
+  it('键盘拔出自动暂停：自动开始的录制同样收尾', async () => {
+    const h = await harness()
+    h.input.send([0x90, 60, 100])
+    h.host.advance(0.4)
+    h.access.inputs.delete('in-1')
+    h.access.fireStateChange()
+
+    expect(h.controller.mode).toBe('idle')
+    expect(snap(h.controller.visibleNotes())).toEqual([[60, 0, 0.4]])
+    expect(h.host.tickerCount).toBe(0)
+  })
+})
+
 describe('RecorderController：覆盖录制（录制线扫过的旧内容被抹除）', () => {
   /** 先录一条"旧音轨"：C4 [0,1]、E4 [2,3]，回到线位置 0 并清空输出记录 */
   function recordOldTake(h: Harness): void {

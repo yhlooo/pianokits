@@ -28,6 +28,9 @@ import {
  * - 回放：lookahead 调度，音符只经 MIDI 输出（连接的键盘音源）发声，本机不发声；
  * - 踏板（设计文档 20260913-recorder-pedals.md）：CC64/66/67 与音符同一套 pass 模型（按**踩下区间**
  *   记录与擦除），实时回送到键盘音源、回放排期、导出写 CC；其它 CC 只回送不记录；
+ * - 自动录制（设计文档 20260913-recorder-auto-record.md）：空闲（未播放也未录制）时按任意键
+ *   即自动开始一次录制；自动开始的录制连续 `AUTO_PAUSE_SEC` 没有键盘输入就自动暂停，
+ *   手动开始的录制只能手动暂停，自动开始的录制也可以手动暂停；
  * - 连接要求：未连接 MIDI 键盘时播放/录制不可用（视图禁用按钮 + Tips 提示）。
  */
 
@@ -37,6 +40,11 @@ export const LOOKAHEAD_SEC = 0.1
 export const TICK_MS = 25
 /** 排期补偿（秒）：避免定时器回调边界的竞态 */
 const LATENCY_SEC = 0.015
+/**
+ * 自动录制的静默超时（秒）：自动开始的录制中，连续这么久没有键盘输入（按键/踏板事件，
+ * 且手上没有按住的键、脚下没有踩住的踏板）就自动暂停录制。手动开始的录制不受影响。
+ */
+export const AUTO_PAUSE_SEC = 3
 
 /** 录音工具的走带模式 */
 export type RecorderMode =
@@ -129,6 +137,12 @@ export class RecorderController {
   /** 物理踏板状态（**始终**跟踪，不只录制中）：key = `${controller}|${channel}` */
   private readonly pedalDown = new Map<string, PedalDownState>()
   private _mode: RecorderMode = 'idle'
+  /** 本次录制是否由演奏自动开启：自动录制有静默看门狗（§3.3 checkAutoPause），手动录制没有 */
+  private autoRecord = false
+  /** 最近一次键盘输入（按键/踏板事件）的时间轴时刻（秒）：自动录制的静默计时基准 */
+  private lastInputAt = 0
+  /** 音轨拖动中：拖动期间不自动开始录制（与 D4「拖动期间不录制」同一口径） */
+  private scrubbing = false
   /** 时钟是否推进（挂起时 false；模式仍保留，松手后继续） */
   private running = false
   /** 时钟锚点：`anchorWall` 时刻对应时间轴 `anchorPos` */
@@ -235,7 +249,7 @@ export class RecorderController {
     this.nextIndex = firstNoteAtOrAfter(this._notes, this.pausedPos)
     this.nextPedalIndex = firstPedalAtOrAfter(this._pedals, this.pausedPos)
     this.startClock()
-    this.startTicker()
+    this.syncTicker()
     this.tick()
     this.emitState()
   }
@@ -243,6 +257,7 @@ export class RecorderController {
   /**
    * 录制/暂停切换：从录制/播放线位置开始**覆盖录制**（录制线扫过的旧内容被抹除）；
    * 暂停时把按住的键在当前位置收尾并结束这一次"扫过"，再点录制即从新位置重新开始。
+   * 这样开始的是**手动录制**：不会因静默而自动暂停（自动开始的录制也可以这样手动暂停）。
    */
   toggleRecord(): void {
     if (this._mode === 'recording') {
@@ -251,12 +266,7 @@ export class RecorderController {
     }
     if (this.disposed || this.midi.status !== 'connected') return
     if (this._mode === 'playing') this.pausePlayback()
-    this._mode = 'recording'
-    this.held.clear()
-    this.heldPedals.clear()
-    this.beginPass(this.pausedPos)
-    this.startClock()
-    this.emitState()
+    this.startRecording(false)
   }
 
   /**
@@ -269,6 +279,8 @@ export class RecorderController {
     this.silence()
     this.running = false
     this.suspended = false
+    this.scrubbing = false
+    this.autoRecord = false
     this._mode = 'idle'
     this.pausedPos = 0
     this._notes = []
@@ -288,6 +300,8 @@ export class RecorderController {
    * 松手后从新位置重新开始一次覆盖录制。
    */
   beginScrub(): void {
+    // 拖动期间不自动开始录制（与"拖动期间不录制"同一口径：手上在动的是线，不是琴键）
+    this.scrubbing = true
     if (this.running) {
       if (this._mode === 'recording') {
         const at = this.position
@@ -314,14 +328,17 @@ export class RecorderController {
 
   /** 拖动结束：拖动前在播放/录制则从新位置继续（录制从新位置重新起一次覆盖） */
   endScrub(): void {
+    this.scrubbing = false
     if (!this.suspended) return
     this.suspended = false
-    if (this._mode === 'recording') this.beginPass(this.pausedPos)
-    this.startClock()
-    if (this._mode === 'playing') {
-      this.startTicker()
-      this.tick()
+    if (this._mode === 'recording') {
+      this.beginPass(this.pausedPos)
+      // 松手后静默重新计时：拖完的这 3 秒不该算作"没有演奏"
+      this.lastInputAt = this.pausedPos
     }
+    this.startClock()
+    this.syncTicker()
+    if (this._mode === 'playing') this.tick()
   }
 
   /**
@@ -411,6 +428,8 @@ export class RecorderController {
     this._mode = 'idle'
     this.running = false
     this.suspended = false
+    this.scrubbing = false
+    this.autoRecord = false
     this.pausedPos = Math.max(0, position)
     this.nextIndex = firstNoteAtOrAfter(this._notes, this.pausedPos)
     this.nextPedalIndex = firstPedalAtOrAfter(this._pedals, this.pausedPos)
@@ -436,9 +455,9 @@ export class RecorderController {
     if (this._mode !== 'playing') return
     this.pausedPos = this.position
     this.running = false
-    this.stopTicker()
-    this.silence()
     this._mode = 'idle'
+    this.syncTicker()
+    this.silence()
     this.emitState()
   }
 
@@ -451,8 +470,36 @@ export class RecorderController {
     this.commitPass(at)
     this.pausedPos = at
     this.running = false
+    this.autoRecord = false
     this._mode = 'idle'
+    this.syncTicker()
     this.emitState()
+  }
+
+  /**
+   * 从录制/播放线位置开始一次录制（`auto` = 由演奏自动开启）。
+   * 自动开始与手动开始只差一个标记：自动开始的那次录制会因静默而自动暂停，手动开始的不会。
+   */
+  private startRecording(auto: boolean): void {
+    this._mode = 'recording'
+    this.autoRecord = auto
+    this.lastInputAt = this.pausedPos
+    this.held.clear()
+    this.heldPedals.clear()
+    this.beginPass(this.pausedPos)
+    this.startClock()
+    this.syncTicker()
+    this.emitState()
+  }
+
+  /**
+   * 空闲（未播放也未录制）时按任意键即自动开始录制（设计文档 20260913-recorder-auto-record.md R1）。
+   * 只由 Note On 触发——单独踩踏板不触发（"按键"才是开始演奏的信号）；回放中与拖动音轨时不触发。
+   */
+  private startAutoRecording(): void {
+    if (this.disposed || this.scrubbing) return
+    if (this._mode !== 'idle' || this.midi.status !== 'connected') return
+    this.startRecording(true)
   }
 
   /** 开始一次覆盖录制：此后 [position, 录制线] 区间内的旧内容会被抹除 */
@@ -540,7 +587,10 @@ export class RecorderController {
     // 实时监听：按键回送到键盘音源。连接后键盘自带音源被关闭（Local Control Off），
     // 回送是演奏者听到自己弹奏的唯一途径（与播放器练习模式同一做法）。
     this.sink.echoNote(ev)
+    // 按下任意键即自动开始录制（空闲时）；这一次按下同时就是本次录制的第一个音符
+    if (ev.type === 'noteOn') this.startAutoRecording()
     if (this._mode !== 'recording' || !this.running) return
+    this.lastInputAt = this.position
     const at = this.position
     if (ev.type === 'noteOn') {
       // 同音高重复触发：前一个先收尾（一个音高同一时刻只有一个音）
@@ -570,6 +620,8 @@ export class RecorderController {
       this.pedalDown.delete(key)
     }
     if (this._mode !== 'recording' || !this.running) return
+    // 踏板事件也算"键盘输入"：踩踏板是演奏动作，且踩住的这一段是该录下来的内容
+    this.lastInputAt = this.position
     const at = this.position
     if (ev.value >= PEDAL_ON_THRESHOLD) this.openPedal(ev.controller, ev.channel, at, ev.value)
     else this.closePedal(ev.controller, ev.channel, at)
@@ -599,9 +651,15 @@ export class RecorderController {
     return this.anchorWall + (timelineSec - this.anchorPos)
   }
 
-  /** lookahead 调度：把窗口内开始的音符排入 MIDI 输出；到末尾自动暂停 */
+  /** 定时器回调：回放做 lookahead 排期，自动录制看守静默超时（两者之外模式不需要定时器） */
   private tick(): void {
-    if (this._mode !== 'playing' || !this.running) return
+    if (this._mode === 'playing') this.tickPlayback()
+    else if (this._mode === 'recording') this.checkAutoPause()
+  }
+
+  /** lookahead 调度：把窗口内开始的音符排入 MIDI 输出；到末尾自动暂停 */
+  private tickPlayback(): void {
+    if (!this.running) return
     const pos = this.position
     const until = pos + LOOKAHEAD_SEC
     this.schedulePedals(pos, until)
@@ -622,11 +680,24 @@ export class RecorderController {
     if (pos >= this.duration) {
       this.pausedPos = this.duration
       this.running = false
-      this.stopTicker()
-      this.silence()
       this._mode = 'idle'
+      this.syncTicker()
+      this.silence()
       this.emitState()
     }
+  }
+
+  /**
+   * 自动录制的静默看门狗：自动开始的录制中，连续 `AUTO_PAUSE_SEC` 没有键盘输入
+   * （按键 Note On/Off 与踏板 CC 都会刷新计时基准 `lastInputAt`）就自动暂停录制。
+   * 手上按着键（`held`）或脚下踩着踏板（`pedalDown`）时不计时——声音还在，录制不该断
+   * （长按的音与踩着不放的延音都要录到松开为止）。手动开始的录制不经过这里。
+   */
+  private checkAutoPause(): void {
+    if (!this.running || !this.autoRecord) return
+    if (this.held.size > 0 || this.pedalDown.size > 0) return
+    if (this.position - this.lastInputAt < AUTO_PAUSE_SEC) return
+    this.finishRecording()
   }
 
   /**
@@ -663,6 +734,17 @@ export class RecorderController {
     if (this.intervalId === undefined) return
     this.host.clearInterval(this.intervalId)
     this.intervalId = undefined
+  }
+
+  /**
+   * 按当前模式启停定时器：回放要 lookahead 排期，自动录制要看守静默超时；
+   * 空闲与手动录制不需要定时器（走带位置由时钟算出，只在事件到达时记录）。
+   */
+  private syncTicker(): void {
+    const needed =
+      this.running && (this._mode === 'playing' || (this._mode === 'recording' && this.autoRecord))
+    if (needed) this.startTicker()
+    else this.stopTicker()
   }
 
   /** 止住键盘音源上所有正在发声/已排期的音 */

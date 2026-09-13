@@ -17,7 +17,9 @@ import { downloadIcon, pauseIcon, playIcon, recordIcon, saveIcon, stopIcon } fro
  * - 音轨下方居中 5 个按钮：播放/暂停、录制/暂停、结束（清空）、保存、下载；
  * - 左右拖动音轨移动录制/播放线（拖动期间挂起录制/播放，由控制器负责）；
  * - 未连接 MIDI 键盘时播放/录制禁用，悬停或点击弹 Tips「请先连接 MIDI 键盘」；
- * - 音轨内不画任何说明文字（提示只出现在按钮 Tips 与控件上，画面留给音符）。
+ * - 音轨正中央浮一层状态提示（说明文字走 DOM，不画进画布）：未连接键盘时提示「未连接 MIDI 键盘」，
+ *   已连接且音轨全空、空闲时提示「在 MIDI 键盘上演奏可自动开始录制」
+ *   （设计文档 20260913-recorder-auto-record.md §3.2）。
  */
 
 /** 音轨显示音域：钢琴全键盘 88 键 A0(21)~C8(108)；键盘外的音符（0~20、109~127）不显示 */
@@ -62,6 +64,11 @@ const PLAY_RGB = '217, 164, 91'
 const EMPTY_NOTES: readonly RecordedNote[] = []
 const EMPTY_PEDALS: readonly RecordedPedalSegment[] = []
 
+/** 全空音轨中央的提示文案（用户口径，逐字使用） */
+export const AUTO_RECORD_HINT = '在 MIDI 键盘上演奏可自动开始录制'
+/** 未连接 MIDI 键盘时音轨中央的提示文案（用户口径；具体失败原因见 `midiHintText`） */
+export const NO_MIDI_HINT = '未连接 MIDI 键盘'
+
 export interface RecorderViewCallbacks {
   /** 播放/暂停切换 */
   onPlayToggle(): void
@@ -81,8 +88,15 @@ export interface RecorderViewCallbacks {
   onScrubEnd(): void
 }
 
-/** 未连接 MIDI 键盘时的提示文案（Tips 与状态行共用，按连接状态细分原因） */
-export function midiHintText(status: MidiConnectionStatus): string {
+/**
+ * 未连接 MIDI 键盘时的提示文案（按钮 Tips、音轨中央提示共用，按连接状态细分原因）。
+ * `fallback` 是"确实没连上"这一类的用词：按钮 Tips 用祈使句（请先连接 MIDI 键盘），
+ * 音轨中央提示用陈述句（未连接 MIDI 键盘）。
+ */
+export function midiHintText(
+  status: MidiConnectionStatus,
+  fallback = '请先连接 MIDI 键盘',
+): string {
   switch (status) {
     case 'connected':
       return ''
@@ -93,8 +107,24 @@ export function midiHintText(status: MidiConnectionStatus): string {
     case 'error':
       return 'MIDI 连接失败，请重试'
     default:
-      return '请先连接 MIDI 键盘'
+      return fallback
   }
+}
+
+/**
+ * 音轨正中央的提示文案（同一处位置按状态切换，没有要说的就返回空串 = 不显示）：
+ * - 未连接键盘：说明原因（`idle`/`connecting` 是"还没结论"的瞬时态，不提示，免得每次进页闪一下）；
+ *   音轨有没有内容都提示——没有键盘就录不了也放不了，这是当前状态下最该说的事；
+ * - 已连接且未播放未录制、音轨全空：告诉用户"演奏即录"（只有全空音轨才提示，见设计文档
+ *   `20260913-recorder-auto-record.md` R6）；录了一部分暂停后（`hasContent`）就不再提示。
+ */
+export function centerHintText(state: RecorderUiState): string {
+  if (!state.midiConnected) {
+    if (state.midiStatus === 'idle' || state.midiStatus === 'connecting') return ''
+    return midiHintText(state.midiStatus, NO_MIDI_HINT)
+  }
+  if (state.mode === 'idle' && !state.hasContent) return AUTO_RECORD_HINT
+  return ''
 }
 
 function rgba(rgb: readonly [number, number, number], alpha: number): string {
@@ -129,6 +159,9 @@ export class RecorderView {
   private readonly timerEl: HTMLElement
   private readonly statusEl: HTMLElement
   private readonly tipEl: HTMLElement
+  /** 音轨正中央的提示（未连接 MIDI 键盘 / 全空音轨可自动开录；空串 = 隐藏） */
+  private readonly hintEl: HTMLElement
+  private hintText = ''
   private readonly playBtn: HTMLButtonElement
   private readonly recordBtn: HTMLButtonElement
   private readonly stopBtn: HTMLButtonElement
@@ -171,7 +204,9 @@ export class RecorderView {
     this.timerEl = el('div', { class: 'recorder__timer' }, '00:00')
     this.statusEl = el('div', { class: 'recorder__status' }, '正在连接 MIDI 键盘…')
     this.tipEl = el('div', { class: 'recorder__tip', role: 'status' })
-    this.stage = el('div', { class: 'recorder__stage' }, this.canvas, this.tipEl)
+    // 音轨中央的提示：DOM 浮层（画布只画音符与网格），初始隐藏、由 setState 按状态填文案
+    this.hintEl = el('div', { class: 'recorder__hint', role: 'status', hidden: true })
+    this.stage = el('div', { class: 'recorder__stage' }, this.canvas, this.hintEl, this.tipEl)
 
     // 5 个控制按钮：播放/暂停、录制/暂停、结束（清空）、保存、下载
     this.playBtn = this.buildButton('播放', playIcon(), () => cbs.onPlayToggle())
@@ -235,7 +270,15 @@ export class RecorderView {
     this.playWrap.classList.toggle('is-blocked', this.playBtn.disabled)
     this.recordWrap.classList.toggle('is-blocked', this.recordBtn.disabled)
 
-    // 状态行只报"已连接哪台键盘"；未连接不在这里重复提示（提示统一由按钮 Tips 承担）
+    // 音轨正中央的提示（未连接键盘 / 全空音轨可自动开录）：文案与显隐都由中心提示函数决定
+    const hint = centerHintText(state)
+    if (hint !== this.hintText) {
+      this.hintText = hint
+      this.hintEl.textContent = hint
+      this.hintEl.hidden = hint === ''
+    }
+
+    // 状态行只报"已连接哪台键盘"；未连接不在这里重复提示（未连接的提示由音轨中央与按钮 Tips 承担）
     this.statusEl.textContent = state.midiConnected
       ? state.midiLabels.length > 0
         ? `已连接：${state.midiLabels.join('、')}`

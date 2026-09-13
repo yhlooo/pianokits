@@ -2246,6 +2246,34 @@ input[type='range']::-moz-range-thumb {
   cursor: grabbing;
 }
 
+/* 音轨正中央的状态提示（未连接 MIDI 键盘 / 在 MIDI 键盘上演奏可自动开始录制）：
+   文案与显隐由视图的 centerHintText 决定（hidden 开关）。
+   没有描边也没有底板色块：底色是"音轨底色 → 透明"的径向渐变，中心把网格与播放线盖住、
+   四周融进音轨（圆角只是兜住元素盒，渐变的四角本就是全透明的）；
+   pointer-events: none 让拖动音轨的手势照常落到画布上 */
+.recorder__hint {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  max-width: min(520px, 84%);
+  padding: 14px 30px;
+  /* 面板标题档字号（17.5px）：这是音轨中央唯一的一句话，要比正文醒目 */
+  font-size: var(--fs-panel);
+  line-height: 1.4;
+  color: var(--text-1);
+  text-align: center;
+  /* 与音轨底色同色（画布渐变在音域中段的 #161513 一带）→ 透明 */
+  background: radial-gradient(
+    120% 150% at 50% 50%,
+    rgba(22, 21, 20, 0.94) 0%,
+    rgba(22, 21, 20, 0.88) 45%,
+    rgba(22, 21, 20, 0) 100%
+  );
+  border-radius: var(--r-lg);
+  pointer-events: none;
+}
+
 /* Tips：控制行上方居中的小气泡（未连接 MIDI 键盘 / 音轨为空等提示） */
 .recorder__tip {
   position: absolute;

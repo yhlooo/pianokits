@@ -540,11 +540,16 @@ try {
     status: await status.textContent(),
     recordDisabled: await recordBtn.isDisabled(),
     recordTitle: await recordBtn.getAttribute('title'),
+    hint: (await page.locator('.recorder__hint').textContent())?.trim(),
   }
   logs.push(`拔出键盘: ${JSON.stringify(unplugged)}`)
   if (!unplugged.recordDisabled) problems.push('拔出键盘后录制按钮应禁用')
   if (unplugged.status !== '')
     problems.push(`未连接时计时器右侧不应再提示，实际“${unplugged.status}”`)
+  // 拔掉键盘后音轨中央改为提示未连接（音轨里还有内容也照提示：没键盘就录不了也放不了）
+  if (unplugged.hint !== '未连接 MIDI 键盘') {
+    problems.push(`未连接时音轨中央应提示“未连接 MIDI 键盘”，实际“${unplugged.hint}”`)
+  }
   if ((await page.locator('.recorder__controls').isVisible()) !== true) {
     problems.push('控制行应始终可见')
   }
@@ -561,6 +566,8 @@ try {
     status: await pageB.locator('.recorder__status').textContent(),
     recordDisabled: await recordB.isDisabled(),
     playDisabled: await playB.isDisabled(),
+    hint: (await pageB.locator('.recorder__hint').textContent())?.trim(),
+    hintVisible: await pageB.locator('.recorder__hint').isVisible(),
   }
   logs.push(`无设备: ${JSON.stringify(noDevice)}`)
   if (!noDevice.recordDisabled || !noDevice.playDisabled) {
@@ -568,6 +575,10 @@ try {
   }
   if (noDevice.status !== '') {
     problems.push(`无设备时计时器右侧不应再提示，实际“${noDevice.status}”`)
+  }
+  // 未连接键盘：音轨中央提示未连接（不是"演奏即录"那句）
+  if (!noDevice.hintVisible || noDevice.hint !== '未连接 MIDI 键盘') {
+    problems.push(`无设备时音轨中央应提示“未连接 MIDI 键盘”，实际“${noDevice.hint}”`)
   }
   // 悬停禁用按钮 → Tips
   await pageB.locator('.recorder__btn-wrap').nth(1).hover()
@@ -600,9 +611,16 @@ try {
   const plugged = {
     status: await pageB.locator('.recorder__status').textContent(),
     recordDisabled: await recordB.isDisabled(),
+    hint: (await pageB.locator('.recorder__hint').textContent())?.trim(),
   }
   logs.push(`插入键盘: ${JSON.stringify(plugged)}`)
   if (plugged.recordDisabled) problems.push('插入键盘后录制按钮应可用')
+  // 接上键盘且音轨仍全空：中央提示换成"演奏即录"
+  if (plugged.hint !== '在 MIDI 键盘上演奏可自动开始录制') {
+    problems.push(
+      `连上键盘后音轨中央应提示“在 MIDI 键盘上演奏可自动开始录制”，实际“${plugged.hint}”`,
+    )
+  }
 
   // 88 键音域：录最低音 A0 与最高音 C8，取样画布确认两端都画出了音符条
   await recordB.click()
@@ -648,6 +666,153 @@ try {
   if (bands.bottom === 0) problems.push('最低音 A0 应在音轨最下一行画出（底部无音符像素）')
   await recordB.click() // 暂停录制
   await ctxB.context.close()
+
+  // ---------- C. 演奏自动录制 + 空音轨提示（设计文档 20260913-recorder-auto-record.md） ----------
+  const ctxC = await newPage(true)
+  const pageC = ctxC.page
+  await pageC.goto(`${BASE_URL}/midi-recorder`, { waitUntil: 'networkidle' })
+  const timerC = pageC.locator('.recorder__timer')
+  const playC = pageC.locator('.recorder__btn').nth(0)
+  const recordC = pageC.locator('.recorder__btn').nth(1)
+  const stopC = pageC.locator('.recorder__btn').nth(2)
+  const hintC = pageC.locator('.recorder__hint')
+  const canvasC = pageC.locator('.recorder__canvas')
+  await pageC.waitForTimeout(300)
+
+  // 全空音轨且空闲：音轨正中央显示提示（文本逐字核对，位置居中）
+  const hintCenter = await (async () => {
+    const hb = await hintC.boundingBox()
+    const cb = await canvasC.boundingBox()
+    if (hb === null || cb === null) return null
+    return {
+      dx: Math.abs(hb.x + hb.width / 2 - (cb.x + cb.width / 2)),
+      dy: Math.abs(hb.y + hb.height / 2 - (cb.y + cb.height / 2)),
+    }
+  })()
+  const hintText = (await hintC.textContent())?.trim()
+  const hintFontPx = await hintC.evaluate((el) => Number.parseFloat(getComputedStyle(el).fontSize))
+  logs.push(
+    `空音轨提示: visible=${await hintC.isVisible()} 文案“${hintText}” 字号=${hintFontPx}px 居中偏差=${JSON.stringify(hintCenter)}`,
+  )
+  if (!(await hintC.isVisible())) {
+    problems.push('全空音轨且空闲时应显示“在 MIDI 键盘上演奏可自动开始录制”提示')
+  }
+  if (hintText !== '在 MIDI 键盘上演奏可自动开始录制') {
+    problems.push(`空音轨提示文案不符：“${hintText}”`)
+  }
+  if (!(hintFontPx >= 16)) {
+    problems.push(`音轨中央提示的字号应放大（≥16px），实际 ${hintFontPx}px`)
+  }
+  if (hintCenter === null || hintCenter.dx > 2 || hintCenter.dy > 2) {
+    problems.push(`空音轨提示应位于音轨正中央，实际偏差 ${JSON.stringify(hintCenter)}`)
+  }
+  // 底色：与音轨底色同色的径向渐变（渐隐到透明）、无描边、圆角
+  const hintStyle = await hintC.evaluate((el) => {
+    const s = getComputedStyle(el)
+    return {
+      borderWidth: s.borderTopWidth,
+      borderStyle: s.borderTopStyle,
+      radius: s.borderTopLeftRadius,
+      backgroundImage: s.backgroundImage,
+    }
+  })
+  logs.push(
+    `提示样式: 边框=${hintStyle.borderWidth}/${hintStyle.borderStyle} 圆角=${hintStyle.radius} 底色=${hintStyle.backgroundImage}`,
+  )
+  if (
+    Number.parseFloat(hintStyle.borderWidth) > 0 &&
+    hintStyle.borderStyle !== 'none' &&
+    hintStyle.borderStyle !== 'hidden'
+  ) {
+    problems.push(`中央提示不应有描边，实际 ${hintStyle.borderWidth} ${hintStyle.borderStyle}`)
+  }
+  if (!hintStyle.backgroundImage.includes('gradient')) {
+    problems.push(`中央提示底色应为渐变（渐隐到透明），实际 ${hintStyle.backgroundImage}`)
+  } else if (!/rgba?\([^)]*,\s*0\)/.test(hintStyle.backgroundImage)) {
+    problems.push(`中央提示渐变应渐隐到全透明，实际 ${hintStyle.backgroundImage}`)
+  }
+  if (Number.parseFloat(hintStyle.radius) <= 0) {
+    problems.push(`中央提示底色应有圆角，实际 ${hintStyle.radius}`)
+  }
+
+  // 按任意键 → 自动开始录制：录制按钮切换为暂停图标、中央提示收起
+  await pageC.evaluate(() => window.__fakeMidi.emit([0x90, 60, 100]))
+  await pageC.waitForTimeout(400)
+  const autoStarted = {
+    title: await recordC.getAttribute('title'),
+    recordingClass: await recordC.evaluate((el) => el.classList.contains('is-recording')),
+    hintVisible: await hintC.isVisible(),
+    playDisabled: await playC.isDisabled(),
+  }
+  logs.push(`自动开始录制: ${JSON.stringify(autoStarted)}`)
+  if (autoStarted.title !== '暂停录制' || !autoStarted.recordingClass) {
+    problems.push('自动开始的录制应把录制按钮切换为暂停图标')
+  }
+  if (autoStarted.hintVisible) problems.push('开始录制后中央提示应收起')
+  await pageC.screenshot({ path: `${SHOT_DIR}/recorder-9-auto-record.png` })
+
+  // 松开后静默 3 秒 → 自动暂停：图标回到录制、计时器停住、位置不推进
+  await pageC.evaluate(() => window.__fakeMidi.emit([0x80, 60, 0]))
+  await pageC.waitForTimeout(3400)
+  const autoPaused = {
+    title: await recordC.getAttribute('title'),
+    timer: await timerC.textContent(),
+    stopDisabled: await stopC.isDisabled(),
+  }
+  await pageC.waitForTimeout(500)
+  const timerAfterPause = await timerC.textContent()
+  logs.push(`自动暂停: ${JSON.stringify(autoPaused)} → 0.5s 后计时器 ${timerAfterPause}`)
+  if (autoPaused.title !== '录制') problems.push('静默 3 秒后自动暂停：录制按钮应恢复为录制图标')
+  if (timerAfterPause !== autoPaused.timer) {
+    problems.push(`自动暂停后计时器应停住（${autoPaused.timer} → ${timerAfterPause}）`)
+  }
+  if (autoPaused.stopDisabled) problems.push('自动暂停后音轨已有内容，结束按钮应可用')
+  const pausedSec = parseClock(autoPaused.timer)
+  if (pausedSec === null || pausedSec < 3) {
+    problems.push(`自动暂停应发生在按键后约 3 秒，实际 ${autoPaused.timer}`)
+  }
+
+  // 再次演奏：从暂停处继续（位置接着走，不从 0 重来）
+  await pageC.evaluate(() => window.__fakeMidi.emit([0x90, 62, 100]))
+  await pageC.waitForTimeout(400)
+  const resumedSec = parseClock(await timerC.textContent())
+  const resumedTitle = await recordC.getAttribute('title')
+  logs.push(
+    `再次演奏: 计时器 ${await timerC.textContent()}（暂停在 ${autoPaused.timer}），按钮 ${resumedTitle}`,
+  )
+  if (resumedTitle !== '暂停录制') problems.push('自动暂停后再次演奏应继续自动录制')
+  if (resumedSec === null || pausedSec === null || resumedSec < pausedSec) {
+    problems.push('再次演奏应从暂停处继续（计时器不该回退）')
+  }
+  await pageC.evaluate(() => window.__fakeMidi.emit([0x80, 62, 0]))
+  await pageC.waitForTimeout(3200)
+  if ((await recordC.getAttribute('title')) !== '录制')
+    problems.push('第二次自动录制也应静默自动暂停')
+
+  // 已有内容暂停后不显示提示；清空后又显示
+  const hintAfterContent = await hintC.isVisible()
+  if (hintAfterContent) problems.push('录过一部分再暂停后不应再显示中央提示')
+
+  // 手动开始的录制不自动暂停
+  await recordC.click()
+  await pageC.waitForTimeout(3600)
+  const manualTitle = await recordC.getAttribute('title')
+  logs.push(`手动录制静默 3.6 秒后按钮: ${manualTitle}`)
+  if (manualTitle !== '暂停录制') problems.push('手动开始的录制不应自动暂停（需手动暂停）')
+  await recordC.click() // 手动暂停
+
+  await stopC.click()
+  await pageC.locator('.dialog').waitFor()
+  await pageC.locator('.dialog__btn--danger').click()
+  await pageC.waitForTimeout(200)
+  const hintAfterClear = {
+    visible: await hintC.isVisible(),
+    stopDisabled: await stopC.isDisabled(),
+  }
+  logs.push(`清空后: ${JSON.stringify(hintAfterClear)}`)
+  if (!hintAfterClear.visible) problems.push('清空音轨后应重新显示中央提示')
+  await pageC.screenshot({ path: `${SHOT_DIR}/recorder-10-auto-empty.png` })
+  await ctxC.context.close()
 } catch (err) {
   problems.push(`脚本异常: ${err.stack ?? err.message}`)
 } finally {

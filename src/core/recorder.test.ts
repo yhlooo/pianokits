@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { RecorderController, type RecorderHost, type RecorderUiState } from './recorder'
+import type { RecordedPedalSegment } from './recorder-model'
 
 /** 假 MIDIInput：记录监听器，测试内手动发送消息 */
 class FakeInput {
@@ -322,7 +323,7 @@ describe('RecorderController：覆盖录制（录制线扫过的旧内容被抹�
     h.host.advance(2.5)
     // 扫过 [0,3.5]：整条旧音轨都没了
     expect(h.controller.visibleNotes()).toHaveLength(0)
-    expect(h.states[h.states.length - 1].hasNotes).toBe(true) // 仍在录制中
+    expect(h.states[h.states.length - 1].hasContent).toBe(true) // 仍在录制中
 
     h.controller.toggleRecord() // 暂停提交
     expect(h.controller.visibleNotes()).toHaveLength(0)
@@ -570,18 +571,18 @@ describe('RecorderController：结束（清空）', () => {
     expect(h.controller.mode).toBe('idle')
     expect(h.host.tickerCount).toBe(0)
     expect(h.output.byStatus(0xb0).some((m) => m.data[1] === 123)).toBe(true)
-    expect(h.states[h.states.length - 1].hasNotes).toBe(false)
+    expect(h.states[h.states.length - 1].hasContent).toBe(false)
   })
 })
 
 describe('RecorderController：会话恢复', () => {
   it('restore：装载音符与线位置、回到空闲模式，可从该位置继续录制', async () => {
     const h = await harness()
-    h.controller.restore([{ pitch: 60, velocity: 100, start: 0.2, end: 0.6, channel: 0 }], 1.5)
+    h.controller.restore([{ pitch: 60, velocity: 100, start: 0.2, end: 0.6, channel: 0 }], [], 1.5)
     expect(h.controller.mode).toBe('idle')
     expect(h.controller.position).toBeCloseTo(1.5, 5)
     expect(snap(h.controller.visibleNotes())).toEqual([[60, 0.2, 0.6]])
-    expect(h.states[h.states.length - 1].hasNotes).toBe(true)
+    expect(h.states[h.states.length - 1].hasContent).toBe(true)
 
     // 线位置（1.5s）之后录制：新音符接在恢复的内容之后
     h.controller.toggleRecord()
@@ -604,11 +605,11 @@ describe('RecorderController：会话恢复', () => {
     h.input.send([0x80, 60, 0])
     h.controller.toggleRecord()
 
-    h.controller.restore([], 0)
+    h.controller.restore([], [], 0)
     expect(h.controller.visibleNotes()).toHaveLength(0)
     expect(h.controller.position).toBe(0)
     expect(h.controller.mode).toBe('idle')
-    expect(h.states[h.states.length - 1].hasNotes).toBe(false)
+    expect(h.states[h.states.length - 1].hasContent).toBe(false)
   })
 })
 
@@ -627,5 +628,196 @@ describe('RecorderController：导出快照', () => {
     expect(h.controller.mode).toBe('recording')
     expect(h.controller.visibleNotes()).toHaveLength(0)
     expect(h.controller.pendingNotes()).toHaveLength(1)
+  })
+})
+
+describe('RecorderController：踏板（设计文档 20260913-recorder-pedals.md）', () => {
+  /** 踏板区间快照（时间四舍五入到毫秒） */
+  const snapPedals = (
+    segs: readonly { controller: number; start: number; end: number }[],
+  ): number[][] =>
+    segs.map((s) => [
+      s.controller,
+      Math.round(s.start * 1000) / 1000,
+      Math.round(s.end * 1000) / 1000,
+    ])
+
+  const pedal = (
+    controller: number,
+    start: number,
+    end: number,
+    channel = 0,
+    value = 127,
+  ): RecordedPedalSegment => ({ controller, channel, start, end, value })
+
+  it('录制：踩下 → 抬起成一段区间（通道/值保留），并实时回送到输出端口', async () => {
+    const h = await harness()
+    h.controller.toggleRecord()
+    h.host.advance(0.5)
+    h.input.send([0xb2, 64, 100])
+    expect(h.controller.pendingPedals()).toHaveLength(1)
+    expect(h.controller.visiblePedals()).toHaveLength(0)
+    h.host.advance(1)
+    h.input.send([0xb2, 64, 0])
+
+    expect(h.controller.pendingPedals()).toHaveLength(0)
+    expect(snapPedals(h.controller.visiblePedals())).toEqual([[64, 0.5, 1.5]])
+    const seg = h.controller.visiblePedals()[0]
+    expect(seg.channel).toBe(2)
+    expect(seg.value).toBe(100)
+    // 回送：连接后键盘 Local Control 被关闭，踏板必须回送才听得见
+    expect(h.output.byStatus(0xb0).some((m) => m.data[1] === 64 && m.data[2] === 100)).toBe(true)
+  })
+
+  it('非录制中只回送、不录；但物理踏板状态被跟踪，录制开始时补开一段', async () => {
+    const h = await harness()
+    h.input.send([0xb0, 64, 127]) // 空闲时先踩住
+    expect(h.controller.visiblePedals()).toHaveLength(0)
+
+    h.controller.toggleRecord()
+    h.host.advance(1)
+    h.input.send([0xb0, 64, 0])
+    expect(snapPedals(h.controller.visiblePedals())).toEqual([[64, 0, 1]])
+  })
+
+  it('暂停录制：未抬起的踏板就地收尾（不留悬空踏板）', async () => {
+    const h = await harness()
+    h.controller.toggleRecord()
+    h.host.advance(0.5)
+    h.input.send([0xb0, 64, 127])
+    h.host.advance(0.5)
+    h.controller.toggleRecord()
+
+    expect(snapPedals(h.controller.visiblePedals())).toEqual([[64, 0.5, 1]])
+    expect(h.controller.pendingPedals()).toHaveLength(0)
+  })
+
+  it('覆盖录制：扫过的区间内旧踏板被擦除，新踩的写进这一段', async () => {
+    const h = await harness()
+    h.controller.restore([], [pedal(64, 0, 3)], 0)
+    h.controller.toggleRecord()
+    h.host.advance(1) // 线只扫到 1：旧区间保留线之后的部分
+    expect(snapPedals(h.controller.visiblePedals())).toEqual([[64, 1, 3]])
+
+    h.input.send([0xb0, 64, 127])
+    h.host.advance(1)
+    h.input.send([0xb0, 64, 0])
+    expect(snapPedals(h.controller.visiblePedals())).toEqual([
+      [64, 1, 2],
+      [64, 2, 3],
+    ])
+    h.controller.toggleRecord() // 暂停 → 提交本次扫过
+    expect(snapPedals(h.controller.visiblePedals())).toEqual([
+      [64, 1, 2],
+      [64, 2, 3],
+    ])
+  })
+
+  it('录制中拖动：未抬起的踏板在拖动起点收尾，松手后从新位置重新开始', async () => {
+    const h = await harness()
+    h.controller.toggleRecord()
+    h.host.advance(0.5)
+    h.input.send([0xb0, 64, 127])
+    h.host.advance(0.5)
+    h.controller.beginScrub()
+    expect(snapPedals(h.controller.visiblePedals())).toEqual([[64, 0.5, 1]])
+
+    h.controller.scrub(2)
+    h.controller.endScrub()
+    h.host.advance(0.5)
+    h.input.send([0xb0, 64, 0])
+    expect(snapPedals(h.controller.visiblePedals())).toEqual([
+      [64, 0.5, 1],
+      [64, 2, 2.5],
+    ])
+  })
+
+  it('回放：踏板区间排「踩下 + 抬起」（时间戳按区间起止、通道沿用录制值）', async () => {
+    const h = await harness()
+    h.controller.restore(
+      [{ pitch: 60, velocity: 100, start: 0, end: 1, channel: 0 }],
+      [pedal(64, 0.2, 0.8, 2, 90)],
+      0,
+    )
+    h.output.sent.length = 0
+    h.controller.togglePlay()
+    h.host.advance(0.15)
+    h.host.tick()
+
+    const cc = h.output.byStatus(0xb0).filter((m) => m.data[1] === 64)
+    expect(cc.map((m) => [m.data[0] & 0x0f, m.data[2]])).toEqual([
+      [2, 90],
+      [2, 0],
+    ])
+    expect(cc[0].ts).toBeDefined()
+    expect((cc[1].ts ?? 0) - (cc[0].ts ?? 0)).toBeCloseTo(600, 0) // 0.2 → 0.8
+  })
+
+  it('回放从区间中途开始：立即补发踩下（无时间戳），抬起仍按原时刻', async () => {
+    const h = await harness()
+    h.controller.restore([], [pedal(64, 0, 2)], 1) // 线落在 0–2 区间内
+    h.output.sent.length = 0
+    h.controller.togglePlay()
+    h.host.tick()
+
+    const cc = h.output.byStatus(0xb0).filter((m) => m.data[1] === 64)
+    expect(cc.map((m) => m.data[2])).toEqual([127, 0])
+    expect(cc[0].ts).toBeUndefined() // 已过期 → 立即发送
+    expect(cc[1].ts).toBeDefined()
+  })
+
+  it('只有踏板的内容也算"有内容"（播放/保存/下载可用），时长按踏板计', async () => {
+    const h = await harness()
+    h.controller.toggleRecord()
+    h.host.advance(0.3)
+    h.input.send([0xb0, 64, 127])
+    h.host.advance(0.3)
+    expect(h.states[h.states.length - 1].hasContent).toBe(true)
+    h.controller.toggleRecord()
+    expect(h.controller.duration).toBeCloseTo(0.6, 5)
+  })
+
+  it('导出快照：未抬起的踏板补到当前线位置；导出后走带仍是录制中', async () => {
+    const h = await harness()
+    h.controller.toggleRecord()
+    h.host.advance(0.5)
+    h.input.send([0xb0, 64, 127])
+    h.host.advance(0.25)
+
+    const snapshot = h.controller.exportPedals()
+    expect(snapshot).toHaveLength(1)
+    expect(snapshot[0].end).toBeCloseTo(0.75, 5)
+    expect(h.controller.mode).toBe('recording')
+    expect(h.controller.visiblePedals()).toHaveLength(0)
+    expect(h.controller.pendingPedals()).toHaveLength(1)
+  })
+
+  it('非踏板 CC（如调制轮）只回送、不录', async () => {
+    const h = await harness()
+    h.controller.toggleRecord()
+    h.host.advance(0.2)
+    h.input.send([0xb0, 1, 64])
+    expect(h.controller.visiblePedals()).toHaveLength(0)
+    expect(h.controller.pendingPedals()).toHaveLength(0)
+    expect(h.output.byStatus(0xb0).some((m) => m.data[1] === 1)).toBe(true)
+  })
+
+  it('键盘拔出：未抬起的踏板就地收尾，物理踏板状态清空（不会带进下一次录制）', async () => {
+    const h = await harness()
+    h.controller.toggleRecord()
+    h.host.advance(0.5)
+    h.input.send([0xb0, 64, 127])
+    h.host.advance(0.5)
+    h.access.inputs.delete('in-1')
+    h.access.fireStateChange()
+    expect(h.controller.mode).toBe('idle')
+    expect(snapPedals(h.controller.visiblePedals())).toEqual([[64, 0.5, 1]])
+
+    h.access.inputs.set('in-1', h.input)
+    h.access.fireStateChange()
+    h.controller.toggleRecord()
+    h.host.advance(0.5)
+    h.controller.toggleRecord()
+    expect(snapPedals(h.controller.visiblePedals())).toEqual([[64, 0.5, 1]])
   })
 })

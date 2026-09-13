@@ -90,14 +90,75 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
     return scoreViewPromise
   }
 
-  // ---------- 侧栏折叠 ----------
+  // ---------- 侧栏折叠 / 窄屏抽屉 ----------
   // 主区域提前创建（子元素随后 append），供折叠回调引用；折叠后整栏隐藏、不留外露部分，
   // 展开按钮固定在播放坞最左并始终预留位置。
+  // 窄屏（≤900px）下侧栏改为浮层抽屉（CSS `.main.is-drawer`）：不再挤压内容区，
+  // 由播放坞最左的同一个按钮开关，另可点遮罩或按 Esc 关闭（设计文档 20260912-ui-review.draft2.md §2）。
+  const drawerMedia = window.matchMedia('(max-width: 900px)')
   const mainEl = el('main', { class: 'main' })
-  const setSidebarCollapsed = (collapsed: boolean): void => {
-    mainEl.classList.toggle('is-collapsed', collapsed)
-    transportView.setSidebarCollapsed(collapsed)
+  /** 浮层遮罩：仅抽屉打开时存在，点击关闭 */
+  const backdropEl = el('div', { class: 'main__backdrop' })
+  let sidebarCollapsed = false
+  let drawerMode = drawerMedia.matches
+  let drawerOpen = false
+
+  /**
+   * 把当前模式与开合态落到 DOM。
+   * 注意两个模式下的"收起"含义不同：桌面是 `sidebarCollapsed`（侧栏是否已收起），
+   * 窄屏是 `drawerOpen`（抽屉是否已打开），必须按模式取对应的那个值传给按钮，
+   * 否则按钮的可见性判断会失真。
+   */
+  function syncSidebar(): void {
+    mainEl.classList.toggle('is-collapsed', !drawerMode && sidebarCollapsed)
+    mainEl.classList.toggle('is-drawer', drawerMode)
+    mainEl.classList.toggle('is-drawer-open', drawerMode && drawerOpen)
+    transportView.setSidebarState(drawerMode, drawerMode ? drawerOpen : sidebarCollapsed)
+    if (drawerMode && drawerOpen) {
+      if (backdropEl.parentElement === null) mainEl.after(backdropEl)
+    } else {
+      backdropEl.remove()
+    }
   }
+
+  const closeDrawer = (): void => {
+    if (!drawerMode || !drawerOpen) return
+    drawerOpen = false
+    syncSidebar()
+  }
+
+  /** 侧栏收起（桌面）/ 关闭抽屉（窄屏）；两处入口（侧栏内收起按钮、播放坞按钮）共用 */
+  function collapseSidebar(): void {
+    if (drawerMode) {
+      closeDrawer()
+      return
+    }
+    sidebarCollapsed = true
+    syncSidebar()
+  }
+
+  /** 播放坞最左按钮：窄屏开关抽屉，桌面展开侧栏 */
+  function toggleSidebar(): void {
+    if (drawerMode) {
+      drawerOpen = !drawerOpen
+      syncSidebar()
+      return
+    }
+    sidebarCollapsed = false
+    syncSidebar()
+  }
+
+  backdropEl.addEventListener('click', closeDrawer)
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeDrawer()
+  })
+  // 跨断点时重置：进入抽屉模式先收起，回到桌面模式恢复常驻侧栏
+  drawerMedia.addEventListener('change', (e) => {
+    drawerMode = e.matches
+    drawerOpen = false
+    sidebarCollapsed = false
+    syncSidebar()
+  })
 
   const libraryView = new LibraryView({
     onImport: async (files) => {
@@ -116,7 +177,7 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
         writeFileQueryName(null)
       }
     },
-    onCollapse: () => setSidebarCollapsed(true),
+    onCollapse: () => collapseSidebar(),
   })
 
   const transportView = new TransportView({
@@ -138,7 +199,7 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
       store.update({ view: next })
       applyViewMode(next)
     },
-    onExpandSidebar: () => setSidebarCollapsed(false),
+    onExpandSidebar: () => toggleSidebar(),
     onMidiRetry: () => practiceController.autoConnect(),
     onPracticeToggle: () => practiceController.togglePractice(),
     onPracticeTrack: (index) => practiceController.toggleTrack(index),
@@ -222,6 +283,8 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
   const contentCol = el('div', { class: 'content' }, stage, transportView.el)
   mainEl.append(libraryView.el, contentCol)
   host.append(noticeEl, midiErrorEl, mainEl)
+  // 初始同步一次侧栏形态（窄屏直接进入抽屉模式，桌面为常驻侧栏）
+  syncSidebar()
 
   function applyViewMode(mode: ViewMode): void {
     stage.classList.remove('stage--split', 'stage--waterfall', 'stage--score')
@@ -268,6 +331,8 @@ export async function createApp(host: HTMLElement): Promise<() => void> {
   async function selectFile(id: string): Promise<void> {
     const item = store.get().files.find((f) => f.id === id)
     if (item === undefined) return
+    // 窄屏：选中曲目后收起抽屉，把视野让给瀑布流/谱面
+    closeDrawer()
     try {
       const bytes = await library.read(id)
       const song = parseMidi(bytes)

@@ -1,4 +1,5 @@
-import type { MidiNoteEvent } from './input'
+import { PEDALS } from './pedals'
+import type { MidiControlChange, MidiNoteEvent } from './input'
 import type { ScheduledNote } from '../engine/types'
 
 /** lib.dom 尚未收录 clear() 方法（Web MIDI 规范自 Chrome 43 起支持），本地补全类型 */
@@ -7,9 +8,36 @@ interface MidiOutputExt extends MIDIOutput {
   clear(): void
 }
 
+/** 排期到未来时刻的控制器消息（踏板镜像；时间换算与 note 排期同一口径） */
+export interface ScheduledControlChange {
+  /** 控制器号（0~127） */
+  controller: number
+  /** 控制器值（0~127） */
+  value: number
+  /** AudioContext 时间（采样级排期） */
+  time: number
+  /** MIDI 通道 0~15（默认 0） */
+  channel?: number
+}
+
 const ALL_CHANNELS = 16
 /** Local Control（CC122，通道模式消息）：0 = 禁用键盘自带音源，127 = 恢复 */
 const CC_LOCAL_CONTROL = 122
+
+/** MIDI 数据字节钳制（0~127） */
+function clampByte(value: number): number {
+  return Math.max(0, Math.min(127, Math.round(value)))
+}
+
+/** MIDI 通道钳制（0~15） */
+function clampChannel(channel: number): number {
+  return Math.max(0, Math.min(15, Math.round(channel)))
+}
+
+/** CC 消息字节；一律用普通 number[]（原因见 scheduleNote 注释） */
+function controlChangeData(channel: number, controller: number, value: number): number[] {
+  return [0xb0 | clampChannel(channel), clampByte(controller), clampByte(value)]
+}
 
 /**
  * 把走带排期的音符同步镜像到 MIDI 输出端口（键盘自带音源与电脑播放同步发声，
@@ -77,7 +105,32 @@ export class MidiOutputSink {
     for (const out of this.outputs) out.send(data)
   }
 
-  /** 静默全部输出：清空未发送队列 + All Notes Off / All Sound Off（16 通道） */
+  /**
+   * 排期一条 CC（踏板镜像，设计文档 20260913-pedal-sound-path.md §5.3）：时间戳换算同
+   * scheduleNote（已过期的排期时间立即发送、不带时间戳）。
+   */
+  scheduleControlChange(ev: ScheduledControlChange): void {
+    if (this.outputs.length === 0) return
+    const data = controlChangeData(ev.channel ?? 0, ev.controller, ev.value)
+    const ts = this.toTimestamp(ev.time)
+    for (const out of this.outputs) out.send(data, ts)
+  }
+
+  /**
+   * 回送实时 CC（练习中用户踩下的踏板——与 echoNote 同一口径：原样、立即、无时间戳）。
+   * 是否回送由调用方决定（本方法不做踏板判定）；无输出端口时为空操作。
+   */
+  echoControl(ev: MidiControlChange): void {
+    if (this.outputs.length === 0) return
+    const data = controlChangeData(ev.channel, ev.controller, ev.value)
+    for (const out of this.outputs) out.send(data)
+  }
+
+  /**
+   * 静默全部输出：清空未发送队列 + All Notes Off / All Sound Off（16 通道）
+   * + **三踏板复位**（CC64/66/67 = 0，16 通道）——`clear()` 会把已排期未发送的踏板抬起
+   * 一起丢掉，不复位会让键盘音源残留延音。
+   */
   allNotesOff(): void {
     for (const out of this.outputs) {
       if (typeof out.clear === 'function') out.clear()
@@ -86,6 +139,11 @@ export class MidiOutputSink {
       }
       for (let ch = 0; ch < ALL_CHANNELS; ch++) {
         out.send([0xb0 | ch, 120, 0])
+      }
+      for (const pedal of PEDALS) {
+        for (let ch = 0; ch < ALL_CHANNELS; ch++) {
+          out.send(controlChangeData(ch, pedal.cc, 0))
+        }
       }
     }
   }

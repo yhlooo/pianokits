@@ -1,6 +1,6 @@
 /**
  * 录音工具的领域模型（与「播放 / 练习」工具的 Song 无关）：
- * 录音是自时间轴 0 起、按秒记时的音符集合，可直接编码成 .mid 文件或存回播放器文件库。
+ * 录音是自时间轴 0 起、按秒记时的音符集合与踏板踩下区间，可直接编码成 .mid 文件或存回播放器文件库。
  */
 
 /** 最小音符时值（秒）：同刻按下/松开也留出可听、可画的最短时值 */
@@ -30,15 +30,19 @@ export function trackDuration(notes: readonly RecordedNote[]): number {
 }
 
 /**
- * 把一个音符按时间窗口 `[from, to]` 裁掉落在窗口内的部分，返回窗口之外剩下的片段：
- * 完全在窗口内 → 空；只被窗口切掉头或尾 → 一段；窗口落在音符中间 → 前后两段；
- * 与窗口不相交 → 原样返回（同一个对象，不做无谓拷贝）。
+ * 把一段带 `[start, end]` 的对象按时间窗口 `[from, to]` 裁掉落在窗口内的部分，返回窗口之外
+ * 剩下的片段：完全在窗口内 → 空；只被窗口切掉头或尾 → 一段；窗口落在中间 → 前后两段；
+ * 与窗口不相交 → 原样返回（同一个对象，不做无谓拷贝）。音符与踏板区间共用本内核。
  */
-function clipOutside(n: RecordedNote, from: number, to: number): RecordedNote[] {
-  if (n.end <= from || n.start >= to) return [n]
-  const out: RecordedNote[] = []
-  if (n.start < from) out.push({ ...n, end: from })
-  if (n.end > to) out.push({ ...n, start: to })
+function clipOutside<T extends { start: number; end: number }>(
+  span: T,
+  from: number,
+  to: number,
+): T[] {
+  if (span.end <= from || span.start >= to) return [span]
+  const out: T[] = []
+  if (span.start < from) out.push({ ...span, end: from })
+  if (span.end > to) out.push({ ...span, start: to })
   return out
 }
 
@@ -109,4 +113,89 @@ export function firstNoteAtOrAfter(notes: readonly RecordedNote[], position: num
     else hi = mid
   }
   return lo
+}
+
+// ---------- 踏板（设计文档 20260913-recorder-pedals.md §3.2） ----------
+
+/**
+ * 录制得到的踏板**踩下区间**（时间轴绝对秒数）。
+ *
+ * 以区间而不是原始 CC 事件流存储：覆盖录制的擦除、视图的条、回放与导出的 CC 都能由区间唯一导出，
+ * 且与播放器侧 `PedalSegment` 的领域口径一致（CC64 延音 / CC66 选择延音 / CC67 弱音）。
+ */
+export interface RecordedPedalSegment {
+  /** 控制器号：64 延音 / 66 选择延音 / 67 弱音 */
+  controller: number
+  /** MIDI 通道 0~15（录制时保留，回放与导出沿用） */
+  channel: number
+  /** 踩下时刻（秒，音轨时间轴） */
+  start: number
+  /** 抬起时刻（秒）；录制中尚未抬起为 Infinity（在 pass/拖动/导出边界收尾） */
+  end: number
+  /** 踩下值 0~127（半踏板保留原值；抬起固定写 0） */
+  value: number
+}
+
+/** 踏板区间总时长（秒）：最后一个区间的结束时刻；空轨为 0（非有限 end 视为未收尾，不计入） */
+export function pedalTrackDuration(segments: readonly RecordedPedalSegment[]): number {
+  let max = 0
+  for (const s of segments) {
+    if (Number.isFinite(s.end) && s.end > max) max = s.end
+  }
+  return max
+}
+
+/**
+ * 覆盖录制：擦除 `[from, to]` 时间窗口内的**全部**踏板区间（与音符的 `eraseRange` 同一裁剪内核）。
+ * 与窗口相交的区间只保留窗口之外的部分（跨边界裁剪、跨两端切成两段）。
+ * `to <= from`（还没扫过任何位置）时原样返回（浅拷贝）。
+ */
+export function erasePedalRange(
+  segments: readonly RecordedPedalSegment[],
+  from: number,
+  to: number,
+): RecordedPedalSegment[] {
+  if (!(to > from)) return [...segments]
+  const next: RecordedPedalSegment[] = []
+  for (const s of segments) next.push(...clipOutside(s, from, to))
+  return next
+}
+
+/** 合并两条按 start 升序的踏板区间序列（保持升序，同 start 按控制器号、通道） */
+export function mergePedals(
+  a: readonly RecordedPedalSegment[],
+  b: readonly RecordedPedalSegment[],
+): RecordedPedalSegment[] {
+  if (a.length === 0) return [...b]
+  if (b.length === 0) return [...a]
+  const out: RecordedPedalSegment[] = []
+  let i = 0
+  let j = 0
+  const before = (x: RecordedPedalSegment, y: RecordedPedalSegment): boolean =>
+    x.start < y.start ||
+    (x.start === y.start &&
+      (x.controller < y.controller || (x.controller === y.controller && x.channel <= y.channel)))
+  while (i < a.length && j < b.length) {
+    if (before(a[i], b[j])) out.push(a[i++])
+    else out.push(b[j++])
+  }
+  while (i < a.length) out.push(a[i++])
+  while (j < b.length) out.push(b[j++])
+  return out
+}
+
+/**
+ * 第一个 `end > position` 的踏板区间下标（无则 segments.length）——**不是** `start >= position`：
+ * 录制/播放线落在某段区间中途时该段仍要排期（回放首个 tick 立即补发"踩下"）。
+ *
+ * `end` 不单调（不同踏板/通道的区间可以重叠，例如延音 0–10s 与弱音 1–2s），因此不能二分；
+ * 区间数量级很小（一次演奏几十~几百段），且只在起播/跳转/清空时定位一次。
+ */
+export function firstPedalAtOrAfter(
+  segments: readonly RecordedPedalSegment[],
+  position: number,
+): number {
+  let i = 0
+  while (i < segments.length && segments[i].end <= position) i++
+  return i
 }

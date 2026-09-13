@@ -1,14 +1,20 @@
 import { MidiConnection, type MidiConnectionStatus } from './midi/connection'
-import type { MidiNoteEvent } from './midi/input'
+import type { MidiControlChange, MidiNoteEvent } from './midi/input'
+import { PEDAL_ON_THRESHOLD, pedalIdOfController } from './midi/pedals'
 import { MidiOutputSink } from './midi/output'
 import {
   MIN_NOTE_SEC,
+  erasePedalRange,
   eraseRange,
   firstNoteAtOrAfter,
+  firstPedalAtOrAfter,
   mergeNotes,
+  mergePedals,
   overlayNote,
+  pedalTrackDuration,
   trackDuration,
   type RecordedNote,
+  type RecordedPedalSegment,
 } from './recorder-model'
 
 /**
@@ -20,6 +26,8 @@ import {
  *   同时把新弹的音符写进这一段（§3.3 的 pass 模型）；
  * - 录制/播放中拖动音轨 → 挂起（不录不放），录制在拖动处结束一次"扫过"、松手后从新位置重新开始；
  * - 回放：lookahead 调度，音符只经 MIDI 输出（连接的键盘音源）发声，本机不发声；
+ * - 踏板（设计文档 20260913-recorder-pedals.md）：CC64/66/67 与音符同一套 pass 模型（按**踩下区间**
+ *   记录与擦除），实时回送到键盘音源、回放排期、导出写 CC；其它 CC 只回送不记录；
  * - 连接要求：未连接 MIDI 键盘时播放/录制不可用（视图禁用按钮 + Tips 提示）。
  */
 
@@ -42,8 +50,8 @@ export type RecorderMode =
 /** 走带离散状态（位置是连续量，视图每帧直接读 `position` 与 `visibleNotes()`） */
 export interface RecorderUiState {
   mode: RecorderMode
-  /** 音轨有内容（结束/保存/下载按钮可用前提；含录制中尚未收尾的音符） */
-  hasNotes: boolean
+  /** 音轨有内容（结束/保存/下载按钮可用前提；含录制中尚未收尾的音符与踏板区间） */
+  hasContent: boolean
   /** 音轨总时长（秒，最后一个音符的结束时刻） */
   duration: number
   /** MIDI 连接状态 */
@@ -80,12 +88,25 @@ const DEFAULT_HOST: RecorderHost = {
 }
 
 const EMPTY_NOTES: readonly RecordedNote[] = []
+const EMPTY_PEDALS: readonly RecordedPedalSegment[] = []
 
 /** 录制中按住（尚未松开）的按键 */
 interface HeldNote {
   start: number
   velocity: number
   channel: number
+}
+
+/** 物理踏板状态（始终跟踪；录制开始时据此补开一段区间） */
+interface PedalDownState {
+  controller: number
+  channel: number
+  value: number
+}
+
+/** 踏板区间的键：同一踏板同通道同一时刻只可能有一段踩下 */
+function pedalKey(controller: number, channel: number): string {
+  return `${controller}|${channel}`
 }
 
 export class RecorderController {
@@ -99,6 +120,14 @@ export class RecorderController {
   private _passStart: number | null = null
   /** 本次录制已收尾的新音符（不受本次擦除影响，收尾时并入音轨） */
   private _passNotes: RecordedNote[] = []
+  /** 已提交的踏板踩下区间（按 start 升序；覆盖录制中不含本次尚未收尾的区间） */
+  private _pedals: RecordedPedalSegment[] = []
+  /** 本次录制已收尾的踏板区间（不受本次擦除影响，收尾时并入音轨） */
+  private _passPedals: RecordedPedalSegment[] = []
+  /** 本次录制中尚未抬起的踏板区间：key = `${controller}|${channel}` */
+  private readonly heldPedals = new Map<string, RecordedPedalSegment>()
+  /** 物理踏板状态（**始终**跟踪，不只录制中）：key = `${controller}|${channel}` */
+  private readonly pedalDown = new Map<string, PedalDownState>()
   private _mode: RecorderMode = 'idle'
   /** 时钟是否推进（挂起时 false；模式仍保留，松手后继续） */
   private running = false
@@ -111,6 +140,8 @@ export class RecorderController {
   private readonly held = new Map<number, HeldNote>()
   /** 回放调度指针：第一个尚未排期的音符下标 */
   private nextIndex = 0
+  /** 回放调度指针：第一个尚未排期的踏板区间下标（谓词是 end > position，见 firstPedalAtOrAfter） */
+  private nextPedalIndex = 0
   private intervalId: number | undefined
   /** 拖动音轨中（挂起播放/录制） */
   private suspended = false
@@ -129,6 +160,7 @@ export class RecorderController {
     this.midi = new MidiConnection({
       onStatus: () => this.onMidiStatus(),
       onNote: (ev) => this.onNote(ev),
+      onControl: (ev) => this.onControl(ev),
       onOutputs: (outputs) => {
         // 端口清空（拔出）：先静默清队列，避免键盘残留长音
         if (outputs.length === 0) this.sink.allNotesOff()
@@ -148,9 +180,9 @@ export class RecorderController {
     return this._mode
   }
 
-  /** 音轨总时长（秒）：当前可见音轨最后一个音符的结束时刻（覆盖录制中随擦除变化） */
+  /** 音轨总时长（秒）：可见音符与踏板区间的最大结束时刻（覆盖录制中随擦除变化） */
   get duration(): number {
-    return trackDuration(this.visibleNotes())
+    return Math.max(trackDuration(this.visibleNotes()), pedalTrackDuration(this.visiblePedals()))
   }
 
   /**
@@ -162,6 +194,17 @@ export class RecorderController {
     const from = this._passStart
     if (from === null) return this._notes
     return mergeNotes(eraseRange(this._notes, from, this.position), this._passNotes)
+  }
+
+  /**
+   * 当前可见踏板区间（与 `visibleNotes()` 同构，设计文档 20260913-recorder-pedals.md §3.3）：
+   * 非录制中就是已提交的区间；覆盖录制中是"旧区间在录制线扫过范围内已被抹除"的结果 +
+   * 本次录制已收尾的区间。尚未抬起的区间走 `pendingPedals()`。
+   */
+  visiblePedals(): readonly RecordedPedalSegment[] {
+    const from = this._passStart
+    if (from === null) return this._pedals
+    return mergePedals(erasePedalRange(this._pedals, from, this.position), this._passPedals)
   }
 
   /** MIDI 连接状态（未连接时播放/录制不可用） */
@@ -183,13 +226,14 @@ export class RecorderController {
       this.pausePlayback()
       return
     }
-    if (this.disposed || this._notes.length === 0) return
+    if (this.disposed || (this._notes.length === 0 && this._pedals.length === 0)) return
     if (this.midi.status !== 'connected') return
     if (this._mode === 'recording') this.finishRecording()
     // 已到（或超过）末尾：从头开始，避免"点了播放没反应"
     if (this.pausedPos >= this.duration - 0.001) this.pausedPos = 0
     this._mode = 'playing'
     this.nextIndex = firstNoteAtOrAfter(this._notes, this.pausedPos)
+    this.nextPedalIndex = firstPedalAtOrAfter(this._pedals, this.pausedPos)
     this.startClock()
     this.startTicker()
     this.tick()
@@ -209,6 +253,7 @@ export class RecorderController {
     if (this._mode === 'playing') this.pausePlayback()
     this._mode = 'recording'
     this.held.clear()
+    this.heldPedals.clear()
     this.beginPass(this.pausedPos)
     this.startClock()
     this.emitState()
@@ -227,9 +272,13 @@ export class RecorderController {
     this._mode = 'idle'
     this.pausedPos = 0
     this._notes = []
+    this._pedals = []
     this._passStart = null
     this._passNotes = []
+    this._passPedals = []
+    this.heldPedals.clear()
     this.nextIndex = 0
+    this.nextPedalIndex = 0
     this.emitState()
   }
 
@@ -243,6 +292,7 @@ export class RecorderController {
       if (this._mode === 'recording') {
         const at = this.position
         this.closeAllHeld(at)
+        this.closeAllHeldPedals(at)
         this.commitPass(at)
       }
       this.pausedPos = this.position
@@ -256,7 +306,10 @@ export class RecorderController {
   /** 拖动中：只移动位置，不播放也不录制 */
   scrub(position: number): void {
     this.pausedPos = Math.max(0, position)
-    if (this._mode === 'playing') this.nextIndex = firstNoteAtOrAfter(this._notes, this.pausedPos)
+    if (this._mode === 'playing') {
+      this.nextIndex = firstNoteAtOrAfter(this._notes, this.pausedPos)
+      this.nextPedalIndex = firstPedalAtOrAfter(this._pedals, this.pausedPos)
+    }
   }
 
   /** 拖动结束：拖动前在播放/录制则从新位置继续（录制从新位置重新起一次覆盖） */
@@ -292,6 +345,34 @@ export class RecorderController {
     return out
   }
 
+  /**
+   * 保存/下载用的踏板快照：以当前可见踏板区间为准（覆盖录制中已抹除的部分不再导出），
+   * 录制中时把尚未抬起的区间补到当前位置；不改动走带状态。
+   */
+  exportPedals(): readonly RecordedPedalSegment[] {
+    const base = this.visiblePedals()
+    if (this._mode !== 'recording' || this.heldPedals.size === 0) return base
+    const at = this.position
+    let out: RecordedPedalSegment[] = [...base]
+    for (const seg of this.heldPedals.values()) {
+      out = mergePedals(out, [{ ...seg, end: Math.max(at, seg.start + MIN_NOTE_SEC) }])
+    }
+    return out
+  }
+
+  /** 录制中尚未抬起的踏板区间（供画面把条一直画到录制线）；其余情况为空 */
+  pendingPedals(): readonly RecordedPedalSegment[] {
+    if (this._mode !== 'recording' || !this.running || this.heldPedals.size === 0) {
+      return EMPTY_PEDALS
+    }
+    const at = this.position
+    const out: RecordedPedalSegment[] = []
+    for (const seg of this.heldPedals.values()) {
+      out.push({ ...seg, end: Math.max(at, seg.start + 0.001) })
+    }
+    return out
+  }
+
   /** 录制中尚未收尾的音符（供画面把条形一直画到录制线）；其余情况为空 */
   pendingNotes(): readonly RecordedNote[] {
     if (this._mode !== 'recording' || !this.running || this.held.size === 0) return EMPTY_NOTES
@@ -313,18 +394,26 @@ export class RecorderController {
    * 恢复音轨（同一页面会话内切走再切回时保留录制内容）：装载音符、回到空闲模式，
    * 并把录制/播放线放到上次的位置；不做合并/裁剪（数据来自本工具自身）。
    */
-  restore(notes: readonly RecordedNote[], position: number): void {
+  restore(
+    notes: readonly RecordedNote[],
+    pedals: readonly RecordedPedalSegment[],
+    position: number,
+  ): void {
     this.held.clear()
+    this.heldPedals.clear()
     this.stopTicker()
     this.silence()
     this._notes = [...notes].sort((a, b) => a.start - b.start || a.pitch - b.pitch)
+    this._pedals = [...pedals].sort((a, b) => a.start - b.start)
     this._passStart = null
     this._passNotes = []
+    this._passPedals = []
     this._mode = 'idle'
     this.running = false
     this.suspended = false
     this.pausedPos = Math.max(0, position)
     this.nextIndex = firstNoteAtOrAfter(this._notes, this.pausedPos)
+    this.nextPedalIndex = firstPedalAtOrAfter(this._pedals, this.pausedPos)
     this.emitState()
   }
 
@@ -334,6 +423,8 @@ export class RecorderController {
     this.stopTicker()
     this.silence()
     this.held.clear()
+    this.heldPedals.clear()
+    this.pedalDown.clear()
     this.sink.dispose()
     this.midi.dispose()
   }
@@ -356,6 +447,7 @@ export class RecorderController {
     if (this._mode !== 'recording') return
     const at = this.position
     this.closeAllHeld(at)
+    this.closeAllHeldPedals(at)
     this.commitPass(at)
     this.pausedPos = at
     this.running = false
@@ -367,6 +459,11 @@ export class RecorderController {
   private beginPass(position: number): void {
     this._passStart = position
     this._passNotes = []
+    this._passPedals = []
+    // 起点状态：正踩着的踏板在 pass 起点开一段（否则这一段缺"一开始就踩着"的状态）
+    for (const state of this.pedalDown.values()) {
+      this.openPedal(state.controller, state.channel, position, state.value)
+    }
   }
 
   /**
@@ -377,8 +474,10 @@ export class RecorderController {
     const from = this._passStart
     if (from === null) return
     this._notes = mergeNotes(eraseRange(this._notes, from, end), this._passNotes)
+    this._pedals = mergePedals(erasePedalRange(this._pedals, from, end), this._passPedals)
     this._passStart = null
     this._passNotes = []
+    this._passPedals = []
   }
 
   /** 把某个按住的键在 `end` 时刻收尾成音符并放进"本次录制的新音符" */
@@ -402,6 +501,40 @@ export class RecorderController {
     for (const pitch of [...this.held.keys()]) this.closeHeld(pitch, end)
   }
 
+  /** 开一段踏板（同踏板同通道已有未抬起的区间 → 忽略：重复踩下不改变状态） */
+  private openPedal(controller: number, channel: number, at: number, value: number): void {
+    const key = pedalKey(controller, channel)
+    if (this.heldPedals.has(key)) return
+    this.heldPedals.set(key, {
+      controller,
+      channel,
+      start: at,
+      end: Number.POSITIVE_INFINITY,
+      value,
+    })
+    this.emitState()
+  }
+
+  /** 收尾一段踏板（进"本次录制的新区间"，与 closeHeld 对称） */
+  private closePedal(controller: number, channel: number, at: number): void {
+    const key = pedalKey(controller, channel)
+    const seg = this.heldPedals.get(key)
+    if (seg === undefined) return
+    this.heldPedals.delete(key)
+    // 与音符同一最短时值口径：极短的一踩也留出可听、可画的一小段
+    this._passPedals = mergePedals(this._passPedals, [
+      { ...seg, end: Math.max(at, seg.start + MIN_NOTE_SEC) },
+    ])
+    this.emitState()
+  }
+
+  /** 全部未抬起的踏板在 end 时刻收尾（暂停/拖动/断开/导出边界，与 closeAllHeld 对称） */
+  private closeAllHeldPedals(end: number): void {
+    for (const seg of [...this.heldPedals.values()]) {
+      this.closePedal(seg.controller, seg.channel, end)
+    }
+  }
+
   private onNote(ev: MidiNoteEvent): void {
     if (this.disposed) return
     // 实时监听：按键回送到键盘音源。连接后键盘自带音源被关闭（Local Control Off），
@@ -419,9 +552,34 @@ export class RecorderController {
     }
   }
 
+  /**
+   * 踏板 CC（CC64/66/67）：**始终**回送到输出端口（连接后键盘 Local Control 被关闭，
+   * 回送是弹奏者听到踏板的唯一途径，与 `onNote` 的 `echoNote` 对称）；录制中且未挂起时，
+   * 按与音符同一套 pass 模型记录踩下区间。其它 CC（音量/调制等）只回送、不录、不画
+   * （设计文档 20260913-recorder-pedals.md D4）。
+   */
+  private onControl(ev: MidiControlChange): void {
+    if (this.disposed) return
+    this.sink.echoControl(ev)
+    if (pedalIdOfController(ev.controller) === null) return
+    // 物理踏板状态始终跟踪（pass 起点据此补开区间，见 beginPass）
+    const key = pedalKey(ev.controller, ev.channel)
+    if (ev.value >= PEDAL_ON_THRESHOLD) {
+      this.pedalDown.set(key, { controller: ev.controller, channel: ev.channel, value: ev.value })
+    } else {
+      this.pedalDown.delete(key)
+    }
+    if (this._mode !== 'recording' || !this.running) return
+    const at = this.position
+    if (ev.value >= PEDAL_ON_THRESHOLD) this.openPedal(ev.controller, ev.channel, at, ev.value)
+    else this.closePedal(ev.controller, ev.channel, at)
+  }
+
   private onMidiStatus(): void {
     if (this.disposed) return
-    // 键盘断开（拔出/连接失败）：录制或回放中的走带暂停（录制把按住的键收尾）
+    // 断开（拔出/连接失败）：物理踏板状态不可信（与播放器 gate.resetPedals 同口径）；
+    // 录制或回放中的走带暂停（录制把按住的键与未抬起的踏板就地收尾）
+    if (this.midi.status !== 'connected') this.pedalDown.clear()
     if (this.midi.status !== 'connected' && this._mode !== 'idle') {
       if (this._mode === 'recording') this.finishRecording()
       else this.pausePlayback()
@@ -446,6 +604,7 @@ export class RecorderController {
     if (this._mode !== 'playing' || !this.running) return
     const pos = this.position
     const until = pos + LOOKAHEAD_SEC
+    this.schedulePedals(pos, until)
     const notes = this._notes
     while (this.nextIndex < notes.length && notes[this.nextIndex].start < until) {
       const n = notes[this.nextIndex]
@@ -470,6 +629,31 @@ export class RecorderController {
     }
   }
 
+  /**
+   * 回放踏板：窗口内开始的区间排「踩下 + 抬起」（各自按时间戳排期）；线落在区间中途时，
+   * 该区间在首个 tick 立即补发踩下（`start` 已过期 → 立即发送），抬起仍按原时刻排期。
+   */
+  private schedulePedals(pos: number, until: number): void {
+    const pedals = this._pedals
+    while (this.nextPedalIndex < pedals.length && pedals[this.nextPedalIndex].start < until) {
+      const seg = pedals[this.nextPedalIndex]
+      this.nextPedalIndex++
+      if (seg.end <= pos) continue // 线跳过了整段：不补发
+      this.sink.scheduleControlChange({
+        controller: seg.controller,
+        value: seg.value,
+        channel: seg.channel,
+        time: this.timeAt(seg.start),
+      })
+      this.sink.scheduleControlChange({
+        controller: seg.controller,
+        value: 0,
+        channel: seg.channel,
+        time: this.timeAt(seg.end),
+      })
+    }
+  }
+
   private startTicker(): void {
     if (this.intervalId !== undefined) return
     this.intervalId = this.host.setInterval(() => this.tick(), TICK_MS)
@@ -488,9 +672,11 @@ export class RecorderController {
 
   private emitState(): void {
     const notes = this.visibleNotes()
+    const pedals = this.visiblePedals()
     this.cbs.onState({
       mode: this._mode,
-      hasNotes: notes.length > 0 || this.held.size > 0,
+      hasContent:
+        notes.length > 0 || this.held.size > 0 || pedals.length > 0 || this.heldPedals.size > 0,
       duration: trackDuration(notes),
       midiStatus: this.midi.status,
       midiConnected: this.midi.status === 'connected',

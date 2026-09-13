@@ -68,8 +68,25 @@
     system-ui, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   --font-display: 'EB Garamond', Georgia, 'Times New Roman', serif;
 
+  /* 字阶（token 化：所有 font-size 只引用这里，不再有散落的字面量）。
+     注意根字号是 14px（见本块末尾的 font-size），故 1rem = 14px，注释里的 px 是实际渲染值。
+     正文系：caption < meta < body < body-strong < title < panel。
+     读数系（readout）：等宽数字与音名的展示字号，视觉重量需求与正文不同，单列一档。 */
+  --fs-caption: 0.6875rem; /* 9.6px：最小说明文字 */
+  --fs-meta: 0.75rem; /* 10.5px：元信息、hint */
+  --fs-body: 0.8125rem; /* 11.4px：正文/控件 */
+  --fs-body-strong: 0.875rem; /* 12.25px：强调正文 */
+  --fs-title: 1rem; /* 14px：弹窗/卡片标题 */
+  --fs-panel: 1.25rem; /* 17.5px：面板标题、品牌 */
+  --fs-section: 1.75rem; /* 24.5px：区块标题 */
+  --fs-readout-sm: 1.375rem; /* 19.25px：次要读数（录音计时） */
+  --fs-readout-md: 1.5rem; /* 21px：读数角标（力度、踏板百分比） */
+  --fs-readout-lg: 3rem; /* 42px：大字读数（谱面空状态剪影） */
+  --fs-readout-xl: 3.5rem; /* 49px：主导读数、每键音名（调试页） */
+  --fs-root: 14px; /* 根字号：1rem 的基准，改这里会等比缩放全站 */
+
   font-family: var(--font-ui);
-  font-size: 14px;
+  font-size: var(--fs-root);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -288,7 +305,7 @@ input[type='range']::-moz-range-thumb {
   align-items: center;
   gap: 10px;
   font-family: var(--font-display);
-  font-size: 1.25rem;
+  font-size: var(--fs-panel);
   font-weight: 600;
   letter-spacing: 0.02em;
   color: var(--text-0);
@@ -314,7 +331,7 @@ input[type='range']::-moz-range-thumb {
   background: transparent;
   border: none;
   border-radius: 0;
-  font-size: 0.875rem;
+  font-size: var(--fs-body-strong);
   color: var(--text-2);
 }
 
@@ -453,6 +470,13 @@ input[type='range']::-moz-range-thumb {
   height: 36px;
 }
 
+/* 播放/停止并排且同尺寸：原先停止走 .icon-btn 的 32px，与播放的 36px 基线不齐
+   （见 20260912-ui-review.draft3.md §2.1）；窄屏再一起放大到 44px 作触控热区 */
+.transport__stop {
+  width: 36px;
+  height: 36px;
+}
+
 /* 采样加载进度环（叠加在播放按钮上） */
 .transport__play-ring {
   position: absolute;
@@ -470,7 +494,7 @@ input[type='range']::-moz-range-thumb {
 
 .transport__time {
   font-variant-numeric: tabular-nums;
-  font-size: 0.8125rem;
+  font-size: var(--fs-body);
   color: var(--text-1);
   white-space: nowrap;
   min-width: 92px;
@@ -682,7 +706,7 @@ input[type='range']::-moz-range-thumb {
 
 .transport__practice-menu__title {
   padding: 6px 10px 8px;
-  font-size: 0.75rem;
+  font-size: var(--fs-meta);
   letter-spacing: 0.04em;
   color: var(--text-2);
   white-space: nowrap;
@@ -691,7 +715,7 @@ input[type='range']::-moz-range-thumb {
 /* 分组说明（练习音轨下方）：比标题更淡的小字，可换行 */
 .transport__practice-menu__desc {
   padding: 0 10px 6px;
-  font-size: 0.6875rem;
+  font-size: var(--fs-caption);
   line-height: 1.4;
   color: var(--text-2);
   opacity: 0.75;
@@ -741,7 +765,7 @@ input[type='range']::-moz-range-thumb {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.8125rem;
+  font-size: var(--fs-body);
 }
 
 /* 开关圆点：该轨练习开启时点亮（琥珀） */
@@ -776,7 +800,7 @@ input[type='range']::-moz-range-thumb {
 .transport__practice-menu__empty {
   display: none;
   padding: 8px 10px 10px;
-  font-size: 0.8125rem;
+  font-size: var(--fs-body);
   color: var(--text-2);
   white-space: nowrap;
 }
@@ -798,7 +822,7 @@ input[type='range']::-moz-range-thumb {
 
 .transport__practice-menu__subtitle {
   padding: 4px 10px 6px;
-  font-size: 0.75rem;
+  font-size: var(--fs-meta);
   letter-spacing: 0.04em;
   color: var(--text-2);
   white-space: nowrap;
@@ -832,7 +856,7 @@ input[type='range']::-moz-range-thumb {
 }
 
 .transport__practice-pedal__label {
-  font-size: 0.8125rem;
+  font-size: var(--fs-body);
   white-space: nowrap;
 }
 
@@ -894,7 +918,7 @@ input[type='range']::-moz-range-thumb {
 
 .transport__midi-menu__title {
   padding: 6px 10px 8px;
-  font-size: 0.75rem;
+  font-size: var(--fs-meta);
   letter-spacing: 0.04em;
   color: var(--text-2);
   white-space: nowrap;
@@ -910,7 +934,7 @@ input[type='range']::-moz-range-thumb {
 .transport__midi-menu__text,
 .transport__midi-menu__device {
   padding: 4px 10px;
-  font-size: 0.8125rem;
+  font-size: var(--fs-body);
   color: var(--text-1);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -928,7 +952,7 @@ input[type='range']::-moz-range-thumb {
   margin: 4px 6px 2px;
   height: 30px;
   padding: 0 10px;
-  font-size: 0.8125rem;
+  font-size: var(--fs-body);
   background: var(--bg-2);
   border: 1px solid var(--line-strong);
   border-radius: var(--r-sm);
@@ -954,7 +978,7 @@ input[type='range']::-moz-range-thumb {
   gap: 10px;
   max-width: min(560px, 80vw);
   padding: 10px 8px 10px 14px;
-  font-size: 0.8125rem;
+  font-size: var(--fs-body);
   color: var(--text-0);
   background: var(--bg-3);
   border: 1px solid var(--line-strong);
@@ -1054,12 +1078,11 @@ input[type='range']::-moz-range-thumb {
 .library__head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
 }
 
 .library__title {
   margin: 0;
-  font-size: 0.75rem;
+  font-size: var(--fs-meta);
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1067,6 +1090,7 @@ input[type='range']::-moz-range-thumb {
 }
 
 .library__import {
+  margin-left: auto;
   color: var(--accent);
 }
 
@@ -1074,7 +1098,7 @@ input[type='range']::-moz-range-thumb {
   color: var(--accent-hover);
 }
 
-/* 侧栏底部脚注行：折叠按钮靠左下角 */
+/* 侧栏脚注行：收起按钮固定在左下角（原有位置）。列表 flex:1 会把它压到底部 */
 .library__foot {
   display: flex;
   justify-content: flex-start;
@@ -1084,6 +1108,18 @@ input[type='range']::-moz-range-thumb {
   width: 28px;
   height: 28px;
   color: var(--text-2);
+}
+
+/* 抽屉专用关闭按钮：默认不显示，仅 ≤900px 抽屉打开时由媒体查询打开 */
+.library__close {
+  display: none;
+  width: 28px;
+  height: 28px;
+  color: var(--text-2);
+}
+
+.library__close:hover {
+  color: var(--text-0);
 }
 
 .library__collapse:hover {
@@ -1119,13 +1155,13 @@ input[type='range']::-moz-range-thumb {
 .library__empty-title {
   margin: 0;
   font-family: var(--font-display);
-  font-size: 1.25rem;
+  font-size: var(--fs-panel);
   color: var(--text-1);
 }
 
 .library__empty-hint {
   margin: 0;
-  font-size: 0.75rem;
+  font-size: var(--fs-meta);
   line-height: 1.7;
 }
 
@@ -1177,7 +1213,7 @@ input[type='range']::-moz-range-thumb {
 }
 
 .library__item-name {
-  font-size: 0.875rem;
+  font-size: var(--fs-body-strong);
   color: var(--text-0);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1185,7 +1221,7 @@ input[type='range']::-moz-range-thumb {
 }
 
 .library__item-meta {
-  font-size: 0.75rem;
+  font-size: var(--fs-meta);
   color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1256,10 +1292,100 @@ input[type='range']::-moz-range-thumb {
   display: none;
 }
 
+/* ---------- 窄屏（≤900px）：侧栏改浮层抽屉 + 播放坞精简 ----------
+   设计文档 20260912-ui-review.draft2.md §2：窄屏下侧栏固定 264px 会把内容区挤到不可用
+   （390px 视口下内容区仅 126px、琴键高 11px、且横向溢出）。
+   这里把侧栏从网格列里拿出来做浮层抽屉，内容区始终占满宽度。 */
 @media (max-width: 900px) {
   .stage--split {
     grid-template-columns: 1fr;
     grid-template-rows: 1fr 1fr;
+  }
+
+  /* 抽屉模式下取消侧栏列：轨道收为 0，内容列独占（与 .is-collapsed 同效，语义更明确） */
+  .main.is-drawer {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* 抽屉尺寸：宽度、内边距与"关闭按钮的 right 偏移"共用这两个变量，改一处即可同步。
+     （之前把 16px 直接写进 right 的算式里，等于把按钮推到离抽屉右缘 44px 处，与导入按钮错位。） */
+  .main.is-drawer {
+    --drawer-w: min(300px, 82vw);
+    --drawer-pad: 16px;
+  }
+
+  .main.is-drawer .library {
+    position: fixed;
+    top: var(--shell-h);
+    bottom: 0;
+    left: 0;
+    z-index: 40;
+    width: var(--drawer-w);
+    border-right: 1px solid var(--line-strong);
+    box-shadow: var(--shadow-toast);
+    transform: translateX(-100%);
+    transition: transform var(--dur-med) var(--ease-out);
+    /* 抽屉收起时不拦截指针（覆盖 .is-collapsed 的 overflow: hidden） */
+    visibility: hidden;
+  }
+
+  .main.is-drawer.is-drawer-open .library {
+    transform: translateX(0);
+    visibility: visible;
+  }
+
+  /* 抽屉打开时把脚注里的收起按钮浮到标题行右端，充当"关闭抽屉"的惯用出口：
+     浮层需要一个近在手边的关闭按钮，而左下角离视线太远。
+     DOM 仍是同一个按钮（无重复元素），只换定位与图标。
+     注意这里用 absolute（参照 .library__head 的 padding box）而非相对视口的 fixed 坐标——
+     后者在抽屉底部留白变化时会错位。 */
+  /* 抽屉专用关闭按钮：桌面端不存在（display: none 由基础规则给出），
+     抽屉打开时作为头部流内 flex 项显示，位置与导入按钮天然对齐 */
+  .main.is-drawer-open .library__close {
+    display: inline-flex;
+  }
+
+  /* 头部右侧留出关闭按钮的位置（标题与导入按钮之间） */
+  .main.is-drawer-open .library__head {
+    gap: 6px;
+  }
+
+  /* 遮罩：仅打开时挂载，点它关闭抽屉 */
+  .main__backdrop {
+    position: fixed;
+    inset: var(--shell-h) 0 0 0;
+    z-index: 35;
+    background: rgba(0, 0, 0, 0.5);
+  }
+
+  /* 播放坞精简：窄屏只留播放/停止，隐藏时间码与右侧工具组（音量/视图/MIDI/练习） */
+  .transport__time,
+  .transport__tools {
+    display: none;
+  }
+
+  /* 触控下播放/停止热区加大到 44px（与琴键点按目标同一档） */
+  .transport__play {
+    width: 44px;
+    height: 44px;
+  }
+
+  .transport__stop {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+/* 极窄屏：再压一档侧栏宽度与舞台内边距 */
+@media (max-width: 560px) {
+  .main.is-drawer {
+    --drawer-w: min(280px, 88vw);
+    --drawer-pad: 12px;
+  }
+
+  .stage--split {
+    padding: 8px;
+    gap: 8px;
   }
 }
 
@@ -1350,13 +1476,13 @@ input[type='range']::-moz-range-thumb {
   justify-content: center;
   gap: 8px;
   color: var(--text-2);
-  font-size: 0.8125rem;
+  font-size: var(--fs-body);
   user-select: none;
 }
 
 .score__empty-art {
   font-family: var(--font-display);
-  font-size: 3rem;
+  font-size: var(--fs-readout-lg);
   color: var(--bg-3);
   line-height: 1;
 }
@@ -1378,7 +1504,7 @@ input[type='range']::-moz-range-thumb {
   background: transparent;
   border: none;
   border-radius: 0;
-  font-size: 0.875rem;
+  font-size: var(--fs-body-strong);
   color: var(--text-2);
 }
 
@@ -1471,7 +1597,7 @@ input[type='range']::-moz-range-thumb {
 }
 
 .midi-debug__status {
-  font-size: 0.875rem;
+  font-size: var(--fs-body-strong);
   color: var(--text-1);
 }
 
@@ -1510,7 +1636,7 @@ input[type='range']::-moz-range-thumb {
 }
 
 .midi-debug__device {
-  font-size: 0.75rem;
+  font-size: var(--fs-meta);
   color: var(--text-1);
   padding: 6px 12px;
   border-radius: var(--r-md);
@@ -1541,7 +1667,7 @@ input[type='range']::-moz-range-thumb {
   border-radius: var(--r-md);
   background: var(--bg-2);
   text-align: left;
-  font-size: 0.75rem;
+  font-size: var(--fs-meta);
   line-height: 1.6;
 }
 
@@ -1572,7 +1698,7 @@ input[type='range']::-moz-range-thumb {
 /* 排查提示：出现问题（等待授权/超时/被拒/不支持）时显示排查建议 */
 .midi-debug__hint {
   max-width: 640px;
-  font-size: 0.75rem;
+  font-size: var(--fs-meta);
   line-height: 1.6;
   color: var(--text-1);
 }
@@ -1584,7 +1710,7 @@ input[type='range']::-moz-range-thumb {
 /* 重试按钮：失败/超时后出现 */
 .midi-debug__retry {
   font: inherit;
-  font-size: 0.8rem;
+  font-size: var(--fs-body);
   color: var(--text-0);
   padding: 7px 18px;
   border-radius: var(--r-md);
@@ -1622,7 +1748,7 @@ input[type='range']::-moz-range-thumb {
 /* 无按键占位 */
 .midi-debug__note {
   font-family: var(--font-display);
-  font-size: 3.5rem;
+  font-size: var(--fs-readout-xl);
   line-height: 1;
   color: var(--text-2);
   font-variant-numeric: tabular-nums;
@@ -1634,7 +1760,7 @@ input[type='range']::-moz-range-thumb {
 .midi-debug__key {
   position: relative;
   font-family: var(--font-display);
-  font-size: 3.5rem;
+  font-size: var(--fs-readout-xl);
   line-height: 1;
   color: var(--text-0);
   padding: 12px 18px;
@@ -1661,7 +1787,7 @@ input[type='range']::-moz-range-thumb {
   right: 7px;
   text-align: right;
   font-family: var(--font-display);
-  font-size: 1.5rem;
+  font-size: var(--fs-readout-md);
   line-height: 1;
   color: var(--accent);
   font-variant-numeric: tabular-nums;
@@ -1720,7 +1846,7 @@ input[type='range']::-moz-range-thumb {
 
 .midi-debug__pedal-percent {
   font-family: var(--font-display);
-  font-size: 1.5rem;
+  font-size: var(--fs-readout-md);
   line-height: 1;
   font-variant-numeric: tabular-nums;
 }
@@ -1731,14 +1857,14 @@ input[type='range']::-moz-range-thumb {
   top: 5px;
   right: 8px;
   /* 1rem = 之前 1.25rem 的约 80% */
-  font-size: 1rem;
+  font-size: var(--fs-title);
   line-height: 1;
   opacity: 0.8;
   font-variant-numeric: tabular-nums;
 }
 
 .midi-debug__pedal-name {
-  font-size: 0.75rem;
+  font-size: var(--fs-meta);
   color: var(--text-1);
 }
 
@@ -1932,7 +2058,7 @@ input[type='range']::-moz-range-thumb {
 
 .dialog__title {
   margin: 0;
-  font-size: 1rem;
+  font-size: var(--fs-title);
   font-weight: 600;
 }
 
@@ -1944,7 +2070,7 @@ input[type='range']::-moz-range-thumb {
 }
 
 .dialog__label {
-  font-size: 0.8125rem;
+  font-size: var(--fs-body);
   color: var(--text-1);
 }
 
@@ -1969,7 +2095,7 @@ input[type='range']::-moz-range-thumb {
 .dialog__error {
   display: none;
   margin: 0;
-  font-size: 0.75rem;
+  font-size: var(--fs-meta);
   color: var(--danger);
 }
 
@@ -2070,7 +2196,7 @@ input[type='range']::-moz-range-thumb {
 
 .recorder__timer {
   font-family: var(--font-display);
-  font-size: 1.375rem;
+  font-size: var(--fs-readout-sm);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
   color: var(--text-0);
@@ -2091,7 +2217,7 @@ input[type='range']::-moz-range-thumb {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.75rem;
+  font-size: var(--fs-meta);
   color: var(--text-2);
 }
 
@@ -2127,7 +2253,7 @@ input[type='range']::-moz-range-thumb {
   bottom: 14px;
   max-width: min(420px, 82%);
   padding: 7px 12px;
-  font-size: 0.8125rem;
+  font-size: var(--fs-body);
   color: var(--text-0);
   background: var(--bg-3);
   border: 1px solid var(--line-strong);

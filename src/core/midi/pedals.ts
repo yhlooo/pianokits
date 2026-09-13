@@ -15,7 +15,7 @@
  * 踩下区间（时值）、归属范围（按通道 / 全曲）、练习关注范围与和弦踏板要求。
  */
 
-import type { PedalEvent, Track } from '../model'
+import type { Note, PedalEvent, Track } from '../model'
 
 export type PedalId = 'sustain' | 'sostenuto' | 'soft'
 
@@ -265,6 +265,148 @@ export function pedalFocus(
 export function isSegmentFocused(seg: PedalSegment, focus: PedalFocus): boolean {
   if (!focus.pedals.has(seg.pedalId)) return false
   return focus.channels === null || focus.channels.has(seg.channel)
+}
+
+// ---------- 延音踏板对发声时值的作用（声音链路，设计文档 20260913-pedal-sound-path.md §3.1） ----------
+
+/** 延音踏板控制器号（CC64） */
+const SUSTAIN_CC = 64
+
+/** 全曲踏板退化（无法归属到音符通道）时的统一通道号 */
+const GLOBAL_CHANNEL = -1
+
+/**
+ * 按**延音踏板（CC64）语义**把「键按时值」换算为「实际发声结束时刻」（秒），下标与 notes 对齐。
+ *
+ * 语义与 Magenta.js `applySustainControlChanges` 的事件状态机逐条一致（不是"踏板区间 ∩ 音符
+ * 起点"的简化式）：
+ * 1. 键抬起（Note Off）时踏板踩着 → 不止音，音符留在"正在响"集合里；
+ * 2. 踏板抬起（CC64 < 64）时，集合里所有**键已抬起**的音符在此刻结束；键仍按着的继续；
+ * 3. 踏板踩着时**同音高再次击键** → 前一音在新音起点截断（钢琴上弦被重新击打）；
+ * 4. 曲终仍未收尾的音符结束在**最后一个事件时刻**（不产生 Infinity）。
+ *
+ * 归属与练习判定同一口径（`pedalChannelScope`）：踏板通道 ⊆ 音符通道时按通道各自应用；
+ * 存在无法归属的踏板事件（纯控制轨）时退化为全曲踏板（所有音符共用一台状态机）。
+ * 音符按 start 排序（`Song.notes` 已保证）；无 CC64 数据时返回各音符原 end。
+ */
+export function soundingEndsUnderSustain(
+  notes: readonly Note[],
+  tracks: readonly Track[],
+  pedalEvents: readonly PedalEvent[],
+): Float64Array {
+  const ends = new Float64Array(notes.length)
+  for (let i = 0; i < notes.length; i++) ends[i] = notes[i].end
+  const sustainEvents = pedalEvents.filter((e) => e.controller === SUSTAIN_CC)
+  if (notes.length === 0 || sustainEvents.length === 0) return ends
+
+  const global = pedalChannelScope(buildPedalSegments(sustainEvents), tracks) === null
+  const trackChannel = new Map<number, number>()
+  for (const t of tracks) trackChannel.set(t.index, t.channel)
+  /** 音符的延音作用通道：全曲踏板时统一到 GLOBAL_CHANNEL */
+  const channelOfTrack = (trackIndex: number): number =>
+    global ? GLOBAL_CHANNEL : (trackChannel.get(trackIndex) ?? 0)
+
+  type SoundEvent = {
+    time: number
+    channel: number
+    /** 音符事件：音符下标；CC 事件：-1 */
+    index: number
+    /** CC 事件的值；音符事件无意义 */
+    value: number
+    kind: 'on' | 'off' | 'cc'
+  }
+  // 事件流：音符事件先入、CC 后入，`sort` 稳定 → 同一时刻音符事件在前（与 Magenta.js 一致）
+  const events: SoundEvent[] = []
+  for (let i = 0; i < notes.length; i++) {
+    const channel = channelOfTrack(notes[i].trackIndex)
+    events.push({ time: notes[i].start, channel, index: i, value: 0, kind: 'on' })
+    events.push({ time: notes[i].end, channel, index: i, value: 0, kind: 'off' })
+  }
+  for (const e of sustainEvents) {
+    events.push({
+      time: e.time,
+      channel: global ? GLOBAL_CHANNEL : e.channel,
+      index: -1,
+      value: e.value,
+      kind: 'cc',
+    })
+  }
+  events.sort((a, b) => a.time - b.time)
+
+  /** 各通道"正在响"的音符下标 */
+  const active = new Map<number, number[]>()
+  /** 各通道延音踏板是否踩着 */
+  const sustainDown = new Set<number>()
+  let lastTime = 0
+
+  for (const ev of events) {
+    lastTime = ev.time
+    if (ev.kind === 'cc') {
+      if (ev.value >= PEDAL_ON_THRESHOLD) {
+        sustainDown.add(ev.channel)
+        continue
+      }
+      // 踏板抬起：键已抬起的音符在此刻结束；键仍按着的继续响
+      sustainDown.delete(ev.channel)
+      const list = active.get(ev.channel)
+      if (list === undefined) continue
+      const keep: number[] = []
+      for (const j of list) {
+        if (ends[j] < ev.time) ends[j] = ev.time
+        else keep.push(j)
+      }
+      active.set(ev.channel, keep)
+      continue
+    }
+    if (ev.kind === 'on') {
+      const list = active.get(ev.channel) ?? []
+      if (sustainDown.has(ev.channel)) {
+        // 踏板踩着时同音高再击键：前一音在新音起点截断，从"正在响"集合移除
+        const keep: number[] = []
+        for (const j of list) {
+          if (notes[j].pitch === notes[ev.index].pitch) ends[j] = ev.time
+          else keep.push(j)
+        }
+        list.length = 0
+        list.push(...keep)
+      }
+      list.push(ev.index)
+      active.set(ev.channel, list)
+      continue
+    }
+    // 键抬起且踏板没踩着 → 止音；踏板踩着 → 留在集合里等踏板抬起
+    if (sustainDown.has(ev.channel)) continue
+    const list = active.get(ev.channel)
+    if (list === undefined) continue
+    const at = list.indexOf(ev.index)
+    if (at >= 0) list.splice(at, 1)
+  }
+
+  // 曲终仍未收尾（踏板一直踩着）：结束在最后一个事件时刻
+  for (const list of active.values()) {
+    for (const j of list) {
+      if (ends[j] < lastTime) ends[j] = lastTime
+    }
+  }
+  return ends
+}
+
+/**
+ * 时刻 `at` 时各踏板控制器的当前值（0–127；从未收到消息为 0）。
+ * 供走带在跳转 / 暂停恢复 / 新挂输出端口时向 MIDI 输出端口**补发踏板状态**
+ * （否则键盘音源会缺少当前踩着的踏板，见设计文档 20260913-pedal-sound-path.md §5.4）。
+ */
+export function pedalValuesAt(
+  pedalEvents: readonly PedalEvent[],
+  at: number,
+): ReadonlyMap<number, number> {
+  const values = new Map<number, number>(PEDALS.map((p) => [p.cc, 0]))
+  const sorted = [...pedalEvents].sort((a, b) => a.time - b.time)
+  for (const e of sorted) {
+    if (e.time > at) break
+    if (values.has(e.controller)) values.set(e.controller, e.value)
+  }
+  return values
 }
 
 /**

@@ -1,6 +1,6 @@
-import type { Note, PedalEvent, Song, TempoEvent, TimeSignatureEvent } from '../model'
+import type { Note, Song, TempoEvent, TimeSignatureEvent } from '../model'
 import { estimateKey, ESTIMATE_OVERRIDE_CONFIDENCE, type KeyEstimate } from './key-detect'
-import { PEDAL_ON_THRESHOLD } from './pedals'
+import { soundingEndsUnderSustain } from './pedals'
 
 /**
  * MIDI（演奏数据）→ ScoreModel（记谱中间表示）。
@@ -339,91 +339,17 @@ function buildStaffs(song: Song): ScoreStaff[] {
 
 // ---------- 踏板延音 ----------
 
-/** 延音踏板控制器号（CC64） */
-const SUSTAIN_CC = 64
-
-interface SustainInterval {
-  on: number
-  off: number
-}
-
-function buildSustainIntervals(events: readonly PedalEvent[]): SustainInterval[] {
-  const intervals: SustainInterval[] = []
-  let current: SustainInterval | null = null
-  for (const e of events) {
-    if (e.value >= PEDAL_ON_THRESHOLD) {
-      if (current === null) current = { on: e.time, off: Number.POSITIVE_INFINITY }
-    } else if (current !== null) {
-      current.off = e.time
-      intervals.push(current)
-      current = null
-    }
-  }
-  if (current !== null) intervals.push(current)
-  return intervals
-}
-
 /**
- * 延音踏板区间按**通道**分组（CC 只影响同通道的音符，研究文档
- * 20260912-midi-pedal-track-relationship.md §5）：轨号 → 该轨通道 → 区间表。
+ * 用 CC64 踏板延长音符结束（`core/midi/pedals.ts` 的 `soundingEndsUnderSustain`，与声音链路
+ * 同一份语义；设计文档 20260913-pedal-sound-path.md §3.1）：
+ * 键抬起时踏板踩着 → 延到踏板抬起（或同音高再次击键，弦被重新击打）；按通道归属。
  */
-function sustainIntervalsByChannel(song: Song): Map<number, SustainInterval[]> {
-  const eventsByChannel = new Map<number, PedalEvent[]>()
-  for (const e of song.pedalEvents) {
-    if (e.controller !== SUSTAIN_CC) continue
-    const arr = eventsByChannel.get(e.channel) ?? []
-    arr.push(e)
-    eventsByChannel.set(e.channel, arr)
-  }
-  const byChannel = new Map<number, SustainInterval[]>()
-  for (const [channel, events] of eventsByChannel) {
-    events.sort((a, b) => a.time - b.time)
-    byChannel.set(channel, buildSustainIntervals(events))
-  }
-  return byChannel
-}
-
-/**
- * 用 CC64 踏板延长音符结束（参考 Magenta applySustainControlChanges 语义）：
- * 踏板踩住期间，note 结束延长到「下一个同音高的 note-on」或「踏板抬起」，二者取先到者。
- * 踏板区间按音符来源轨的通道匹配——不同通道的踏板互不影响。
- */
-function extendWithSustain(
-  notes: Note[],
-  trackChannel: ReadonlyMap<number, number>,
-  song: Song,
-): Note[] {
-  if (song.pedalEvents.length === 0) return notes
-  const byChannel = sustainIntervalsByChannel(song)
-  if (byChannel.size === 0) return notes
-
-  const byPitch = new Map<number, Note[]>()
-  for (const n of notes) {
-    const arr = byPitch.get(n.pitch) ?? []
-    arr.push(n)
-    byPitch.set(n.pitch, arr)
-  }
-  for (const arr of byPitch.values()) arr.sort((a, b) => a.start - b.start)
-
-  return notes.map((n) => {
-    const intervals = byChannel.get(trackChannel.get(n.trackIndex) ?? 0) ?? []
-    for (const iv of intervals) {
-      if (iv.on <= n.start + EPS && iv.off > n.start) {
-        const samePitch = byPitch.get(n.pitch) ?? []
-        let nextOnset = Number.POSITIVE_INFINITY
-        for (const m of samePitch) {
-          if (m.start > n.start + EPS) {
-            nextOnset = m.start
-            break
-          }
-        }
-        const cap = Math.min(iv.off, nextOnset)
-        if (cap > n.end) return { ...n, end: cap }
-        return n
-      }
-    }
-    return n
-  })
+function extendWithSustain(song: Song): Note[] {
+  if (song.pedalEvents.length === 0) return song.notes
+  const soundingEnd = soundingEndsUnderSustain(song.notes, song.tracks, song.pedalEvents)
+  return song.notes.map((n, i) =>
+    soundingEnd[i] > n.end + EPS ? { ...n, end: soundingEnd[i] } : n,
+  )
 }
 
 // ---------- 谱表内复调分声部 ----------
@@ -598,9 +524,7 @@ export function quantizeToScore(song: Song): ScoreModel {
 
   const displayKeysig = keysig
 
-  const trackChannel = new Map<number, number>()
-  for (const t of song.tracks) trackChannel.set(t.index, t.channel)
-  const extendedNotes = extendWithSustain(song.notes, trackChannel, song)
+  const extendedNotes = extendWithSustain(song)
 
   type Segment = { pitch: number; qs: number; qe: number; staffIndex: number }
   const byMeasure: Segment[][] = measures.map(() => [])

@@ -14,6 +14,7 @@ import {
   volumeIcon,
   volumeMutedIcon,
   waterfallIcon,
+  xIcon,
 } from './icons'
 import type { View } from './store'
 import type { ViewMode, ViewPanel } from './state'
@@ -620,9 +621,17 @@ export class TransportView implements View {
     this.refreshPracticeTitle()
   }
 
-  /** 同步侧栏折叠态：折叠时显示最左的展开按钮（其位置始终预留，不挤压其它控件） */
-  setSidebarCollapsed(collapsed: boolean): void {
-    this.expandBtn.classList.toggle('is-visible', collapsed)
+  /**
+   * 同步侧栏形态，控制最左按钮的可见性、图标与 title。两种模式的语义不同：
+   * - 桌面（`drawer=false`）：`collapsed` 是"侧栏是否已收起"。按钮为"展开侧栏"，
+   *   只在收起时出现（位置始终预留，不挤压其它控件）；
+   * - 窄屏抽屉（`drawer=true`）：按钮**常显**。`collapsed` 表示"抽屉是否已打开"，
+   *   图标随之在侧栏图标（唤出）与关闭图标（收起）之间切换。
+   */
+  setSidebarState(drawer: boolean, collapsed: boolean): void {
+    this.expandBtn.classList.toggle('is-visible', drawer || collapsed)
+    this.expandBtn.replaceChildren(drawer && collapsed ? xIcon() : sidebarIcon())
+    this.expandBtn.title = drawer ? (collapsed ? '收起音乐库' : '音乐库') : '展开侧栏'
   }
 
   /** 菜单行：瀑布流轨色渐变图例 + 轨名 + 开关圆点；点击开关该轨（多选，不收起菜单） */

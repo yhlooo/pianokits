@@ -25,6 +25,13 @@ export interface AudioEngine {
   noteOn(pitch: number, velocity: number): void
   /** 止住实时演奏中的音（如 MIDI 键盘松开）；不经过调度器 */
   noteOff(pitch: number): void
+  /**
+   * 延音（damper，CC64）踏板状态：true = 踩着。只作用于**实时演奏**的 voice——键抬起时
+   * 踏板踩着则延后止音，抬起踏板时统一释放（文件播放的踏板已在排期时烘焙成发声时值）。
+   * CC66/67 与半踏板不建模（设计文档 20260913-pedal-sound-path.md §3.3）；
+   * `allNotesOff()` 不清除本状态（物理踏板可能仍踩着）。
+   */
+  setSustain(down: boolean): void
   /** 立即止住所有正在发声的音（暂停/停止用；smplr 会同步取消已排期未发声的源） */
   allNotesOff(): void
   /** 线性音量 0~1 */

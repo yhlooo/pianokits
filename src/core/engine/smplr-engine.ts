@@ -27,6 +27,10 @@ export class SmplrEngine implements AudioEngine {
   private volume = 1
   /** 实时演奏 voice（MIDI 键盘）：pitch → 停止函数（smplr start() 的返回值） */
   private readonly liveStops = new Map<number, () => void>()
+  /** 已离键但仍被延音（CC64 踩着）的实时 voice：pitch → 停止函数（同音高可能多个） */
+  private readonly sustainedStops = new Map<number, Array<() => void>>()
+  /** 延音踏板是否踩着（实时 voice 的止音时机；不影响已排期的文件播放音符） */
+  private sustainDown = false
 
   constructor(context: AudioContext) {
     this.context = context
@@ -75,8 +79,8 @@ export class SmplrEngine implements AudioEngine {
   }
 
   noteOn(pitch: number, velocity: number): void {
-    // 同音高重复按下：先止住前一个实时 voice
-    this.noteOff(pitch)
+    // 同音高重复按下：先止住前一个实时 voice（含延音中仍响着的——弦被重新击打）
+    this.stopLiveVoice(pitch)
     if (this.piano === null) return
     // duration 省略/null = 不自动止音（自然延音），离键时用返回的停止函数止音
     const stop = this.piano.start({ note: pitch, velocity, duration: null })
@@ -84,8 +88,23 @@ export class SmplrEngine implements AudioEngine {
   }
 
   noteOff(pitch: number): void {
-    this.liveStops.get(pitch)?.()
+    const stop = this.liveStops.get(pitch)
+    if (stop === undefined) return
     this.liveStops.delete(pitch)
+    // 踏板踩着：延后止音（等 setSustain(false) 统一释放）；否则立即止音
+    if (this.sustainDown) {
+      const list = this.sustainedStops.get(pitch)
+      if (list === undefined) this.sustainedStops.set(pitch, [stop])
+      else list.push(stop)
+      return
+    }
+    stop()
+  }
+
+  setSustain(down: boolean): void {
+    if (this.sustainDown === down) return
+    this.sustainDown = down
+    if (!down) this.releaseSustained()
   }
 
   allNotesOff(): void {
@@ -94,6 +113,29 @@ export class SmplrEngine implements AudioEngine {
     this.piano?.stop()
     for (const stop of this.liveStops.values()) stop()
     this.liveStops.clear()
+    this.releaseSustained()
+  }
+
+  /** 释放全部"已离键但仍被延音"的 voice（踏板抬起 / 止音 / 卸载） */
+  private releaseSustained(): void {
+    for (const list of this.sustainedStops.values()) {
+      for (const stop of list) stop()
+    }
+    this.sustainedStops.clear()
+  }
+
+  /** 硬止某音高的全部实时 voice（按住中 + 延音中） */
+  private stopLiveVoice(pitch: number): void {
+    const live = this.liveStops.get(pitch)
+    if (live !== undefined) {
+      this.liveStops.delete(pitch)
+      live()
+    }
+    const sustained = this.sustainedStops.get(pitch)
+    if (sustained !== undefined) {
+      this.sustainedStops.delete(pitch)
+      for (const stop of sustained) stop()
+    }
   }
 
   setVolume(volume: number): void {
@@ -106,6 +148,8 @@ export class SmplrEngine implements AudioEngine {
   dispose(): void {
     this.piano?.dispose()
     this.piano = null
+    this.liveStops.clear()
+    this.sustainedStops.clear()
     this._ready = false
   }
 }

@@ -1,6 +1,6 @@
 import { writeMidi } from './core/midi/write'
 import { RecorderController } from './core/recorder'
-import type { RecordedNote } from './core/recorder-model'
+import type { RecordedNote, RecordedPedalSegment } from './core/recorder-model'
 import { FileLibrary } from './storage/library'
 import { closeDialogs, confirmDialog, promptDialog } from './ui/dialog'
 import { el, formatFileStamp } from './ui/dom'
@@ -11,7 +11,11 @@ import { RecorderView } from './ui/recorder-view'
  * 上次会话的音轨（模块级）：切换工具会卸载本页，但模块仍驻留内存，
  * 因此"录到一半切去播放器看一眼再切回来"不会丢内容；刷新页面不保留（不做持久化）。
  */
-let sessionTrack: { notes: readonly RecordedNote[]; position: number } | null = null
+let sessionTrack: {
+  notes: readonly RecordedNote[]
+  pedals: readonly RecordedPedalSegment[]
+  position: number
+} | null = null
 
 /**
  * 组装「录音」工具（设计文档 20260912-midi-recorder.md §3.5）：
@@ -63,7 +67,9 @@ export function createRecorderApp(host: HTMLElement): () => void {
     callbacks: { onState: (state) => view.setState(state) },
   })
   // 切走再切回：恢复上次会话的音轨与线位置（刷新不保留）
-  if (sessionTrack !== null) controller.restore(sessionTrack.notes, sessionTrack.position)
+  if (sessionTrack !== null) {
+    controller.restore(sessionTrack.notes, sessionTrack.pedals, sessionTrack.position)
+  }
 
   /** 补 .mid 扩展名（用户输入可省略） */
   function withMidiExtension(name: string): string {
@@ -89,7 +95,8 @@ export function createRecorderApp(host: HTMLElement): () => void {
   /** 保存到「播放 / 练习」的文件库（与播放器共用 IndexedDB 文件库，切换到该工具即可看到） */
   async function saveToLibrary(): Promise<void> {
     const notes = controller.exportNotes()
-    if (notes.length === 0) return
+    const pedals = controller.exportPedals()
+    if (notes.length === 0 && pedals.length === 0) return
     const input = await promptDialog({
       title: '保存到播放器',
       label: '文件名',
@@ -99,7 +106,9 @@ export function createRecorderApp(host: HTMLElement): () => void {
     if (disposed || input === null) return
     const name = withMidiExtension(input)
     try {
-      await library.importFiles([new File([writeMidi(notes)], name, { type: 'audio/midi' })])
+      await library.importFiles([
+        new File([writeMidi(notes, pedals)], name, { type: 'audio/midi' }),
+      ])
       showNotice(`已保存到播放器：${name}`)
     } catch (err) {
       showNotice(`保存失败：${errorText(err)}`, 'error')
@@ -109,7 +118,8 @@ export function createRecorderApp(host: HTMLElement): () => void {
   /** 导出当前音轨为 .mid 并触发浏览器下载 */
   async function downloadMidi(): Promise<void> {
     const notes = controller.exportNotes()
-    if (notes.length === 0) return
+    const pedals = controller.exportPedals()
+    if (notes.length === 0 && pedals.length === 0) return
     const input = await promptDialog({
       title: '下载 MIDI 文件',
       label: '文件名',
@@ -119,7 +129,7 @@ export function createRecorderApp(host: HTMLElement): () => void {
     if (disposed || input === null) return
     const name = withMidiExtension(input)
     try {
-      const blob = new Blob([writeMidi(notes)], { type: 'audio/midi' })
+      const blob = new Blob([writeMidi(notes, pedals)], { type: 'audio/midi' })
       const url = URL.createObjectURL(blob)
       const link = el('a', { href: url, download: name })
       link.click()
@@ -136,7 +146,13 @@ export function createRecorderApp(host: HTMLElement): () => void {
   // 视觉每帧从走带读位置与当前可见音轨（覆盖录制中擦除是渐进的），录制中把未收尾音符画到录制线
   const frame = (): void => {
     if (disposed) return
-    view.render(controller.position, controller.visibleNotes(), controller.pendingNotes())
+    view.render(
+      controller.position,
+      controller.visibleNotes(),
+      controller.pendingNotes(),
+      controller.visiblePedals(),
+      controller.pendingPedals(),
+    )
     rafId = requestAnimationFrame(frame)
   }
   rafId = requestAnimationFrame(frame)
@@ -148,7 +164,11 @@ export function createRecorderApp(host: HTMLElement): () => void {
     if (disposed) return
     disposed = true
     // 记住本次音轨（含录制中未收尾的音符），切回本工具时恢复
-    sessionTrack = { notes: controller.exportNotes(), position: controller.position }
+    sessionTrack = {
+      notes: controller.exportNotes(),
+      pedals: controller.exportPedals(),
+      position: controller.position,
+    }
     cancelAnimationFrame(rafId)
     hideNotice()
     closeDialogs()

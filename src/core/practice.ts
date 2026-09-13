@@ -2,7 +2,14 @@ import type { MidiControlChange, MidiNoteEvent } from './midi/input'
 import type { Song } from './model'
 import { MidiConnection, type MidiConnectionStatus } from './midi/connection'
 import { ChordGate } from './midi/chord-gate'
-import type { PedalFocus, PedalId, PedalPracticeMode } from './midi/pedals'
+import {
+  PEDAL_ON_THRESHOLD,
+  pedalById,
+  pedalIdOfController,
+  type PedalFocus,
+  type PedalId,
+  type PedalPracticeMode,
+} from './midi/pedals'
 import { MidiOutputSink } from './midi/output'
 import type { Transport } from './transport'
 
@@ -117,6 +124,10 @@ export class PracticeController {
   private pedalMode: PedalPracticeMode = 'off'
   /** 上一次连接状态（区分“断开”（connected → 非 connected）与连接尝试的中间状态） */
   private lastStatus: MidiConnectionStatus = 'idle'
+  /** 最近一次各踏板 CC 的输入通道（恢复播放补发踏板状态用；键盘通常固定通道 0） */
+  private readonly pedalChannels = new Map<PedalId, number>()
+  /** 走带状态订阅的退订函数（dispose 用） */
+  private unsubState: (() => void) | null = null
   private disposed = false
 
   constructor(opts: PracticeControllerOptions) {
@@ -161,6 +172,10 @@ export class PracticeController {
         this.release()
       }
       this.emitFeedback()
+    })
+    // 恢复播放时补发按住中的踏板（暂停/停止已向输出端口发 CC=0 复位，见 echoHeldPedals）
+    this.unsubState = this.transport.on('statechange', (state) => {
+      if (state === 'playing') this.echoHeldPedals()
     })
     // 初始状态同步
     this.emitMidiState()
@@ -250,6 +265,8 @@ export class PracticeController {
 
   dispose(): void {
     this.disposed = true
+    this.unsubState?.()
+    this.unsubState = null
     this.gate.reset()
     this.transport.setPracticeTracks(new Set())
     this.transport.setPedalPracticeMode('off')
@@ -326,15 +343,40 @@ export class PracticeController {
    *
    * 「文件此刻正踩着」的踏板（当前播放位置落在踩下区间的持续期间内）交给 gate：在其中踩下不算
    * 误踩——长踏板与长音符同等对待，持续期间内松开再踩仍然正确（设计文档 §3.5 修订）。
+   *
+   * 发声道（设计文档 20260913-pedal-sound-path.md §5.5）：
+   * - 延音踏板驱动引擎的实时延音层（练习与非练习实时演奏都生效；文件播放的踏板已在排期时烘焙）；
+   * - 练习中把 CC 原样回送到键盘音源（与 `onNote` 的 `echoNote` 同一口径）；非练习实时演奏不回送。
    */
   private onControl(ev: MidiControlChange): void {
     if (this.disposed) return
+    const pedal = pedalIdOfController(ev.controller)
+    if (pedal !== null) this.pedalChannels.set(pedal, ev.channel)
     const expected = this.transport.pedalsDownAt(this.transport.position)
     const triggered = this.gate.control(ev, expected)
+    if (pedal === 'sustain') this.transport.liveSustain(ev.value >= PEDAL_ON_THRESHOLD)
+    if (pedal !== null && this.isGating()) this.sink.echoControl(ev)
     if (!this.isGating()) return
     if (triggered) this.release()
     // 放行后同样要外发反馈：踏板/琴键此刻的按住状态就是光晕与点亮的来源
     this.emitFeedback()
+  }
+
+  /**
+   * 把"用户正踩着"的踏板重新回送到输出端口：`allNotesOff()`（暂停/停止/跳转）会发
+   * CC64/66/67 = 0 复位端口，而物理踏板若一直踩着就没有新的踩下沿——不复发的话键盘音源
+   * 会丢失延音状态，必须重踩才恢复（设计文档 20260913-pedal-sound-path.md §5.5）。
+   */
+  private echoHeldPedals(): void {
+    if (!this.isGating()) return
+    for (const pedal of this.gate.heldPedalKeys) {
+      this.sink.echoControl({
+        type: 'controlChange',
+        channel: this.pedalChannels.get(pedal) ?? 0,
+        controller: pedalById(pedal).cc,
+        value: 127,
+      })
+    }
   }
 
   /** 放行当前等待的和弦：走带继续（门控轨音符已由 echoNote 发声）；gate 清空等待直至下一和弦 */

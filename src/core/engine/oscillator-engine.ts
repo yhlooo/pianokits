@@ -1,6 +1,8 @@
 import type { AudioEngine, ScheduledNote } from './types'
 
 interface Voice {
+  /** 音高（重复按下时按音高硬止旧的实时 voice；延音中的 voice 不按音高索引，需要它过滤） */
+  pitch: number
   oscs: OscillatorNode[]
   gain: GainNode
 }
@@ -18,6 +20,10 @@ export class OscillatorEngine implements AudioEngine {
   private readonly voices = new Map<number, Voice[]>()
   /** 实时演奏 voice（MIDI 键盘）：pitch → voice */
   private readonly liveVoices = new Map<number, Voice>()
+  /** 已离键但仍被延音（CC64 踩着）的实时 voice（同音高可能多个） */
+  private readonly sustainedVoices: Voice[] = []
+  /** 延音踏板是否踩着（实时 voice 的止音时机；不影响已排期的文件播放音符） */
+  private sustainDown = false
 
   constructor(context: AudioContext) {
     this.context = context
@@ -56,7 +62,7 @@ export class OscillatorEngine implements AudioEngine {
     osc1.stop(end)
     osc2.stop(end)
 
-    const voice: Voice = { oscs: [osc1, osc2], gain }
+    const voice: Voice = { pitch: ev.pitch, oscs: [osc1, osc2], gain }
     const list = this.voices.get(ev.pitch) ?? []
     list.push(voice)
     this.voices.set(ev.pitch, list)
@@ -68,8 +74,8 @@ export class OscillatorEngine implements AudioEngine {
   }
 
   noteOn(pitch: number, velocity: number): void {
-    // 同音高重复按下：先止住前一个实时 voice
-    this.noteOff(pitch)
+    // 同音高重复按下：先止住前一个实时 voice（含延音中仍响着的——弦被重新击打）
+    this.stopLiveVoice(pitch)
     const t0 = this.context.currentTime
     const freq = 440 * Math.pow(2, (pitch - 69) / 12)
     const gain = this.context.createGain()
@@ -95,14 +101,25 @@ export class OscillatorEngine implements AudioEngine {
     osc1.start(t0)
     osc2.start(t0)
 
-    this.liveVoices.set(pitch, { oscs: [osc1, osc2], gain })
+    this.liveVoices.set(pitch, { pitch, oscs: [osc1, osc2], gain })
   }
 
   noteOff(pitch: number): void {
     const voice = this.liveVoices.get(pitch)
     if (voice === undefined) return
     this.liveVoices.delete(pitch)
-    this.releaseVoice(voice, this.context.currentTime, 0.06)
+    // 踏板踩着：延后止音（等 setSustain(false) 统一释放）；否则立即泄音
+    if (this.sustainDown) this.sustainedVoices.push(voice)
+    else this.releaseVoice(voice, this.context.currentTime, 0.06)
+  }
+
+  setSustain(down: boolean): void {
+    if (this.sustainDown === down) return
+    this.sustainDown = down
+    if (down) return
+    const now = this.context.currentTime
+    for (const voice of this.sustainedVoices) this.releaseVoice(voice, now, 0.06)
+    this.sustainedVoices.length = 0
   }
 
   allNotesOff(): void {
@@ -113,6 +130,25 @@ export class OscillatorEngine implements AudioEngine {
     this.voices.clear()
     for (const v of this.liveVoices.values()) this.releaseVoice(v, now, 0.03)
     this.liveVoices.clear()
+    for (const v of this.sustainedVoices) this.releaseVoice(v, now, 0.03)
+    this.sustainedVoices.length = 0
+  }
+
+  /** 硬止某音高的全部实时 voice（按住中 + 延音中） */
+  private stopLiveVoice(pitch: number): void {
+    const voice = this.liveVoices.get(pitch)
+    if (voice !== undefined) {
+      this.liveVoices.delete(pitch)
+      this.releaseVoice(voice, this.context.currentTime, 0.06)
+    }
+    // 延音中的 voice 不按音高索引（数量少），过滤一次即可
+    for (let i = this.sustainedVoices.length - 1; i >= 0; i--) {
+      const v = this.sustainedVoices[i]
+      if (v.pitch === pitch) {
+        this.sustainedVoices.splice(i, 1)
+        this.releaseVoice(v, this.context.currentTime, 0.06)
+      }
+    }
   }
 
   /** 快泄增益并停止振荡器（共享的止音路径） */

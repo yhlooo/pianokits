@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { PedalEvent, Track } from '../model'
+import type { Note, PedalEvent, Track } from '../model'
 import {
   PEDAL_ON_THRESHOLD,
   PEDALS,
@@ -15,8 +15,10 @@ import {
   mergePedalGates,
   pedalLevelPercent,
   pedalMode,
+  pedalValuesAt,
   pedalsDownAt,
   pedalsForMode,
+  soundingEndsUnderSustain,
 } from './pedals'
 
 const state = (
@@ -297,6 +299,132 @@ describe('mergePedalGates / isSegmentFocused（练习闸门）', () => {
     expect(isSegmentFocused(sustainSeg, focus)).toBe(true)
     expect(isSegmentFocused(softSeg, focus)).toBe(false)
     expect(isSegmentFocused({ ...sustainSeg, channel: 1 }, focus)).toBe(false)
+  })
+})
+
+function note(pitch: number, start: number, end: number, trackIndex = 0): Note {
+  return { pitch, start, end, velocity: 100, trackIndex }
+}
+
+describe('soundingEndsUnderSustain（延音踏板 → 实际发声结束时刻）', () => {
+  const t0 = [track(0, 0)]
+
+  it('键抬起时踏板踩着 → 音符延到踏板抬起', () => {
+    const ends = soundingEndsUnderSustain([note(60, 0, 0.5)], t0, [
+      pedalEvent(0.4, 64, 127),
+      pedalEvent(2, 64, 0),
+    ])
+    expect([...ends]).toEqual([2])
+  })
+
+  it('踏板踩下之前键已抬起 → 不延（踏板不能复活已经止住的音）', () => {
+    const ends = soundingEndsUnderSustain([note(60, 0, 0.5)], t0, [
+      pedalEvent(0.6, 64, 127),
+      pedalEvent(2, 64, 0),
+    ])
+    expect([...ends]).toEqual([0.5])
+  })
+
+  it('键仍按着时踏板抬起 → 不受影响（照常响到键抬起）', () => {
+    const ends = soundingEndsUnderSustain([note(60, 0, 2)], t0, [
+      pedalEvent(0, 64, 127),
+      pedalEvent(1, 64, 0),
+    ])
+    expect([...ends]).toEqual([2])
+  })
+
+  it('踏板踩着时同音高再次击键 → 前一音在新音起点截断（弦被重新击打）', () => {
+    const ends = soundingEndsUnderSustain([note(60, 0, 0.5), note(60, 1, 1.5)], t0, [
+      pedalEvent(0.4, 64, 127),
+      pedalEvent(3, 64, 0),
+    ])
+    expect([...ends]).toEqual([1, 3])
+  })
+
+  it('换踩（0 → 127 紧邻）会清掉前一和声：键已抬起的音在抬起时刻结束，新音照常受新一段延音', () => {
+    const ends = soundingEndsUnderSustain([note(60, 0, 0.5), note(62, 3.2, 3.6)], t0, [
+      pedalEvent(0.4, 64, 127),
+      pedalEvent(3, 64, 0),
+      pedalEvent(3.003, 64, 127),
+      pedalEvent(5, 64, 0),
+    ])
+    expect([...ends]).toEqual([3, 5])
+  })
+
+  it('参考实现用例（Magenta.js applySustainControlChanges 的官方用例逐值一致）', () => {
+    const notes = [note(11, 0.22, 0.5), note(40, 2.5, 3.5), note(55, 4.0, 4.01)]
+    const pedals = [
+      pedalEvent(0.0, 64, 127),
+      pedalEvent(0.75, 64, 0),
+      pedalEvent(2.0, 64, 127),
+      pedalEvent(3.0, 64, 0),
+      pedalEvent(3.75, 64, 127),
+      pedalEvent(4.5, 64, 127), // 已经踩着时重复踩下：无影响
+      pedalEvent(4.8, 64, 0),
+      pedalEvent(4.9, 64, 127),
+      pedalEvent(6.0, 64, 0),
+    ]
+    expect([...soundingEndsUnderSustain(notes, t0, pedals)]).toEqual([0.75, 3.5, 4.8])
+  })
+
+  it('按通道归属：不同通道的踏板互不影响', () => {
+    const tracks = [track(0, 0), track(1, 1)]
+    const ends = soundingEndsUnderSustain([note(60, 0, 0.5, 0), note(64, 0, 0.5, 1)], tracks, [
+      pedalEvent(0.4, 64, 127, 0, 0),
+      pedalEvent(2, 64, 0, 0, 0),
+    ])
+    expect([...ends]).toEqual([2, 0.5])
+  })
+
+  it('纯控制轨上的踏板（无法归属通道）→ 全曲踏板，所有音符都延音', () => {
+    const tracks = [track(0, 3), track(9, 5, 0)]
+    const ends = soundingEndsUnderSustain([note(60, 0, 0.5, 0)], tracks, [
+      pedalEvent(0.4, 64, 127, 9, 5),
+      pedalEvent(2, 64, 0, 9, 5),
+    ])
+    expect([...ends]).toEqual([2])
+  })
+
+  it('曲终仍未抬起 → 结束在最后一个事件时刻（不产生 Infinity）', () => {
+    const ends = soundingEndsUnderSustain([note(60, 0, 0.5), note(64, 2, 2.5)], t0, [
+      pedalEvent(0.4, 64, 127),
+    ])
+    expect([...ends]).toEqual([2.5, 2.5])
+  })
+
+  it('无踏板数据 / 非踏板 CC → 原样返回键按时值（引用新数组）', () => {
+    const notes = [note(60, 0, 0.5)]
+    expect([...soundingEndsUnderSustain(notes, t0, [])]).toEqual([0.5])
+    expect([...soundingEndsUnderSustain(notes, t0, [pedalEvent(0, 67, 127)])]).toEqual([0.5])
+  })
+
+  it('阈值：63 不算踩下（不延音）；64 算', () => {
+    expect([
+      ...soundingEndsUnderSustain([note(60, 0, 0.5)], t0, [pedalEvent(0.4, 64, 63)]),
+    ]).toEqual([0.5])
+    expect([
+      ...soundingEndsUnderSustain([note(60, 0, 0.5)], t0, [pedalEvent(0.4, 64, 64)]),
+    ]).toEqual([0.5]) // 未抬起 → 结束在最后事件时刻（0.5）
+  })
+})
+
+describe('pedalValuesAt（时刻 → 各踏板当前值，供输出端口补发状态）', () => {
+  const events = [pedalEvent(0, 64, 127), pedalEvent(1, 64, 0), pedalEvent(2, 67, 100, 0, 0)]
+
+  it('取 at 之前（含）最后一条事件的值；未收到消息的踏板为 0', () => {
+    expect([...pedalValuesAt(events, -1)]).toEqual([
+      [67, 0],
+      [66, 0],
+      [64, 0],
+    ])
+    expect([...pedalValuesAt(events, 0)]).toEqual([
+      [67, 0],
+      [66, 0],
+      [64, 127],
+    ])
+    expect(pedalValuesAt(events, 1.5).get(64)).toBe(0)
+    expect(pedalValuesAt(events, 9).get(67)).toBe(100)
+    expect(pedalValuesAt(events, 9).get(66)).toBe(0)
   })
 })
 

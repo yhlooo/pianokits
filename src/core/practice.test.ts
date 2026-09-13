@@ -17,6 +17,8 @@ class FakeEngine implements AudioEngine {
   scheduled: ScheduledNote[] = []
   noteOns: Array<{ pitch: number; velocity: number }> = []
   noteOffs: number[] = []
+  /** 实时延音踏板状态变化（true = 踩下） */
+  sustains: boolean[] = []
 
   async init(): Promise<void> {}
   scheduleNote(ev: ScheduledNote): void {
@@ -27,6 +29,9 @@ class FakeEngine implements AudioEngine {
   }
   noteOff(pitch: number): void {
     this.noteOffs.push(pitch)
+  }
+  setSustain(down: boolean): void {
+    this.sustains.push(down)
   }
   allNotesOff(): void {}
   setVolume(): void {}
@@ -667,8 +672,8 @@ describe('PracticeController 编排', () => {
     expect(noteOns.map((d) => d[2])).toEqual([100, 100, 100])
     expect(noteOffs.map((d) => d[1])).toEqual([60, 64, 67])
 
-    // 拔出键盘（输入+输出端口同时消失）：镜像解除、静默输出（清队列 + 全音符止音）
-    // 并恢复键盘 Local Control On
+    // 拔出键盘（输入+输出端口同时消失）：镜像解除、静默输出（清队列 + 全音符止音
+    // + 三踏板复位）并恢复键盘 Local Control On
     const sentBefore = output.sent.length
     access.inputs.clear()
     access.outputs.clear()
@@ -679,7 +684,8 @@ describe('PracticeController 编排', () => {
     transport.play()
     host.advance(0.1)
     host.fireTicks()
-    expect(output.sent.length).toBe(sentBefore + 33) // 32 = 16 通道 CC123 + CC120 + 1 Local Control On
+    // 1 Local Control On + 16 CC123 + 16 CC120 + 3 踏板 × 16 通道 = 81
+    expect(output.sent.length).toBe(sentBefore + 81)
     c.dispose()
   })
 
@@ -939,6 +945,93 @@ describe('PracticeController 长踏板持续期间', () => {
     host.advance(0.4)
     host.fireTicks()
     expect(transport.position).toBeGreaterThan(1.2)
+    c.dispose()
+  })
+})
+
+describe('PracticeController 踏板声音链路（设计文档 20260913-pedal-sound-path.md）', () => {
+  /** 带延音踏板的曲目：Melody(ch0) 的和弦 0.5s 处要求踩下延音（0.3–1.0s） */
+  function makePedalSong(): Song {
+    const song = makeSong()
+    song.pedalEvents = [
+      { time: 0.3, controller: 64, value: 127, trackIndex: 0, channel: 0 },
+      { time: 1.0, controller: 64, value: 0, trackIndex: 0, channel: 0 },
+    ]
+    return song
+  }
+
+  /** 连接控制器（带输出端口）并进入"全部踏板"练习 */
+  async function setupGating(): Promise<{
+    engine: FakeEngine
+    host: FakeHost
+    transport: Transport
+    output: FakeOutput
+    input: FakeInput
+    c: PracticeController
+  }> {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const transport = new Transport(engine, host)
+    const access = new FakeAccess()
+    const output = new FakeOutput()
+    access.outputs.set('o1', output)
+    const { c, input } = await connectController(transport, access)
+    const song = makePedalSong()
+    transport.load(song)
+    c.setTracks(practiceTracksOf(song))
+    c.setPedalPractice('all')
+    output.sent.length = 0
+    return { engine, host, transport, output, input, c }
+  }
+
+  it('练习中：延音踏板驱动引擎延音层，并原样回送到键盘音源', async () => {
+    const { engine, output, input, c } = await setupGating()
+    input.send([0xb0, 64, 127])
+    expect(engine.sustains).toEqual([true])
+    expect(output.sent).toContainEqual([0xb0, 64, 127])
+    input.send([0xb0, 64, 0])
+    expect(engine.sustains).toEqual([true, false])
+    expect(output.sent).toContainEqual([0xb0, 64, 0])
+    c.dispose()
+  })
+
+  it('练习中：回送保留输入通道；非踏板 CC 不驱动延音也不回送', async () => {
+    const { engine, output, input, c } = await setupGating()
+    input.send([0xb3, 66, 127]) // 通道 3 的选择延音：非延音踏板，只回送
+    expect(engine.sustains).toEqual([])
+    expect(output.sent).toEqual([[0xb3, 66, 127]])
+    output.sent.length = 0
+    input.send([0xb0, 1, 64]) // 调制轮：与踏板无关
+    expect(engine.sustains).toEqual([])
+    expect(output.sent).toEqual([])
+    c.dispose()
+  })
+
+  it('非练习实时演奏：踏板只驱动引擎，不回送（与"不回送实时按键"一致）', async () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const transport = new Transport(engine, host)
+    const access = new FakeAccess()
+    const output = new FakeOutput()
+    access.outputs.set('o1', output)
+    const { c, input } = await connectController(transport, access)
+    output.sent.length = 0
+    input.send([0xb0, 64, 127])
+    expect(engine.sustains).toEqual([true])
+    expect(output.sent).toEqual([])
+    c.dispose()
+  })
+
+  it('恢复播放时补发按住中的踏板（暂停已把端口踏板复位为 0）', async () => {
+    const { host, transport, output, input, c } = await setupGating()
+    input.send([0xb0, 64, 127]) // 用户踩住不放
+    transport.play()
+    host.advance(0.1)
+    host.fireTicks()
+    transport.pause() // 止音时向端口发 CC64=0
+    output.sent.length = 0
+    transport.play() // 恢复：物理踏板没有新的踩下沿，必须补发
+    expect(output.sent).toContainEqual([0xb0, 64, 127])
     c.dispose()
   })
 })

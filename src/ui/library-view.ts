@@ -35,6 +35,7 @@ export class LibraryView implements View {
   readonly el: HTMLElement
   private readonly fileInput: HTMLInputElement
   private readonly listEl: HTMLUListElement
+  private readonly collapseBtn: HTMLButtonElement
   private readonly cbs: LibraryViewCallbacks
   private selectedId: string | null = null
 
@@ -62,13 +63,25 @@ export class LibraryView implements View {
     importBtn.append(plusIcon())
     importBtn.addEventListener('click', () => this.fileInput.click())
 
-    // 侧栏左下角的收起按钮：点击后整栏隐藏，由播放坞最左的展开按钮恢复（共用同一侧栏图标）
-    const collapseBtn = el('button', {
+    // 侧栏收起按钮：桌面端固定在**侧栏左下角**（原有位置）。
+    // 窄屏抽屉打开时改由头部的关闭按钮承担（见下方 closeBtn）——抽屉是浮层，
+    // 需要一个近在手边的关闭出口，而左下角离视线太远。
+    this.collapseBtn = el('button', {
       class: 'icon-btn library__collapse',
       title: '收起侧栏',
     })
-    collapseBtn.append(sidebarIcon())
-    collapseBtn.addEventListener('click', () => this.cbs.onCollapse())
+    this.collapseBtn.append(sidebarIcon())
+    this.collapseBtn.addEventListener('click', () => this.cbs.onCollapse())
+
+    // 抽屉专用关闭按钮：默认隐藏，仅窄屏抽屉打开时由 CSS 显示（见 ≤900px 媒体查询）。
+    // 放在头部成为流内 flex 项，天然与导入按钮对齐——不用固定定位算坐标
+    // （按钮在 DOM 中属于脚注、而 .library 带 transform 时，绝对/固定定位极易错位）。
+    const closeBtn = el('button', {
+      class: 'icon-btn library__close',
+      title: '关闭音乐库',
+    })
+    closeBtn.append(xIcon())
+    closeBtn.addEventListener('click', () => this.cbs.onCollapse())
 
     this.el = el(
       'aside',
@@ -77,10 +90,11 @@ export class LibraryView implements View {
         'div',
         { class: 'library__head' },
         el('h2', { class: 'library__title' }, '音乐库'),
+        closeBtn,
         importBtn,
       ),
       this.listEl,
-      el('div', { class: 'library__foot' }, collapseBtn),
+      el('div', { class: 'library__foot' }, this.collapseBtn),
       this.fileInput,
     )
 

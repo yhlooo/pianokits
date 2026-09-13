@@ -1,10 +1,13 @@
-import type { Note, Song } from './model'
+import type { Note, PedalEvent, Song } from './model'
 import type { AudioEngine, ScheduledNote } from './engine/types'
 import {
   buildPedalSegments,
+  isPedalController,
   mergePedalGates,
   pedalFocus,
+  pedalValuesAt,
   pedalsDownAt,
+  soundingEndsUnderSustain,
   type PedalFocus,
   type PedalId,
   type PedalPracticeMode,
@@ -27,6 +30,13 @@ export interface TransportHost {
  */
 export type MidiOutputSink = {
   scheduleNote(ev: ScheduledNote): void
+  /** 排期一条 CC（踏板镜像；实现见 core/midi/output.ts 的 MidiOutputSink 类） */
+  scheduleControlChange(ev: {
+    controller: number
+    value: number
+    time: number
+    channel?: number
+  }): void
   allNotesOff(): void
 }
 
@@ -36,6 +46,12 @@ export const LOOKAHEAD_SEC = 0.1
 export const TICK_MS = 25
 /** 排期补偿（秒）：避免定时器回调边界的竞态 */
 const LATENCY_SEC = 0.015
+
+/**
+ * MIDI 输出镜像的通道：固定 0（与既有"音符镜像固定通道 0"一致，设计文档
+ * 20260913-pedal-sound-path.md §6 D3）。机内引擎的踏板按通道归属烘焙，与镜像通道无关。
+ */
+const MIRROR_CHANNEL = 0
 
 /**
  * 练习模式和弦分组容差（秒）：start 相差不超过此值的音符视为同一和弦、原子等待与放行。
@@ -132,6 +148,17 @@ export class Transport {
   private pedalMode: PedalPracticeMode = 'off'
   /** 曲目踏板踩下区间（load 时构建；门控和弦的踏板要求与瀑布流共用同一数据） */
   private pedalSegments: PedalSegment[] = []
+  /**
+   * 每个音符的**烘焙发声结束时刻**（load 时按曲目 CC64 语义算好，下标与 notes 对齐）：
+   * 声音链路的核心——引擎按它排期（含踏板延音），MIDI 输出镜像仍按键按时值发 Note Off。
+   */
+  private soundingEnd: Float64Array = new Float64Array(0)
+  /** 供 MIDI 输出镜像的三踏板 CC（CC64/66/67；load 时从 pedalEvents 筛出，按时间排序） */
+  private mirroredCcs: PedalEvent[] = []
+  /** CC 镜像调度指针：第一个尚未排期的踏板事件 */
+  private ccPointer = 0
+  /** 实时延音踏板状态（练习/实时演奏；换引擎时重新下发，避免新引擎丢失踏板状态） */
+  private liveSustainDown = false
   /** 当前踏板关注范围缓存（门控集合/踏板模式/曲目变化时重算）；null = 练习未开启 */
   private pedalFocusCache: PedalFocus | null = null
   /**
@@ -199,6 +226,7 @@ export class Transport {
     this.silenceAll()
     this.engine = engine
     engine.setVolume(this.volume)
+    engine.setSustain(this.liveSustainDown)
     if (this.song !== null) {
       this.pausedAt = pos
       this.cancelWaiting()
@@ -219,8 +247,17 @@ export class Transport {
     this.song = song
     this.notes = song.notes
     this.pedalSegments = buildPedalSegments(song.pedalEvents)
+    // 文件播放的踏板：按 CC64 语义烘焙每个音符的实际发声结束时刻（设计文档 §3.1）
+    this.soundingEnd = soundingEndsUnderSustain(song.notes, song.tracks, song.pedalEvents)
+    this.mirroredCcs = song.pedalEvents.filter((e) => isPedalController(e.controller))
+    this.ccPointer = 0
     this.applyPedalFocus()
-    this._duration = song.duration
+    // 走带时长含踏板尾巴（Song.duration 本身不变，视图布局不受影响）
+    let duration = song.duration
+    for (const end of this.soundingEnd) {
+      if (end > duration) duration = end
+    }
+    this._duration = duration
     this.pausedAt = 0
     this.offset = this.host.now()
     this.nextIndex = 0
@@ -238,6 +275,8 @@ export class Transport {
       this.seek(0)
     }
     this.offset = this.host.now() - this.pausedAt
+    // 暂停时输出端口被复位过踏板（CC=0）；恢复播放补发当前位置的踏板状态
+    this.primePedalState(this.pausedAt)
     this.setState('playing')
     this.tick()
     this.startTicker()
@@ -273,6 +312,8 @@ export class Transport {
     this.cancelWaiting()
     this.setPointer(target)
     this.offset = this.host.now() - target
+    // 跳转后补发目标位置的踏板状态（跳进延音段也能听到延音）
+    this.primePedalState(target)
     this.setState(wasPlaying ? 'playing' : 'paused')
     if (wasPlaying) this.tick()
   }
@@ -324,6 +365,17 @@ export class Transport {
   /** 设置 / 解除 MIDI 输出镜像（外部音源与引擎同步发声；无输出端口时传 null） */
   setMidiOutput(sink: MidiOutputSink | null): void {
     this.midiOut = sink
+    // 播放中途插上键盘：新端口立刻处于当前位置的踏板状态
+    if (sink !== null) this.primePedalState(this.position)
+  }
+
+  /**
+   * 实时延音踏板状态（练习/实时演奏：离键的实时 voice 延后止音）。
+   * 文件播放的踏板不经过这里——已在排期时烘焙成发声时值（设计文档 §2）。
+   */
+  liveSustain(down: boolean): void {
+    this.liveSustainDown = down
+    this.engine.setSustain(down)
   }
 
   /** 当前门控轨集合（副本）；空集 = 练习关闭 */
@@ -427,6 +479,9 @@ export class Transport {
     this.waitingIndices = []
     this.waitingFrozen = false
     this.pedalSegments = []
+    this.soundingEnd = new Float64Array(0)
+    this.mirroredCcs = []
+    this.ccPointer = 0
     this.gates = []
     this.pedalFocusCache = null
     this.setState('empty')
@@ -445,19 +500,15 @@ export class Transport {
     const until = pos + LOOKAHEAD_SEC
     const notes = this.notes
 
+    this.scheduleCcs(pos)
+
     while (this.nextIndex < notes.length && notes[this.nextIndex].start < until) {
       const i = this.nextIndex
       const n = notes[i]
       this.nextIndex = i + 1
       if (this.consumed[i] === 1) continue // 退出分轨练习时已排期的音符
       if (n.end <= from) continue
-      const atTime = this.offset + n.start
-      this.scheduleToBoth({
-        pitch: n.pitch,
-        velocity: n.velocity,
-        time: atTime,
-        duration: n.end - n.start,
-      })
+      this.scheduleNote(i, this.offset + n.start)
       this.consumed[i] = 1
     }
 
@@ -483,6 +534,8 @@ export class Transport {
       this.scheduleFree(pos)
       this.tryFreezeChord(now, pos)
     }
+    // 踏板 CC：门控中只推进指针不发送；位置用 `position`（冻结期间停在闸门起点，不跳过事件）
+    this.scheduleCcs(this.position)
     if (pos >= this._duration && this.waitingChord === null) {
       this.pausedAt = this._duration
       this.stopTicker()
@@ -507,12 +560,7 @@ export class Transport {
       this.nextFree = i + 1
       if (this.gatedTracks.has(n.trackIndex)) continue // 门控轨留给门控流
       if (n.end <= from) continue
-      this.scheduleToBoth({
-        pitch: n.pitch,
-        velocity: n.velocity,
-        time: this.offset + n.start,
-        duration: n.end - n.start,
-      })
+      this.scheduleNote(i, this.offset + n.start)
       this.consumed[i] = 1
     }
   }
@@ -641,9 +689,60 @@ export class Transport {
   }
 
   /** 音符排期：引擎与 MIDI 输出镜像同步各发一份（设计文档 §3.6） */
-  private scheduleToBoth(ev: ScheduledNote): void {
-    this.engine.scheduleNote(ev)
-    this.midiOut?.scheduleNote(ev)
+  private scheduleNote(index: number, atTime: number): void {
+    const n = this.notes[index]
+    // 引擎：烘焙后的发声时值（含踏板延音）；镜像：键按时值 + 单独的踏板 CC 排期
+    const sounding = this.soundingEnd[index] ?? n.end
+    this.engine.scheduleNote({
+      pitch: n.pitch,
+      velocity: n.velocity,
+      time: atTime,
+      duration: Math.max(0, sounding - n.start),
+    })
+    this.midiOut?.scheduleNote({
+      pitch: n.pitch,
+      velocity: n.velocity,
+      time: atTime,
+      duration: Math.max(0, n.end - n.start),
+      channel: MIRROR_CHANNEL,
+    })
+  }
+
+  /**
+   * 踏板 CC 镜像：把 lookahead 窗口内的三踏板 CC 逐条排期到输出端口（带时间戳，发送顺序无关）。
+   * 练习门控期间**不发送、只推进指针**——此时踏板是用户的责任，避免程序 CC 与物理踏板互相打断
+   * （设计文档 §6 D4；进入门控时既有 `silenceAll()` 已把端口踏板状态复位）。
+   */
+  private scheduleCcs(pos: number): void {
+    const until = pos + LOOKAHEAD_SEC
+    const ccs = this.mirroredCcs
+    while (this.ccPointer < ccs.length && ccs[this.ccPointer].time < until) {
+      const ev = ccs[this.ccPointer]
+      this.ccPointer++
+      if (this.gatedTracks.size > 0) continue
+      this.midiOut?.scheduleControlChange({
+        controller: ev.controller,
+        value: ev.value,
+        time: this.offset + ev.time,
+        channel: MIRROR_CHANNEL,
+      })
+    }
+  }
+
+  /**
+   * 补发 `position` 时刻的踏板状态（跳转 / 暂停恢复 / 播放中途新挂输出端口）：
+   * 键盘音源不会自己知道曲目此刻踩着哪个踏板。练习门控期间不补发（不镜像文件踏板）。
+   */
+  private primePedalState(position: number): void {
+    if (this.midiOut === null || this.gatedTracks.size > 0 || this.song === null) return
+    for (const [controller, value] of pedalValuesAt(this.song.pedalEvents, position)) {
+      this.midiOut.scheduleControlChange({
+        controller,
+        value,
+        time: this.host.now(),
+        channel: MIRROR_CHANNEL,
+      })
+    }
   }
 
   /** 静默：引擎止音 + MIDI 输出清空队列并 All Notes Off（暂停/停止/跳转等） */
@@ -684,6 +783,7 @@ export class Transport {
       else hi = mid
     }
     this.nextIndex = lo
+    this.ccPointer = this.firstCcAtOrAfter(position)
     this.consumed.fill(0)
   }
 
@@ -694,7 +794,20 @@ export class Transport {
   private setPracticePointers(position: number): void {
     this.nextFree = this.firstOf((n) => !this.gatedTracks.has(n.trackIndex), position)
     this.nextGate = this.firstGateAtOrAfter(position)
+    this.ccPointer = this.firstCcAtOrAfter(position)
     this.consumed.fill(0)
+  }
+
+  /** 第一个 time ≥ position 的镜像 CC 下标；无则 mirroredCcs.length */
+  private firstCcAtOrAfter(position: number): number {
+    let lo = 0
+    let hi = this.mirroredCcs.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (this.mirroredCcs[mid].time < position) lo = mid + 1
+      else hi = mid
+    }
+    return lo
   }
 
   /** 第一个 start ≥ position 的闸门下标；无则 gates.length */

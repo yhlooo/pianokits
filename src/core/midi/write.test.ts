@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { RecordedNote } from '../recorder-model'
+import type { RecordedNote, RecordedPedalSegment } from '../recorder-model'
 import { parseMidi } from './parse'
 import { writeMidi } from './write'
 
@@ -114,11 +114,69 @@ describe('writeMidi 往返（writeMidi → parseMidi）', () => {
   it('trackName 选项：单通道时轨名即选项值', () => {
     const notes: RecordedNote[] = [{ pitch: 60, velocity: 100, start: 0, end: 0.5, channel: 0 }]
 
-    const song = parseMidi(writeMidi(notes, { trackName: 'Take 1' }))
+    const song = parseMidi(writeMidi(notes, [], { trackName: 'Take 1' }))
 
     expect(song.tracks.map((t) => t.name)).toEqual(['Take 1'])
     // 注：@tonejs/midi 的文本事件按 latin-1 逐字节写出（midi-file writeString 取
     // codePoint & 0xFF），非 ASCII 轨名在文件里会变乱码，故默认轨名只用 ASCII
     // （'PianoKits Recording'）；这里用 ASCII 轨名验证这条分支能完整往返。
+  })
+})
+
+describe('writeMidi 踏板（CC64/66/67）往返', () => {
+  const pedal = (
+    controller: number,
+    start: number,
+    end: number,
+    channel = 0,
+    value = 127,
+  ): RecordedPedalSegment => ({ controller, channel, start, end, value })
+
+  it('踏板区间写成踩下 + 抬起：控制器 / 值 / 时间 / 来源轨通道一致', () => {
+    const notes: RecordedNote[] = [{ pitch: 60, velocity: 100, start: 0, end: 0.5, channel: 0 }]
+    const pedals: RecordedPedalSegment[] = [
+      pedal(64, 0.4, 2),
+      pedal(67, 1, 1.5, 0, 100), // 半踏板值原样保留
+    ]
+    const song = parseMidi(writeMidi(notes, pedals))
+    // 按时间排序：延音踩下 → 弱音踩下 → 弱音抬起 → 延音抬起
+    expect(song.pedalEvents.map((e) => [e.controller, e.value])).toEqual([
+      [64, 127],
+      [67, 100],
+      [67, 0],
+      [64, 0],
+    ])
+    expectTime(song.pedalEvents[0].time, 0.4)
+    expectTime(song.pedalEvents[3].time, 2)
+    expect(song.tracks[song.pedalEvents[0].trackIndex].channel).toBe(0)
+    expect(song.notes).toHaveLength(1)
+  })
+
+  it('只有踏板的通道也建轨（踏板专用轨，CC 写在录制通道上）', () => {
+    const pedals: RecordedPedalSegment[] = [pedal(64, 0, 1, 1)]
+    const bytes = [...new Uint8Array(writeMidi([], pedals))]
+    // 通道信息在字节里（0xB1 = 通道 1 的 CC）；@tonejs/midi 的 Track.channel 由轨内
+    // 音符推导，无音符轨读回为 0（parse.ts 已注明），因此这里直接核对字节
+    expect(bytes.some((b, i) => b === 0xb1 && bytes[i + 1] === 64)).toBe(true)
+    const song = parseMidi(writeMidi([], pedals))
+    expect(song.tracks).toHaveLength(1)
+    expect(song.pedalEvents.map((e) => e.value)).toEqual([127, 0])
+
+    const both = parseMidi(
+      writeMidi([{ pitch: 60, velocity: 100, start: 0, end: 0.5, channel: 1 }], pedals),
+    )
+    expect(both.tracks).toHaveLength(1)
+    expect(both.tracks[0].channel).toBe(1)
+    expect(both.notes).toHaveLength(1)
+    expect(both.pedalEvents).toHaveLength(2)
+  })
+
+  it('未收尾（end = Infinity）与非正区间被跳过，不留悬空踏板', () => {
+    const pedals: RecordedPedalSegment[] = [
+      pedal(64, 0, Number.POSITIVE_INFINITY),
+      pedal(64, 2, 2),
+      pedal(64, 3, 2.5),
+    ]
+    expect(parseMidi(writeMidi([], pedals)).pedalEvents).toEqual([])
   })
 })

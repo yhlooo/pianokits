@@ -1,7 +1,8 @@
 import type { MidiConnectionStatus } from '../core/midi/connection'
 import { midiNoteName } from '../core/midi/note-name'
+import { PEDALS } from '../core/midi/pedals'
 import type { RecorderMode, RecorderUiState } from '../core/recorder'
-import type { RecordedNote } from '../core/recorder-model'
+import type { RecordedNote, RecordedPedalSegment } from '../core/recorder-model'
 import { el, formatClock } from './dom'
 import { downloadIcon, pauseIcon, playIcon, recordIcon, saveIcon, stopIcon } from './icons'
 
@@ -10,6 +11,8 @@ import { downloadIcon, pauseIcon, playIcon, recordIcon, saveIcon, stopIcon } fro
  * - 钢琴卷帘音轨：中央为录制/播放线，音符条随走带向左移动；一格一个半音，
  *   条长 = 时值、颜色深浅 = 力度、纵向位置 = 音高；左缘标音名、每行一条浅横线；
  *   音域为钢琴全键盘 88 键（A0~C8），键外的音符不显示；
+ * - 底部固定三条踏板轨（上→下 = 弱音 / 选择延音 / 延音，设计文档 20260913-recorder-pedals.md §3.5）：
+ *   银灰条 = 踏板踩下区间；左缘音名列在对应行标注踏板名；
  * - 音轨上方居中计时器（00:00，超过 60 分钟继续累加：99:23、102:23）；
  * - 音轨下方居中 5 个按钮：播放/暂停、录制/暂停、结束（清空）、保存、下载；
  * - 左右拖动音轨移动录制/播放线（拖动期间挂起录制/播放，由控制器负责）；
@@ -34,6 +37,11 @@ const LABEL_FONT_MAX = 11
 const BLACK_PCS = new Set([1, 3, 6, 8, 10])
 /** 画布文字字体（与全局 UI 字体一致） */
 const CANVAS_FONT = 'system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif'
+/** 底部踏板轨：三行固定高度 + 1px 分隔线（音域区高度 = 画布高 − 本值） */
+const PEDAL_ROW_H = 14
+const PEDAL_AREA_H = PEDAL_ROW_H * 3 + 1
+/** 踏板轨名称字号（px） */
+const PEDAL_LABEL_FONT = 10
 
 const LINE_WEAK = 'rgba(255, 255, 255, 0.055)'
 const LINE_OCTAVE = 'rgba(255, 255, 255, 0.13)'
@@ -43,11 +51,16 @@ const GRID_5SEC = 'rgba(255, 255, 255, 0.075)'
 /** 音符条：琥珀（力度 → 深浅），底部更深一档模拟纸面阴影 */
 const NOTE_TOP = [230, 186, 118] as const
 const NOTE_BOTTOM = [168, 119, 46] as const
+/** 踏板区底色与踏板条银灰渐变（与播放器踏板条同色） */
+const PEDAL_BG = 'rgba(0, 0, 0, 0.18)'
+const PEDAL_TOP: readonly [number, number, number] = [188, 192, 198]
+const PEDAL_BOTTOM: readonly [number, number, number] = [128, 133, 140]
 /** 录制线红、播放线琥珀（与全局语义色一致） */
 const RECORD_RGB = '224, 105, 94'
 const PLAY_RGB = '217, 164, 91'
 
 const EMPTY_NOTES: readonly RecordedNote[] = []
+const EMPTY_PEDALS: readonly RecordedPedalSegment[] = []
 
 export interface RecorderViewCallbacks {
   /** 播放/暂停切换 */
@@ -132,6 +145,10 @@ export class RecorderView {
   private notes: readonly RecordedNote[] = EMPTY_NOTES
   /** 录制中尚未收尾的音符（每帧传入） */
   private pending: readonly RecordedNote[] = EMPTY_NOTES
+  /** 已收尾的踏板踩下区间（控制器同步） */
+  private pedals: readonly RecordedPedalSegment[] = EMPTY_PEDALS
+  /** 录制中尚未抬起的踏板区间（每帧传入） */
+  private pendingPedals: readonly RecordedPedalSegment[] = EMPTY_PEDALS
   private position = 0
   private mode: RecorderMode = 'idle'
   private state: RecorderUiState | null = null
@@ -209,12 +226,12 @@ export class RecorderView {
     this.recordBtn.classList.toggle('is-recording', state.mode === 'recording')
 
     // 播放/录制需连接 MIDI 键盘；音轨为空时播放无内容可放
-    this.playBtn.disabled = !state.midiConnected || !state.hasNotes
+    this.playBtn.disabled = !state.midiConnected || !state.hasContent
     this.recordBtn.disabled = !state.midiConnected
     // 结束/保存/下载：音轨中有内容才可用
-    this.stopBtn.disabled = !state.hasNotes
-    this.saveBtn.disabled = !state.hasNotes
-    this.downloadBtn.disabled = !state.hasNotes
+    this.stopBtn.disabled = !state.hasContent
+    this.saveBtn.disabled = !state.hasContent
+    this.downloadBtn.disabled = !state.hasContent
     this.playWrap.classList.toggle('is-blocked', this.playBtn.disabled)
     this.recordWrap.classList.toggle('is-blocked', this.recordBtn.disabled)
 
@@ -237,14 +254,28 @@ export class RecorderView {
    * 每帧渲染（位置与音轨都是连续量，必须每帧取）：
    * - `position`：录制/播放线所在秒数；
    * - `notes`：当前可见音轨——覆盖录制中，录制线扫过的旧内容已被抹除，每帧都不同；
-   * - `pending`：录制中尚未收尾的音符（end = 当前线位置，条形看上去从线向左生长）。
+   * - `pending`：录制中尚未收尾的音符（end = 当前线位置，条形看上去从线向左生长）；
+   * - `pedals` / `pendingPedals`：踏板踩下区间（已收尾 / 未抬起），画法同上。
    */
-  render(position: number, notes: readonly RecordedNote[], pending: readonly RecordedNote[]): void {
+  render(
+    position: number,
+    notes: readonly RecordedNote[],
+    pending: readonly RecordedNote[],
+    pedals: readonly RecordedPedalSegment[],
+    pendingPedals: readonly RecordedPedalSegment[],
+  ): void {
     const changed =
-      this.dirty || position !== this.position || notes !== this.notes || pending !== this.pending
+      this.dirty ||
+      position !== this.position ||
+      notes !== this.notes ||
+      pending !== this.pending ||
+      pedals !== this.pedals ||
+      pendingPedals !== this.pendingPedals
     this.position = position
     this.notes = notes
     this.pending = pending
+    this.pedals = pedals
+    this.pendingPedals = pendingPedals
     const timerText = formatClock(position)
     if (timerText !== this.lastTimerText) {
       this.lastTimerText = timerText
@@ -301,7 +332,7 @@ export class RecorderView {
     const state = this.state
     if (state === null) return ''
     if (!state.midiConnected) return midiHintText(state.midiStatus)
-    if (which === 'play' && !state.hasNotes) return '音轨为空，先录制一些内容吧'
+    if (which === 'play' && !state.hasContent) return '音轨为空，先录制一些内容吧'
     return ''
   }
 
@@ -365,8 +396,13 @@ export class RecorderView {
     return GUTTER + (this.width - GUTTER) / 2
   }
 
+  /** 音域区底边 y：画布底部的三条踏板轨不参与音高排布 */
+  private noteBottom(): number {
+    return this.height - PEDAL_AREA_H
+  }
+
   private rowHeight(): number {
-    return this.height / ROW_COUNT
+    return this.noteBottom() / ROW_COUNT
   }
 
   private draw(): void {
@@ -378,29 +414,31 @@ export class RecorderView {
     ctx.fillStyle = this.bgGradient ?? '#141312'
     ctx.fillRect(0, 0, w, h)
 
-    this.drawRows(w, h)
+    this.drawRows(w)
     this.drawTimeGrid(w, h)
     const centerX = this.centerX()
     for (const n of this.notes) this.drawNote(n, centerX, false)
     for (const n of this.pending) this.drawNote(n, centerX, true)
+    this.drawPedals(w)
     this.drawPlayhead(centerX, h)
     this.drawGutter(h)
   }
 
   /** 每行一条浅横线（八度分界更亮）+ 黑键行底色 */
-  private drawRows(w: number, h: number): void {
+  private drawRows(w: number): void {
     const ctx = this.ctx
     const rowH = this.rowHeight()
+    const bottom = this.noteBottom()
     ctx.fillStyle = ROW_BLACK
     for (let i = 0; i < ROW_COUNT; i++) {
       const pc = (PITCH_LOW + i) % 12
       if (!BLACK_PCS.has(pc)) continue
-      ctx.fillRect(GUTTER, h - (i + 1) * rowH, w - GUTTER, rowH)
+      ctx.fillRect(GUTTER, bottom - (i + 1) * rowH, w - GUTTER, rowH)
     }
     ctx.lineWidth = 1
     for (let i = 1; i < ROW_COUNT; i++) {
       const pitch = PITCH_LOW + i
-      const y = Math.round(h - i * rowH) + 0.5
+      const y = Math.round(bottom - i * rowH) + 0.5
       ctx.strokeStyle = pitch % 12 === 0 ? LINE_OCTAVE : LINE_WEAK
       ctx.beginPath()
       ctx.moveTo(GUTTER, y)
@@ -434,7 +472,7 @@ export class RecorderView {
     const ctx = this.ctx
     const rowH = this.rowHeight()
     const barH = Math.max(2, rowH - 2)
-    const y = this.height - (idx + 1) * rowH + (rowH - barH) / 2
+    const y = this.noteBottom() - (idx + 1) * rowH + (rowH - barH) / 2
     const x1 = centerX + (n.start - this.position) * PX_PER_SEC
     const x2 = centerX + (n.end - this.position) * PX_PER_SEC
     if (x2 <= GUTTER || x1 >= this.width) return
@@ -456,6 +494,75 @@ export class RecorderView {
     // 描边：录制中尚未收尾（亮白）或当前正在发声（淡白）
     const sounding =
       !pending && this.mode !== 'idle' && n.start <= this.position && n.end > this.position
+    if (pending || sounding) {
+      ctx.strokeStyle = pending ? 'rgba(255, 255, 255, 0.75)' : 'rgba(255, 255, 255, 0.42)'
+      ctx.lineWidth = 1
+      ctx.stroke()
+    }
+  }
+
+  /**
+   * 底部三条踏板轨（上→下 = PEDALS 顺序：弱音 / 选择延音 / 延音）：
+   * 银灰渐变条 = 踩下区间；未抬起的区间画到录制线并加亮白描边；线落在区间内加淡白描边。
+   * 三条轨常显（它们是"这行是什么踏板"的固定参照），无数据时只有分隔线与名称。
+   */
+  private drawPedals(w: number): void {
+    const ctx = this.ctx
+    const bottom = this.noteBottom()
+    ctx.fillStyle = PEDAL_BG
+    ctx.fillRect(0, bottom, w, this.height - bottom)
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)'
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(0, bottom + 0.5)
+    ctx.lineTo(w, bottom + 0.5)
+    ctx.stroke()
+    const centerX = this.centerX()
+    PEDALS.forEach((pedal, i) => {
+      const rowY = bottom + 1 + i * PEDAL_ROW_H
+      if (i > 0) {
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)'
+        ctx.beginPath()
+        ctx.moveTo(GUTTER, Math.round(rowY) + 0.5)
+        ctx.lineTo(w, Math.round(rowY) + 0.5)
+        ctx.stroke()
+      }
+      for (const seg of this.pedals) {
+        if (seg.controller === pedal.cc) this.drawPedalBar(seg, rowY, centerX, false)
+      }
+      for (const seg of this.pendingPedals) {
+        if (seg.controller === pedal.cc) this.drawPedalBar(seg, rowY, centerX, true)
+      }
+    })
+  }
+
+  /** 踏板条：长度 = 踩下区间（越界裁剪、极短至少 2px），银灰渐变 + pending/正在踩的描边 */
+  private drawPedalBar(
+    seg: RecordedPedalSegment,
+    rowY: number,
+    centerX: number,
+    pending: boolean,
+  ): void {
+    const ctx = this.ctx
+    const barH = PEDAL_ROW_H - 4
+    const y = rowY + 2
+    const x1 = centerX + (seg.start - this.position) * PX_PER_SEC
+    const x2 = centerX + (seg.end - this.position) * PX_PER_SEC
+    if (x2 <= GUTTER || x1 >= this.width) return
+    const left = Math.max(GUTTER, x1)
+    let right = Math.min(this.width, x2)
+    if (right - left < 2) {
+      if (x1 < GUTTER) return
+      right = Math.min(this.width, left + 2)
+    }
+    const gradient = ctx.createLinearGradient(0, y, 0, y + barH)
+    gradient.addColorStop(0, rgba(PEDAL_TOP, 0.75))
+    gradient.addColorStop(1, rgba(PEDAL_BOTTOM, 0.75))
+    ctx.fillStyle = gradient
+    roundRect(ctx, left, y, right - left, barH, Math.min(3, barH / 2))
+    ctx.fill()
+    const sounding =
+      !pending && this.mode !== 'idle' && seg.start <= this.position && seg.end > this.position
     if (pending || sounding) {
       ctx.strokeStyle = pending ? 'rgba(255, 255, 255, 0.75)' : 'rgba(255, 255, 255, 0.42)'
       ctx.lineWidth = 1
@@ -488,6 +595,7 @@ export class RecorderView {
   private drawGutter(h: number): void {
     const ctx = this.ctx
     const rowH = this.rowHeight()
+    const bottom = this.noteBottom()
     const labelAll = rowH >= LABEL_ALL_ROW_H
     const fontSize = Math.max(LABEL_FONT_MIN, Math.min(LABEL_FONT_MAX, rowH * 0.85))
     ctx.fillStyle = 'rgba(20, 19, 18, 0.94)'
@@ -500,8 +608,14 @@ export class RecorderView {
       const natural = !BLACK_PCS.has(pitch % 12)
       if (!labelAll && !natural) continue
       ctx.fillStyle = natural ? 'rgba(184, 181, 174, 0.85)' : 'rgba(128, 125, 118, 0.7)'
-      ctx.fillText(midiNoteName(pitch), GUTTER - 8, h - (i + 0.5) * rowH)
+      ctx.fillText(midiNoteName(pitch), GUTTER - 8, bottom - (i + 0.5) * rowH)
     }
+    // 踏板轨名称（弱音 / 选择延音 / 延音）：与行一一对应
+    ctx.font = `${PEDAL_LABEL_FONT}px ${CANVAS_FONT}`
+    ctx.fillStyle = 'rgba(184, 181, 174, 0.8)'
+    PEDALS.forEach((pedal, i) => {
+      ctx.fillText(pedal.name, GUTTER - 8, bottom + 1 + i * PEDAL_ROW_H + PEDAL_ROW_H / 2)
+    })
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)'
     ctx.lineWidth = 1
     ctx.beginPath()

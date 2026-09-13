@@ -180,6 +180,19 @@ describe('quantizeToScore', () => {
     expect(ev.pieces.reduce((s, p) => s + p.durationBeats, 0)).toBeCloseTo(2)
   })
 
+  it('踏板延音：起点在踏板踩下之前的音，只要键在踏板踩着时抬起也延长（Magenta 语义）', () => {
+    // 旧实现按「音符起点是否在踏板区间内」判定，会漏掉这一形态；现按「键抬起时是否踩着」判定
+    const song = makeSong([{ pitch: 60, start: 0, end: 0.25 }], {
+      pedalEvents: [
+        { time: 0.1, controller: 64, value: 127, trackIndex: 0, channel: 0 },
+        { time: 2, controller: 64, value: 0, trackIndex: 0, channel: 0 },
+      ],
+    })
+    const score = quantizeToScore(song)
+    const ev = score.events.find((e) => !e.rest)!
+    expect(ev.pieces.reduce((s, p) => s + p.durationBeats, 0)).toBeCloseTo(2)
+  })
+
   it('过滤打击乐轨与空轨', () => {
     const song = makeSong([{ pitch: 60, start: 0, end: 1, trackIndex: 0 }])
     song.tracks = [

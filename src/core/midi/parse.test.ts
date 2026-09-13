@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import toneMidi from '@tonejs/midi'
 
-import { parseMidi } from './parse'
+import { decodeMidiText, parseMidi } from './parse'
 
 const { Midi } = toneMidi
 
@@ -53,5 +53,49 @@ describe('parseMidi 踏板事件', () => {
     track.addNote({ midi: 60, time: 0, duration: 1, velocity: 0.5 })
     const song = parseMidi(Uint8Array.from(midi.toArray()).buffer)
     expect(song.pedalEvents).toEqual([])
+  })
+})
+
+describe('decodeMidiText 轨名编码还原', () => {
+  /** 把 UTF-8 文本按字节模拟成 @tonejs/midi 的 latin-1 逐字节解码结果 */
+  const asLatin1 = (text: string): string =>
+    Array.from(new TextEncoder().encode(text), (b) => String.fromCharCode(b)).join('')
+
+  it('ASCII 原样返回', () => {
+    expect(decodeMidiText('Piano')).toBe('Piano')
+    expect(decodeMidiText('')).toBe('')
+    expect(decodeMidiText('Track 1')).toBe('Track 1')
+  })
+
+  it('还原被误读为 latin-1 的 UTF-8 中文轨名', () => {
+    expect(decodeMidiText(asLatin1('右手旋律'))).toBe('右手旋律')
+    expect(decodeMidiText(asLatin1('左手伴奏'))).toBe('左手伴奏')
+  })
+
+  it('还原被误读为 latin-1 的 UTF-8 西欧字符', () => {
+    expect(decodeMidiText(asLatin1('Prélude'))).toBe('Prélude')
+    expect(decodeMidiText(asLatin1('Café'))).toBe('Café')
+  })
+
+  it('真正的 latin-1 文本不被误判（非法 UTF-8 字节序列）', () => {
+    expect(decodeMidiText('café')).toBe('café') // é = U+00E9，单字节 EB 后无续接字节
+    expect(decodeMidiText('Prélude')).toBe('Prélude')
+    expect(decodeMidiText('über')).toBe('über')
+  })
+
+  it('含 >U+00FF 字符的字符串原样返回', () => {
+    expect(decodeMidiText('已解码的中文')).toBe('已解码的中文')
+    expect(decodeMidiText('旋律 ABC')).toBe('旋律 ABC')
+  })
+
+  it('parseMidi 对轨名应用还原，空名仍退到 Track N', () => {
+    const midi = new Midi()
+    const a = midi.addTrack()
+    a.name = 'Melody'
+    a.addNote({ midi: 60, time: 0, duration: 0.5, velocity: 0.8 })
+    const b = midi.addTrack()
+    b.addNote({ midi: 62, time: 0, duration: 0.5, velocity: 0.8 }) // 无轨名
+    const song = parseMidi(midi.toArray().buffer as ArrayBuffer)
+    expect(song.tracks.map((t) => t.name)).toEqual(['Melody', 'Track 2'])
   })
 })

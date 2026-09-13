@@ -10,6 +10,8 @@ class FakeEngine implements AudioEngine {
   scheduled: ScheduledNote[] = []
   noteOns: Array<{ pitch: number; velocity: number }> = []
   noteOffs: number[] = []
+  /** 实时延音踏板状态变化（true = 踩下） */
+  sustains: boolean[] = []
   allNotesOffCount = 0
   volume = -1
 
@@ -26,6 +28,9 @@ class FakeEngine implements AudioEngine {
   }
   noteOff(pitch: number): void {
     this.noteOffs.push(pitch)
+  }
+  setSustain(down: boolean): void {
+    this.sustains.push(down)
   }
   allNotesOff(): void {
     this.allNotesOffCount++
@@ -879,17 +884,26 @@ describe('Transport 踏板练习', () => {
 describe('Transport MIDI 输出镜像', () => {
   class FakeSink {
     scheduled: ScheduledNote[] = []
+    ccs: Array<{ controller: number; value: number; time: number; channel?: number }> = []
     allNotesOffCount = 0
 
     scheduleNote(ev: ScheduledNote): void {
       this.scheduled.push(ev)
+    }
+    scheduleControlChange(ev: {
+      controller: number
+      value: number
+      time: number
+      channel?: number
+    }): void {
+      this.ccs.push(ev)
     }
     allNotesOff(): void {
       this.allNotesOffCount++
     }
   }
 
-  it('排期音符同步镜像到输出（与引擎同一份排期数据）', () => {
+  it('排期音符同步镜像到输出（镜像固定通道 0，时值取键按时值）', () => {
     const engine = new FakeEngine()
     const sink = new FakeSink()
     const host = new FakeHost()
@@ -904,11 +918,11 @@ describe('Transport MIDI 输出镜像', () => {
     t.play()
     host.fireTicks()
     expect(sink.scheduled).toHaveLength(1)
-    expect(sink.scheduled[0]).toEqual(engine.scheduled[0])
+    expect(sink.scheduled[0]).toEqual({ ...engine.scheduled[0], channel: 0 })
     host.advance(0.95)
     host.fireTicks()
     expect(sink.scheduled).toHaveLength(2)
-    expect(sink.scheduled[1]).toEqual(engine.scheduled[1])
+    expect(sink.scheduled[1]).toEqual({ ...engine.scheduled[1], channel: 0 })
   })
 
   it('解除镜像后不再发送', () => {
@@ -997,6 +1011,95 @@ describe('Transport MIDI 输出镜像', () => {
     host.fireTicks()
     // 放行：门控音符不排期（回送发声）；同 onset 自由音符以放行时刻发声并镜像
     expect(engine.scheduled.map((n) => n.pitch)).toEqual([62])
-    expect(sink.scheduled).toEqual(engine.scheduled)
+    expect(sink.scheduled.map((n) => n.pitch)).toEqual([62])
+    expect(sink.scheduled[0]).toEqual({ ...engine.scheduled[0], channel: 0 })
+  })
+
+  it('曲目踏板 CC 镜像：事件按时间排期到输出端口（音符仍按键按时值）', () => {
+    const engine = new FakeEngine()
+    const sink = new FakeSink()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    t.setMidiOutput(sink)
+    const song = makeSong([{ pitch: 60, start: 0.05, end: 0.5 }])
+    song.pedalEvents = [
+      { time: 0.4, controller: 64, value: 127, trackIndex: 0, channel: 0 },
+      { time: 2, controller: 64, value: 0, trackIndex: 0, channel: 0 },
+    ]
+    t.load(song)
+    t.play()
+    host.fireTicks()
+    // 音符：引擎发声时值被踏板延长（0.5 → 2），镜像仍是键按时值（0.45）
+    expect(engine.scheduled[0].duration).toBeCloseTo(1.95)
+    expect(sink.scheduled[0].duration).toBeCloseTo(0.45)
+    sink.ccs.length = 0 // 忽略 play() 补发的踏板状态
+    host.advance(0.5)
+    host.fireTicks()
+    expect(sink.ccs).toEqual([{ controller: 64, value: 127, time: 0.4, channel: 0 }])
+    host.advance(1.7)
+    host.fireTicks()
+    expect(sink.ccs.at(-1)).toEqual({ controller: 64, value: 0, time: 2, channel: 0 })
+  })
+
+  it('练习门控期间不镜像文件踏板（踏板交给用户）', () => {
+    const engine = new FakeEngine()
+    const sink = new FakeSink()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    t.setMidiOutput(sink)
+    const song = makeSong([{ pitch: 60, start: 0.5, end: 0.9 }])
+    song.pedalEvents = [
+      { time: 0.3, controller: 64, value: 127, trackIndex: 0, channel: 0 },
+      { time: 1.5, controller: 64, value: 0, trackIndex: 0, channel: 0 },
+    ]
+    t.load(song)
+    t.setPracticeTracks(new Set([0]))
+    sink.ccs.length = 0
+    t.play()
+    host.advance(0.6)
+    host.fireTicks()
+    expect(sink.ccs).toEqual([])
+  })
+
+  it('跳转 / 恢复播放补发当前位置的踏板状态', () => {
+    const engine = new FakeEngine()
+    const sink = new FakeSink()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    const song = makeSong([{ pitch: 60, start: 0.05, end: 3 }])
+    song.pedalEvents = [
+      { time: 0.3, controller: 64, value: 127, trackIndex: 0, channel: 0 },
+      { time: 2, controller: 64, value: 0, trackIndex: 0, channel: 0 },
+    ]
+    t.load(song)
+    t.setMidiOutput(sink)
+    sink.ccs.length = 0
+    t.seek(1) // 跳进延音段：补发 CC64=127
+    expect(sink.ccs).toEqual([
+      { controller: 67, value: 0, time: 0, channel: 0 },
+      { controller: 66, value: 0, time: 0, channel: 0 },
+      { controller: 64, value: 127, time: 0, channel: 0 },
+    ])
+    sink.ccs.length = 0
+    t.play()
+    host.fireTicks()
+    t.pause()
+    sink.ccs.length = 0
+    t.play() // 暂停会复位端口踏板 → 恢复播放补发
+    expect(sink.ccs.at(-1)).toEqual({ controller: 64, value: 127, time: 0, channel: 0 })
+  })
+
+  it('liveSustain：实时踏板状态下发给引擎；换引擎时重新下发', () => {
+    const engine = new FakeEngine()
+    const host = new FakeHost()
+    const t = new Transport(engine, host)
+    t.load(makeSong([{ pitch: 60, start: 0, end: 0.5 }]))
+    t.liveSustain(true)
+    expect(engine.sustains).toEqual([true])
+    const next = new FakeEngine('smplr')
+    t.setEngine(next)
+    expect(next.sustains).toEqual([true])
+    t.liveSustain(false)
+    expect(next.sustains).toEqual([true, false])
   })
 })

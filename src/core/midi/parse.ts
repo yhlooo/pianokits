@@ -58,6 +58,40 @@ function minorKeySf(minorTonicName: string): number {
 }
 
 /**
+ * 修正被当作 latin-1 解码的 UTF-8 轨名（乱码还原）。
+ *
+ * SMF 规范把文本事件（FF 03 轨名、FF 01 文本）定义为 ASCII，没有规定非 ASCII 的编码，
+ * 实际文件普遍两种写法：latin-1 系（多为西欧字符）与 UTF-8。
+ * `@tonejs/midi` 统一用 `String.fromCharCode` 按字节取值，于是 UTF-8 的每个字节
+ * 变成独立的 U+0080–U+00FF 字符（"右手旋律" → "å³ææå¾"）。
+ *
+ * 判定：把当前字符串按 latin-1 反向取回原始字节，若这些字节恰好是
+ * **合法的 UTF-8 序列且含多字节字符**，则按 UTF-8 重新解码；否则视为真正的
+ * latin-1 文本原样返回。`fatal: true` 让非法序列抛错，避免把 "café" 这类
+ * 合法 latin-1 字符串误判（其字节 EB 之后缺少续接字节，不是合法 UTF-8）。
+ *
+ * 局限：不覆盖 GBK/Big5 等其它编码（零依赖下 `TextDecoder` 不可靠支持），
+ * 此类轨名会落回原始乱码——需要时另行立项引入解码依赖。
+ */
+export function decodeMidiText(raw: string): string {
+  if (raw === '') return raw
+  const bytes = new Uint8Array(raw.length)
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i)
+    if (code > 0xff) return raw // 已含 >U+00FF 字符：说明并非逐字节解码的结果
+    bytes[i] = code
+  }
+  let decoded: string
+  try {
+    decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return raw // 不是合法 UTF-8：视为真正的 latin-1 文本
+  }
+  if (decoded === raw) return raw // 全 ASCII，无需替换
+  return decoded
+}
+
+/**
  * 解析 MIDI 文件字节为领域模型 Song。
  * 合并所有非打击乐轨道的音符为单一事件流（按 start 排序），
  * 三踏板 CC（64/66/67）另存为踏板事件（按 time 排序，保留来源轨与通道）。
@@ -94,14 +128,18 @@ export function parseMidi(bytes: ArrayBuffer): Song {
     return next === undefined || next.time > ks.time + 1e-6
   })
 
-  const tracks = midi.tracks.map((t, index) => ({
-    index,
-    name: t.name.trim() === '' ? `Track ${index + 1}` : t.name,
-    channel: t.channel,
-    instrument: t.instrument.number,
-    percussion: t.instrument.percussion || t.channel === PERCUSSION_CHANNEL,
-    noteCount: t.notes.length,
-  }))
+  const tracks = midi.tracks.map((t, index) => {
+    // 轨名先做 latin-1→UTF-8 乱码还原（见 decodeMidiText），空名再退到 Track N
+    const name = decodeMidiText(t.name).trim()
+    return {
+      index,
+      name: name === '' ? `Track ${index + 1}` : name,
+      channel: t.channel,
+      instrument: t.instrument.number,
+      percussion: t.instrument.percussion || t.channel === PERCUSSION_CHANNEL,
+      noteCount: t.notes.length,
+    }
+  })
 
   const notes: Song['notes'] = []
   const pedalEvents: PedalEvent[] = []

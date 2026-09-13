@@ -211,8 +211,16 @@ const LETTER_PC: Record<Letter, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, 
 
 /**
  * 按调号拼写音高：返回字母 + 临时记号 + 八度。
- * 规则：调号内自然音无记号；调号内升降音无记号（已由调号覆盖）；
- * 与调号冲突的自然音记 'n'；其余黑键在升号调用 '#、降号调用 'b'。
+ *
+ * 匹配优先级（顺序很重要）：
+ * 1. **调号内的自然音**（字母的原位音高 == pc）→ 无记号；
+ * 2. **调号内的升降音**（该字母被调号升/降后 == pc）→ 显式 `#`/`b`；
+ * 3. 与调号冲突的自然音 → `n`；
+ * 4. 其余黑键：升号调拼升、降号调拼降。
+ *
+ * 第 1 步必须优先于第 2 步，且第 2 步必须带上升降号。历史实现把前两个分支写在一起
+ * 并且**只返回字母不带记号**，导致调号内的升降音被记成还原音（F 大调里 Bb 记成 B♮、
+ * G 大调里 F# 记成 F♮），是**差半音的实际错误**。
  */
 export function spellPitch(pitch: number, sf: number): ScoreKey {
   const pc = ((pitch % 12) + 12) % 12
@@ -220,24 +228,34 @@ export function spellPitch(pitch: number, sf: number): ScoreKey {
   const sharpSet = new Set(SHARP_PCS.slice(0, Math.max(0, sf)))
   const flatSet = new Set(FLAT_PCS.slice(0, Math.max(0, -sf)))
 
-  // 调号内自然音 / 调号内升降音
+  // 1. 调号内的自然音：字母原位即 pc。
+  //    若该字母被调号升/降过，则原位音是「还原音」，必须显式写还原记号，
+  //    否则乐手会按调号奏成升降音（例如 Bb 大调里的 B♮）。
   for (const letter of LETTERS) {
     const natural = LETTER_PC[letter]
-    const altered = sharpSet.has(natural)
-      ? natural + 1
-      : flatSet.has(natural)
-        ? natural - 1
-        : natural
-    if (altered === pc) return { letter, accidental: '', octave }
+    if (natural === pc) {
+      const altered = sharpSet.has(natural) || flatSet.has(natural)
+      return { letter, accidental: altered ? 'n' : '', octave }
+    }
   }
-  // 与调号冲突的自然音（例如 G 大调中的 F 还原）
+  // 2. 调号内的升降音：该字母被调号升/降后 == pc
+  for (const letter of LETTERS) {
+    const natural = LETTER_PC[letter]
+    if (sharpSet.has(natural) && natural + 1 === pc) {
+      return { letter, accidental: '#', octave }
+    }
+    if (flatSet.has(natural) && natural - 1 === pc) {
+      return { letter, accidental: 'b', octave }
+    }
+  }
+  // 3. 与调号冲突的自然音（例如 G 大调中的 F 还原）
   for (const letter of LETTERS) {
     const natural = LETTER_PC[letter]
     if ((sharpSet.has(natural) || flatSet.has(natural)) && natural === pc) {
       return { letter, accidental: 'n', octave }
     }
   }
-  // 其余黑键：升号调拼升、降号调拼降
+  // 4. 其余黑键：升号调拼升、降号调拼降
   if (sf >= 0) {
     const natural = (pc - 1 + 12) % 12
     const letter = LETTERS.find((l) => LETTER_PC[l] === natural) ?? 'C'
@@ -347,9 +365,150 @@ function buildStaffs(song: Song): ScoreStaff[] {
 function extendWithSustain(song: Song): Note[] {
   if (song.pedalEvents.length === 0) return song.notes
   const soundingEnd = soundingEndsUnderSustain(song.notes, song.tracks, song.pedalEvents)
-  return song.notes.map((n, i) =>
+  const extended = song.notes.map((n, i) =>
     soundingEnd[i] > n.end + EPS ? { ...n, end: soundingEnd[i] } : n,
   )
+  // 踏板把音延到踏板抬起，但**不得越过同轨的下一个起音**：演奏者已经弹下一个音了，
+  // 记谱上该音就到此为止。否则会造出源数据里根本不存在的重叠——实测某曲右手 16 个
+  // 干净的八分音符因此被压成 13 个碎片、音高序列错乱（见
+  // docs/development/research/20260913-score-render-diagnosis.md §8）。
+  // 真正的持续低音（同轨后续起音都还在它后面）不受影响。
+  const nextOnset = new Map<Note, number>()
+  const byTrack = new Map<number, Note[]>()
+  for (const n of song.notes) {
+    let arr = byTrack.get(n.trackIndex)
+    if (arr === undefined) {
+      arr = []
+      byTrack.set(n.trackIndex, arr)
+    }
+    arr.push(n)
+  }
+  for (const arr of byTrack.values()) {
+    const onsets = [...new Set(arr.map((n) => n.start))].sort((a, b) => a - b)
+    for (const n of arr) {
+      let k = 0
+      while (k < onsets.length && onsets[k] <= n.start + EPS) k++
+      if (onsets[k] !== undefined) nextOnset.set(n, onsets[k])
+    }
+  }
+  for (let i = 0; i < extended.length; i++) {
+    const limit = nextOnset.get(song.notes[i])
+    if (limit !== undefined && limit < extended[i].end) extended[i] = { ...extended[i], end: limit }
+  }
+  return extended
+}
+
+// ---------- 时值规整与连奏合并 ----------
+
+/**
+ * 量化前的时值规整：**起音可信、时长不可信**。
+ *
+ * 现实中导出的 MIDI（尤其从打谱软件或钢琴卷帘导出的）常常把每个音的时长统一写短
+ * 一点点，例如本该 0.25 拍（八分）写成 0.235 拍、0.5 拍（四分）写成 0.473 拍——
+ * 实测某曲 450 个音是 0.235、271 个是 0.473，**但起音间隔是干净的** 0.25/0.5 拍。
+ * 这种「时长略短于起音间隔」的写法会让量化后的每个音都多跨出 0.015 拍而与下一个音
+ * 重叠，进而被拆成「附点八分 + 十六分」的延音线碎片、并被 `assignVoices` 劈成两个声部，
+ * 谱面因此满屏连线（见 `docs/development/research/20260913-score-render-diagnosis.md`）。
+ *
+ * 因此按同轨的下一个起音截断时长：`end = min(end, 下一个起音)`。
+ * - 时长略超过起音间隔 → 收到间隔上，得到干净的时值；
+ * - 时长本身较短（断奏/顿音）→ 保留原时长，不受影响；
+ * - 与下一个音同起点（和弦）→ `gap <= EPS`，跳过，绝不改动和弦内各音。
+ *
+ * 截断之后，再由 `mergeLegatoFragments` 合并「note-off + 紧邻 note-on」造成的同音碎片。
+ */
+function clampNoteEndsToNextOnset(notes: Note[], rawEnds: Map<Note, number>): Note[] {
+  const byTrack = new Map<number, Note[]>()
+  const order: number[] = []
+  for (const n of notes) {
+    let arr = byTrack.get(n.trackIndex)
+    if (arr === undefined) {
+      arr = []
+      byTrack.set(n.trackIndex, arr)
+      order.push(n.trackIndex)
+    }
+    arr.push(n)
+  }
+  for (const trackIndex of order) {
+    const arr = (byTrack.get(trackIndex) ?? []).sort(
+      (a, b) => a.start - b.start || a.pitch - b.pitch,
+    )
+    const onsets = [...new Set(arr.map((n) => n.start))].sort((a, b) => a - b)
+    for (const n of arr) {
+      let k = 0
+      while (k < onsets.length && onsets[k] <= n.start + EPS) k++
+      const next = onsets[k]
+      // 只截断「被踏板延音拉长、且已经越过下一个起音」的音。
+      // 两个条件缺一不可：
+      // - `rawEnd < next`：该音按原始时值本来在下一个起音前就结束了，是踏板把它拉长的
+      //   （若原始时长本身就比到下一个起音的间隔长，说明是真正的持续低音，与上方走动
+      //   声部有意重叠，必须保留原时长交给 `assignVoices` 分声部——否则复调会被压成单声部）；
+      // - `next < n.end`：拉长后确实越过了下一个起音。
+      // 「原始时长统一略短于起音间隔」的文件里 rawEnd 恰好卡在 next 之前（如 0.235 拍
+      // 的八分音符 rawEnd=4.235 < 下一个起音 4.25），因此同样会被截断——这正是我们要的。
+      if (next !== undefined && next < n.end && (rawEnds.get(n) ?? n.end) < next) n.end = next
+    }
+  }
+  return notes
+}
+
+/**
+ * 合并连奏造成的同音碎片：同一轨、同一音高、首尾相接（中间不存在任何量化网格点）的相邻音，
+ * 按后者结束时间延长前者。
+ *
+ * 动机：文件里一个长音常被写成「note-off + 紧邻 note-on」两段（例如
+ * `beat 3.750 ON 79 / 3.985 off` + `4.000 ON 79 / 4.235 off` 其实是一个音）。
+ * 这类断口在 1/16 网格上会各吸附成独立片段，谱面出现多余延音线。
+ *
+ * 合并条件（三者同时成立，避免误伤真实的同音反复）：
+ * 1. 两段不重叠（`b.start >= a.end`）；
+ * 2. b 的结束晚于 a 的结束（合并后确实更长）；
+ * 3. b 的起点与 a 的结束吸附到**同一网格点**——这正是「两段之间不存在任何网格点」的
+ *    等价条件，也就是量化后本来就无法区分它们。带明确断口的真反复音（例如八分音符
+ *    断奏，缝约 0.7 拍、缝里还有网格点）不满足，因而不会被误合并。
+ *
+ * 输入应为已按踏板延音延长、并做过 `clampNoteEndsToNextOnset` 的音符。
+ */
+function mergeLegatoFragments(notes: Note[], curve: BeatCurve): Note[] {
+  const byTrack = new Map<number, Note[]>()
+  const order: number[] = []
+  for (const n of notes) {
+    let arr = byTrack.get(n.trackIndex)
+    if (arr === undefined) {
+      arr = []
+      byTrack.set(n.trackIndex, arr)
+      order.push(n.trackIndex)
+    }
+    arr.push(n)
+  }
+  const out: Note[] = []
+  const snap = (beat: number): number => Math.round(beat / GRID_STEP) * GRID_STEP
+  for (const trackIndex of order) {
+    const arr = (byTrack.get(trackIndex) ?? []).sort(
+      (a, b) => a.start - b.start || a.pitch - b.pitch,
+    )
+    let cur: Note | null = null
+    for (const n of arr) {
+      if (cur === null || n.pitch !== cur.pitch) {
+        if (cur !== null) out.push(cur)
+        cur = { ...n }
+        continue
+      }
+      const startBeat = curve.secToBeat(n.start)
+      if (
+        n.start >= cur.end - EPS &&
+        n.end > cur.end + EPS &&
+        snap(curve.secToBeat(cur.end)) === snap(startBeat)
+      ) {
+        cur = { ...cur, end: n.end } // 连奏：并入前一个音
+        continue
+      }
+      out.push(cur)
+      cur = { ...n }
+    }
+    if (cur !== null) out.push(cur)
+  }
+  return out.sort((a, b) => a.start - b.start)
 }
 
 // ---------- 谱表内复调分声部 ----------
@@ -524,7 +683,12 @@ export function quantizeToScore(song: Song): ScoreModel {
 
   const displayKeysig = keysig
 
-  const extendedNotes = extendWithSustain(song)
+  // 踏板延音前的原始末端：用于区分「被延音拉长」与「本来就是长音」
+  const rawEnds = new Map(song.notes.map((n) => [n, n.end]))
+  const extendedNotes = mergeLegatoFragments(
+    clampNoteEndsToNextOnset(extendWithSustain(song), rawEnds),
+    curve,
+  )
 
   type Segment = { pitch: number; qs: number; qe: number; staffIndex: number }
   const byMeasure: Segment[][] = measures.map(() => [])

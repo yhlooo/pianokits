@@ -13,14 +13,46 @@ import {
 } from 'vexflow/bravura'
 import type { RenderContext } from 'vexflow/bravura'
 
-import type { Measure, NotatedEvent, ScoreModel } from '../core/midi/quantize'
+import type { Measure, NotatedEvent, ScoreKey, ScoreModel } from '../core/midi/quantize'
 import { beatBounds } from '../core/midi/quantize'
 import { el } from './dom'
 import type { View } from './store'
 
-const STAFF_TOP_Y = 10
-const STAFF_GAP = 100
-const BOTTOM_PAD = 100
+/**
+ * 垂直布局按音域自适应（见 `docs/development/research/20260913-score-render-diagnosis.md`）：
+ * 固定常量在原实现里造成两类错误——最高音需要的上方空间超过 `STAFF_TOP_Y` 时**音符被裁到
+ * SVG 之外**（实测某曲高音谱表最高音 C7 落在 y=-5），以及相邻谱表净空不足时**两谱表内容
+ * 互相重叠**（实测重叠 17~42px）。因此间距与留白改为按实测音域计算，下列常量为下限。
+ */
+/** 五线谱线间距（px），与 VexFlow 默认一致；5px = 1 个音级 */
+const LINE_SPACE = 10
+/** 乐谱内容与相邻谱表/画布边缘之间的最小留白（音级） */
+const CONTENT_MARGIN = 1
+/** 谱表间基础净空（音级）：设计约定两轨间至少 6 个线间距 */
+const MIN_STAFF_GAP = 6
+/** 系统上方最小留白（px） */
+const MIN_TOP_PAD = 10
+/** 系统左侧起始留白（px），原有实现里的 10 */
+const SYSTEM_LEFT_PAD = 10
+/** 每拍至少占用的宽度（px）：时值下限，保证短小节放得下内容 */
+const MIN_WIDTH_PER_BEAT = 26
+/** 每拍额外预留的横向余量（px）：容符杠、临时记号与谱号/拍号分摊 */
+const MEASURE_PREFIX_ALLOWANCE = 10
+/** 每个符头至少占用的横向宽度（px）：换行与音符区下限都用它，音符才不会相碰 */
+const MIN_HEAD_SPACING = 13
+/** 小节音符区的绝对最小宽度（px） */
+const MIN_MEASURE_PITCH = 40
+/**
+ * 系统下方最小留白（px）。需容下五线之下的加线：下加一线（1 个音级）的符头下缘
+ * 距五线下沿约 15px，故取 20 而非 10，否则最低音会被裁掉。
+ */
+const MIN_BOTTOM_PAD = 20
+/** 音名 → 八度内自然音级序号（C=0…B=6） */
+const LETTER_STEP: Record<string, number> = { C: 0, D: 1, E: 2, F: 3, G: 4, A: 5, B: 6 }
+/** 音级（pitch class）→ 拼写音名 */
+const PITCH_LETTER = ['C', 'C', 'D', 'D', 'E', 'F', 'F', 'G', 'G', 'A', 'A', 'B']
+/** 音名 → pitch class（自然音） */
+const LETTER_PC: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }
 /** 记谱墨色：近黑微暖（暖象牙纸面上不用纯黑） */
 const INK = '#1c1a17'
 /** 播放高亮：纸面上的加深琥珀（视觉风格指南 §6.5） */
@@ -29,6 +61,10 @@ const ACTIVE_STROKE = '#8a6126'
 /** 谱面滚动区横向留白 + 纸张卡片横向内边距（与 style.css 保持一致） */
 const SCROLL_PAD_X = 16
 const CARD_PAD_X = 24
+
+/** 调号升降音级表（与 quantize.ts 的 SIG_*_PCS 同源语义） */
+const SHARP_PCS = [5, 0, 7, 2, 9, 4, 11] // F C G D A E B
+const FLAT_PCS = [11, 4, 9, 2, 7, 0, 5] // B E A D G C F
 
 /** 调号数量 → VexFlow keySpec */
 const SF_TO_KEYSPEC: Record<number, string> = {
@@ -120,6 +156,10 @@ export class ScoreView implements View {
   private staveByMeasureStaff = new Map<string, Stave>()
   /** 额外符号（谱号/调号/拍号）宽度探针缓存 */
   private prefixDeltaCache = new Map<string, number>()
+  /** 各谱表内容相对五线上下缘的最大外扩（音级），决定留白与谱表间距 */
+  private staffExtents: { up: number; down: number }[] = []
+  /** 每小节的符头总数（两个谱表相加），用于音符区宽度的兜底下限 */
+  private measureHeads: number[] = []
 
   constructor() {
     this.systemsEl = el('div', { class: 'score__systems' })
@@ -142,6 +182,8 @@ export class ScoreView implements View {
     this.score = score
     this.activeIds.clear()
     this.activeSystem = -1
+    this.computeStaffExtents()
+    this.computeMeasureHeads()
     this.emptyEl.style.display = 'none'
     this.scrollEl.style.display = ''
     this.rebuild()
@@ -237,7 +279,23 @@ export class ScoreView implements View {
     if (this.score === null) return
     const width = this.el.clientWidth - SCROLL_PAD_X * 2
     if (width <= 0) return
-    this.measuresPerSystem = Math.max(1, Math.floor((width - CARD_PAD_X * 2) / 210))
+    // 每行放几个小节：按「各小节所需最小宽度」累加，而不是固定条数——
+    // 音符密集的小节（如 4/4 里 16 个八分音符）需要更宽，稀疏小节可以窄，
+    // 这样混排时不会把密集小节压到符头相碰、挤过小节线。
+    // `width` 已经扣掉了滚动区与纸张卡片的横向内边距（见 renderSystem），这里只需再扣
+    // 系统左侧留白。**不可再扣一次 CARD_PAD_X**：那会把可用宽低估 58px，导致行首小节
+    // 宽度算少、整行超出画布（实测系统宽 526px > 画布 520px）。
+    const usable = Math.max(MIN_MEASURE_PITCH, width - SYSTEM_LEFT_PAD)
+    // 每行放几个小节：累加各小节的**硬下限**；放不下就少放几个（而不是压缩它们）
+    let fit = 0
+    let acc = 0
+    for (let i = 0; i < this.score.measures.length; i++) {
+      const need = this.minWidthForMeasure(i)
+      if (acc + need > usable) break
+      acc += need
+      fit++
+    }
+    this.measuresPerSystem = Math.max(1, fit)
     const systemCount = Math.ceil(this.score.measures.length / this.measuresPerSystem)
     this.systemsEl.replaceChildren()
     this.systems = []
@@ -281,9 +339,10 @@ export class ScoreView implements View {
     const endMeasure = Math.min(score.measures.length, startMeasure + this.measuresPerSystem)
     if (startMeasure >= endMeasure) return
 
-    const systemHeight = STAFF_TOP_Y + (staffCount - 1) * STAFF_GAP + BOTTOM_PAD
+    const layout = this.layoutSystem()
+    if (layout.staffTops.length < staffCount) return
     const renderer = new Renderer(sys.div, Renderer.Backends.SVG)
-    renderer.resize(width, systemHeight)
+    renderer.resize(width, layout.height)
     const ctx = renderer.getContext()
     if (ctx === null) return
     // 记谱墨色：近黑微暖
@@ -328,12 +387,61 @@ export class ScoreView implements View {
       columnExtras.push(extra)
     }
     const totalExtra = columnExtras.reduce((a, b) => a + b, 0)
-    // 小节音距：各小节音符区一致的长度
-    const measurePitch = Math.max(120, (width - 30 - totalExtra) / (endMeasure - startMeasure))
+    // 小节宽度**按小节时值（拍数）成正比分配**：4/4 : 3/4 : 3/8 = 4 : 3 : 1.5。
+    //
+    // 关键：先从可用宽里**扣掉谱号/调号/拍号的占宽**，剩下的「音符区预算」再按时值分。
+    // 否则行首小节（谱号+调号+拍号约 109px）的份额大半被符号吃掉，音符区反被压扁
+    // ——实测曾出现行首 4/4 小节音符区 22px、而同样 4/4 的次小节有 104px 的反常情形。
+    const beatsInSystem: number[] = []
+    for (let m = startMeasure; m < endMeasure; m++) beatsInSystem.push(score.measures[m].beatCount)
+    const totalBeats = beatsInSystem.reduce((a, b) => a + b, 0)
+    const noteBudget = Math.max(0, width - SYSTEM_LEFT_PAD - totalExtra)
+    // 各小节音符区的下限（按该小节符头数，防止密集小节被压到音符相碰）
+    const mins = beatsInSystem.map((_, i) =>
+      Math.max(MIN_MEASURE_PITCH, (this.measureHeads[startMeasure + i] ?? 0) * MIN_HEAD_SPACING),
+    )
+    // 按拍数等比分配；低于下限的抬到下限，被抬走的部分从「有富余的小节」里按拍数扣回，
+    // 保证音符区总宽 == 预算（填满整行且不超画布）。
+    const perBeat = noteBudget / Math.max(1e-6, totalBeats)
+    const pitches = beatsInSystem.map((b2, i) => Math.max(mins[i], perBeat * b2))
+    let total = pitches.reduce((a, b2) => a + b2, 0)
+    for (let pass = 0; pass < 6 && Math.abs(total - noteBudget) > 0.5; pass++) {
+      const slack = noteBudget - total
+      // 可调空间：高于下限的小节按拍数分摊这个差额
+      const flexible = pitches.map((p2, i) => Math.max(0, p2 - mins[i]))
+      const flexSum = flexible.reduce((a, b2) => a + b2, 0)
+      if (flexSum <= 0.5) break
+      for (let i = 0; i < pitches.length; i++) {
+        pitches[i] = Math.max(mins[i], pitches[i] + (slack * flexible[i]) / flexSum)
+      }
+      total = pitches.reduce((a, b2) => a + b2, 0)
+    }
+    // 装配列，并**硬性保证不超画布**：若音符区总宽仍超出「画布 - 左留白 - 额外符号」，
+    // 先把超出量从「高于下限的小节」里按可压缩量扣回（优先保留下限）；若还不够，
+    // 才整体等比缩小。画布外的内容会被 SVG 裁掉，绝不能画出去。
+    const maxPitch = Math.max(0, width - SYSTEM_LEFT_PAD - totalExtra)
+    let overflow = pitches.reduce((a, b2) => a + b2, 0) - maxPitch
+    if (overflow > 0.01) {
+      const slack = pitches.map((p2, i) => Math.max(0, p2 - mins[i]))
+      const slackSum = slack.reduce((a, b2) => a + b2, 0)
+      if (slackSum > 0.01) {
+        const cut = Math.min(overflow, slackSum)
+        for (let i = 0; i < pitches.length; i++) {
+          pitches[i] = Math.max(mins[i], pitches[i] - (cut * slack[i]) / slackSum)
+        }
+        overflow = pitches.reduce((a, b2) => a + b2, 0) - maxPitch
+      }
+      if (overflow > 0.01) {
+        // 连下限都放不下（画布过窄）：整体等比缩小，避免画出画布
+        const totalPitch = pitches.reduce((a, b2) => a + b2, 0)
+        const shrink = maxPitch / Math.max(1e-6, totalPitch)
+        for (let i = 0; i < pitches.length; i++) pitches[i] *= shrink
+      }
+    }
     const columns: { x: number; w: number }[] = []
-    let accX = 10
+    let accX = SYSTEM_LEFT_PAD
     for (let i = 0; i < columnExtras.length; i++) {
-      const w = measurePitch + columnExtras[i]
+      const w = pitches[i] + columnExtras[i]
       columns.push({ x: accX, w })
       accX += w
     }
@@ -354,7 +462,7 @@ export class ScoreView implements View {
       const rows: StaffRow[] = []
 
       for (let si = 0; si < staffCount; si++) {
-        const stave = new Stave(x, STAFF_TOP_Y + si * STAFF_GAP, staveW)
+        const stave = new Stave(x, layout.staffTops[si], staveW)
         stave.setContext(ctx)
         if (isSystemStart) {
           stave.addClef(score.staffs[si].clef)
@@ -516,6 +624,105 @@ export class ScoreView implements View {
     return mx
   }
 
+  /** 音高 → 自然音级序号（C4 = 28），与 VexFlow 的纵向定位一致 */
+  private pitchStep(pitch: number): number {
+    return (Math.floor(pitch / 12) - 1) * 7 + LETTER_STEP[PITCH_LETTER[pitch % 12]]
+  }
+
+  /** 某谱表相对五线上下缘的内容外扩（音级）；正数表示越出五线 */
+  private staffProtrusions(staffIndex: number): { up: number; down: number } {
+    const score = this.score
+    if (score === null) return { up: 0, down: 0 }
+    const clef = score.staffs[staffIndex]?.clef ?? 'treble'
+    // 五线之上/之下的第一个越界音级：treble F5=38 / E4=30，bass A3=25 / G2=17
+    const firstAbove = clef === 'treble' ? 38 : 25
+    const firstBelow = clef === 'treble' ? 30 : 17
+    let up = 0
+    let down = 0
+    for (const ev of score.events) {
+      if (ev.rest || ev.staffIndex !== staffIndex) continue
+      for (const k of ev.keys) {
+        const step = this.pitchStep(LETTER_PC[k.letter] + k.octave * 12)
+        up = Math.max(up, step - firstAbove + 1)
+        down = Math.max(down, firstBelow - step + 1)
+      }
+    }
+    return { up, down }
+  }
+
+  /** 按全曲音域计算各谱表内容外扩，供系统高度与间距使用 */
+  private computeStaffExtents(): void {
+    const count = this.score?.staffs.length ?? 0
+    this.staffExtents = Array.from({ length: count }, (_, si) => this.staffProtrusions(si))
+  }
+
+  /** 每小节的符头总数（两个谱表相加），用于音符区宽度的兜底下限 */
+  private computeMeasureHeads(): void {
+    const score = this.score
+    if (score === null) {
+      this.measureHeads = []
+      return
+    }
+    this.measureHeads = score.measures.map(() => 0)
+    for (const ev of score.events) {
+      if (ev.rest) continue
+      this.measureHeads[ev.measureIndex] =
+        (this.measureHeads[ev.measureIndex] ?? 0) + ev.pieces.length
+    }
+  }
+
+  /**
+   * 拟合「每行放几个小节」时用的单小节宽度估计（px）。
+   *
+   * 只按时值给（`(MIN_WIDTH_PER_BEAT + MEASURE_PREFIX_ALLOWANCE) × 拍数`），
+   * **不掺入谱号/调号/拍号的实测占宽**：那些占宽由渲染时的 `columnExtras` 精确处理，
+   * 而参与拟合只会把估计抬高、把每行小节数压得过少（实测曾因此退化到一行一个小节）。
+   * 真正的宽度比例由时值决定（见 renderSystem），这里只负责给出换行依据。
+   */
+  private minWidthForMeasure(index: number): number {
+    const beats = this.score?.measures[index]?.beatCount ?? 4
+    // 时值下限（短小节不会因为音符少而被压得放不下拍号等符号）
+    const byBeats = MIN_WIDTH_PER_BEAT * beats
+    // 密度下限：符头数 × 每符头最小宽度（密集小节不能只靠时值，否则一行塞太多）
+    const byHeads = (this.measureHeads[index] ?? 0) * MIN_HEAD_SPACING
+    return Math.max(byBeats, byHeads) + MEASURE_PREFIX_ALLOWANCE * beats
+  }
+
+  /**
+   * 按音域计算各谱表原点 y 与系统总高。
+   * 相邻谱表净空 = 上谱表下探 + 下谱表上探 + 两侧留白（至少 `MIN_STAFF_GAP` 个线间距）；
+   * 顶部留白按首谱表上探量给足，避免高音被裁到画布之外。
+   */
+  private layoutSystem(): { staffTops: number[]; height: number } {
+    const extents = this.staffExtents
+    if (extents.length === 0) return { staffTops: [], height: 0 }
+    const tops: number[] = [0]
+    for (let i = 1; i < extents.length; i++) {
+      const clearance = extents[i - 1].down + extents[i].up + CONTENT_MARGIN * 2
+      tops.push(tops[i - 1] + LINE_SPACE * Math.max(MIN_STAFF_GAP, clearance))
+    }
+    const headroom = Math.max(MIN_TOP_PAD, CONTENT_MARGIN * LINE_SPACE + LINE_SPACE * extents[0].up)
+    const shifted = tops.map((t) => t + headroom)
+    // 系统高 = 末谱表上缘 + 五线高 + 该谱表下探 + 底部留白
+    const last = shifted[shifted.length - 1]
+    const height =
+      last + LINE_SPACE * 4 + LINE_SPACE * extents[extents.length - 1].down + MIN_BOTTOM_PAD
+    return { staffTops: shifted, height }
+  }
+
+  /**
+   * 该小节调号对某个音名自带的升降记号（'#'/'b'/'n'/''）。
+   * 用于判断拼写出的记号是否与被调号覆盖——覆盖了就不必再画显式记号。
+   */
+  private measureAccidental(key: ScoreKey, measure: Measure): '' | '#' | 'b' | 'n' {
+    const natural = LETTER_PC[key.letter] ?? 0
+    const sharpSet = SHARP_PCS.slice(0, Math.max(0, measure.keysig.sf))
+    const flatSet = FLAT_PCS.slice(0, Math.max(0, -measure.keysig.sf))
+    if (sharpSet.includes(natural)) return '#'
+    if (flatSet.includes(natural)) return 'b'
+    return ''
+  }
+
   private keySpec(keysig: { sf: number; mi: 0 | 1 }): string {
     // 一律用关系大调名输出：VexFlow 的小调名按其自身调号定义（'Bbm' = 5 降），
     // 与本项目「sf = 关系大调升降号数量」的语义不同，拼上 'm' 会画错调号
@@ -594,7 +801,8 @@ export class ScoreView implements View {
         }
         if (i === 0) {
           ev.keys.forEach((k, idx) => {
-            if (k.accidental !== '') {
+            // 调号已覆盖的音不再重复画显式记号（标准记谱）；只有真正需要时才挂
+            if (k.accidental !== '' && k.accidental !== this.measureAccidental(k, measure)) {
               note.addModifier(new Accidental(k.accidental), idx)
             }
           })
@@ -653,11 +861,15 @@ export class ScoreView implements View {
       groupBeat = -1
     }
     for (const pm of piecesMeta) {
-      if (!this.isBeamable(pm.note) || pm.continuation) {
+      if (!this.isBeamable(pm.note)) {
         flush()
         continue
       }
       const bi = beatIndex(pm.beatOffset)
+      // 延音线连接的片段（continuation）**仍然参与**符杠：量化常把一个八分音符写成
+      // 「八分+八分（延音线）」两段，若把 continuation 一律当分组边界，每个音都会
+      // 单独成组、凑不满 2 个而丢失符杠（实测 16 个八分音符只剩 1 组符杠）。
+      // 只有它落到别的拍组里才断开——那样本来就是跨拍的连线，不该连符杠。
       if (group.length > 0 && bi !== groupBeat) flush()
       group.push(pm.note)
       groupBeat = bi

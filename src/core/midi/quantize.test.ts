@@ -50,16 +50,47 @@ describe('spellPitch', () => {
     expect(spellPitch(58, 0)).toEqual({ letter: 'A', accidental: '#', octave: 3 })
   })
 
-  it('G 大调：调号内升音无记号，F 还原记 n', () => {
-    expect(spellPitch(66, 1)).toEqual({ letter: 'F', accidental: '', octave: 4 }) // F#
+  it('G 大调：调号内升音带升号，F 还原记 n', () => {
+    expect(spellPitch(66, 1)).toEqual({ letter: 'F', accidental: '#', octave: 4 }) // F#
     expect(spellPitch(65, 1)).toEqual({ letter: 'F', accidental: 'n', octave: 4 }) // F 还原
     expect(spellPitch(67, 1)).toEqual({ letter: 'G', accidental: '', octave: 4 })
   })
 
   it('F 大调：降号拼写', () => {
-    expect(spellPitch(58, -1)).toEqual({ letter: 'B', accidental: '', octave: 3 }) // Bb
+    expect(spellPitch(58, -1)).toEqual({ letter: 'B', accidental: 'b', octave: 3 }) // Bb
     expect(spellPitch(59, -1)).toEqual({ letter: 'B', accidental: 'n', octave: 3 }) // B 还原
     expect(spellPitch(61, -1)).toEqual({ letter: 'D', accidental: 'b', octave: 4 }) // Db
+  })
+
+  // 回归：调号内的升降音曾被记成还原音（只返回字母、不带记号），是差半音的实际错误。
+  // 见 docs/development/research/20260913-score-render-diagnosis.md §8
+  it('回归：调号内升降音必须带升降号，不能被记成还原音', () => {
+    // 两个降号：Bb、Eb 属于调号
+    expect(spellPitch(70, -2)).toEqual({ letter: 'B', accidental: 'b', octave: 4 }) // Bb4
+    expect(spellPitch(82, -2)).toEqual({ letter: 'B', accidental: 'b', octave: 5 }) // Bb5
+    expect(spellPitch(63, -2)).toEqual({ letter: 'E', accidental: 'b', octave: 4 }) // Eb4
+    // 还原音必须显式写还原记号，否则会被按调号奏成升降音
+    expect(spellPitch(71, -2)).toEqual({ letter: 'B', accidental: 'n', octave: 4 })
+    expect(spellPitch(64, -2)).toEqual({ letter: 'E', accidental: 'n', octave: 4 })
+    // 升号调同理
+    expect(spellPitch(66, 2)).toEqual({ letter: 'F', accidental: '#', octave: 4 })
+    expect(spellPitch(61, 2)).toEqual({ letter: 'C', accidental: '#', octave: 4 })
+  })
+
+  it('回归：拼写出的音名必须还原为原音高（全调号 × 全音高往返）', () => {
+    const pcOf = (k: { letter: string; accidental: string; octave: number }): number => {
+      const L: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }
+      const acc = k.accidental === '#' ? 1 : k.accidental === 'b' ? -1 : 0
+      return (L[k.letter] + acc + 12) % 12
+    }
+    for (let sf = -7; sf <= 7; sf++) {
+      for (let pitch = 21; pitch <= 108; pitch++) {
+        const k = spellPitch(pitch, sf)
+        expect(pcOf(k), `sf=${sf} pitch=${pitch} → ${k.letter}${k.accidental}${k.octave}`).toBe(
+          pitch % 12,
+        )
+      }
+    }
   })
 })
 
@@ -218,10 +249,10 @@ describe('quantizeToScore', () => {
     const score = quantizeToScore(song)
     expect(score.measures[0].keysig.sf).toBe(-2)
     expect(score.displayKeysig.sf).toBe(-2)
-    // Bb 在 -2 调号下拼写为 B 无记号
+    // Bb 在 -2 调号下拼写为 B + 降号（音高必须能被还原出来）
     const bb = score.events.find((e) => !e.rest && e.keys[0].letter === 'B')
     expect(bb).toBeDefined()
-    expect(bb!.keys[0].accidental).toBe('')
+    expect(bb!.keys[0].accidental).toBe('b')
   })
 
   it('估计与 meta 冲突：meta 说 C、内容却是 G 小调 → 估计覆盖（高置信度）', () => {
@@ -314,5 +345,133 @@ describe('decomposeBeats（附点）', () => {
 
   it('0.25 拍仍落十六分', () => {
     expect(decomposeBeats(0.5, 0.25, bounds44)).toEqual([{ beatOffset: 0.5, durationBeats: 0.25 }])
+  })
+})
+
+describe('时值规整：连奏合并与踏板不越界', () => {
+  it('同一音被写成「note-off + 紧邻 note-on」两段 → 合并为一个音', () => {
+    const song = makeSong([
+      { pitch: 79, start: 0, end: 0.2354 },
+      { pitch: 79, start: 0.25, end: 0.4854 },
+    ])
+    const notes = quantizeToScore(song).events.filter((e) => !e.rest)
+    expect(notes).toHaveLength(1)
+    const total = notes[0].pieces.reduce((s, p) => s + p.durationBeats, 0)
+    expect(total).toBe(0.5)
+  })
+
+  it('有明确断口的同音反复（断奏）→ 不合并', () => {
+    const song = makeSong([
+      { pitch: 60, start: 0, end: 0.5 },
+      { pitch: 60, start: 1, end: 1.5 },
+    ])
+    expect(quantizeToScore(song).events.filter((e) => !e.rest)).toHaveLength(2)
+  })
+
+  it('音高不同 → 不合并', () => {
+    const song = makeSong([
+      { pitch: 60, start: 0, end: 0.2354 },
+      { pitch: 62, start: 0.25, end: 0.4854 },
+    ])
+    expect(quantizeToScore(song).events.filter((e) => !e.rest)).toHaveLength(2)
+  })
+
+  it('不同轨道的同音不合并', () => {
+    const song = makeSong([
+      { pitch: 60, start: 0, end: 0.2354, trackIndex: 0 },
+      { pitch: 60, start: 0.25, end: 0.4854, trackIndex: 1 },
+    ])
+    expect(quantizeToScore(song).staffs).toHaveLength(2)
+    expect(quantizeToScore(song).events.filter((e) => !e.rest)).toHaveLength(2)
+  })
+
+  // 回归：踏板把每个音都延到踏板抬起，会造出源数据里不存在的重叠，
+  // 使干净的八分音符序列被压成碎片、音高序列错乱（见调查报告 §8）。
+  it('踏板延音不得越过同轨的下一个起音', () => {
+    const song = makeSong(
+      [
+        { pitch: 60, start: 0, end: 0.2 },
+        { pitch: 62, start: 0.5, end: 0.7 },
+        { pitch: 64, start: 1, end: 1.2 },
+      ],
+      {
+        pedalEvents: [
+          { time: 0, controller: 64, value: 127, trackIndex: 0, channel: 0 },
+          { time: 3, controller: 64, value: 0, trackIndex: 0, channel: 0 },
+        ],
+      },
+    )
+    const notes = quantizeToScore(song)
+      .events.filter((e) => !e.rest)
+      .sort((a, b) => a.beatOffset - b.beatOffset)
+    expect(notes).toHaveLength(3)
+    // 每个音都不得延到「同轨下一个起音」之后（最后一个音没有后继，可被踏板延长）
+    for (let i = 0; i < notes.length - 1; i++) {
+      const end = notes[i].beatOffset + notes[i].pieces.reduce((s, p) => s + p.durationBeats, 0)
+      expect(end, `第 ${i + 1} 个音越过下一个起音`).toBeLessThanOrEqual(notes[i + 1].beatOffset)
+    }
+  })
+
+  it('真正的持续低音（后续起音都在它之后）仍被踏板延长', () => {
+    const song = makeSong(
+      [
+        { pitch: 60, start: 0, end: 1 },
+        { pitch: 72, start: 1.5, end: 1.7 },
+      ],
+      {
+        pedalEvents: [
+          { time: 0, controller: 64, value: 127, trackIndex: 0, channel: 0 },
+          { time: 4, controller: 64, value: 0, trackIndex: 0, channel: 0 },
+        ],
+      },
+    )
+    const low = quantizeToScore(song).events.filter((e) => !e.rest && e.keys[0].letter === 'C')[0]
+    const total = low.pieces.reduce((s, p) => s + p.durationBeats, 0)
+    expect(total).toBeGreaterThan(1)
+    expect(total).toBeLessThanOrEqual(1.5)
+  })
+})
+
+describe('符杠分组的输入形态（score-view 按拍分组的前提）', () => {
+  // 回归背景：量化常把一个八分音符写成「八分 + 八分（延音线）」两段。若渲染端把这些
+  // 延音线片段当成符杠分组边界，每个音都会单独成组而丢掉符杠（实测 16 个八分音符
+  // 只剩 1 组符杠、11 个独立符尾）。这里把该形态钉住，避免上游悄悄改成别的样子。
+  it('连奏断音合并后，成对的八分音符各为一个 0.5 拍片段（可直接按拍连符杠）', () => {
+    const song = makeSong([
+      { pitch: 79, start: 0, end: 0.2354 },
+      { pitch: 79, start: 0.25, end: 0.4854 },
+      { pitch: 81, start: 0.5, end: 0.7354 },
+      { pitch: 81, start: 0.75, end: 0.9854 },
+    ])
+    const notes = quantizeToScore(song)
+      .events.filter((e) => !e.rest)
+      .sort((a, b) => a.beatOffset - b.beatOffset)
+    expect(notes).toHaveLength(2)
+    // 每个音是一个 0.5 拍（八分）片段，起于 0 / 0.5 拍
+    expect(notes.map((n) => n.beatOffset)).toEqual([0, 0.5])
+    expect(notes.map((n) => n.pieces.map((p) => p.durationBeats))).toEqual([[0.5], [0.5]])
+  })
+
+  it('同一拍内的多个片段落在同一个拍组（跨拍的片段才分离）', () => {
+    const bounds = beatBounds(4, 4)
+    const beatIndexOf = (off: number): number => {
+      let idx = 0
+      for (let i = 0; i < bounds.length; i++) if (bounds[i] <= off + 1e-6) idx = i
+      return idx
+    }
+    // 同拍内的两个 0.25 片段 → 同一拍组（可以连符杠）
+    const inBeat = makeSong([
+      { pitch: 79, start: 0, end: 0.2354 },
+      { pitch: 79, start: 0.25, end: 0.4854 },
+    ])
+    const a = quantizeToScore(inBeat).events.find((e) => !e.rest)!
+    expect(new Set(a.pieces.map((p) => beatIndexOf(p.beatOffset))).size).toBe(1)
+
+    // 跨拍的音（0 → 1.5）：起点在第 0 拍组、终点已进入第 1 拍组
+    const acrossBeat = makeSong([{ pitch: 72, start: 0, end: 1.5 }])
+    const b2 = quantizeToScore(acrossBeat).events.find((e) => !e.rest)!
+    const last = b2.pieces[b2.pieces.length - 1]
+    expect(beatIndexOf(b2.beatOffset)).toBe(0)
+    expect(beatIndexOf(last.beatOffset + last.durationBeats - 1e-6)).toBeGreaterThan(0)
   })
 })

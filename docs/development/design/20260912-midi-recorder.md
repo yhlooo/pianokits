@@ -1,7 +1,8 @@
 # 设计：MIDI 录音工具（`/midi-recorder`）
 
 - 日期：2026-09-12
-- 状态：**正式生效（2026-09-12 实现）**
+- 状态：**正式生效（2026-09-12 实现；2026-09-13 由
+  `20260913-recorder-pedals.md` 扩展：踏板（CC64/66/67）的录制 / 回放 / 导出与底部三条踏板轨）**
 - 关联参考：`docs/development/reference/midi/format-and-libraries.md`（§1 SMF 格式要点、§2.1 @tonejs/midi 的读写）
 - 前置设计：
   - `docs/development/design/20260905-tool-routing.md`（工具页 = `/{工具 id}`，本工具即 `/midi-recorder`）
@@ -16,24 +17,25 @@
 
 用户原话拆解与落地口径：
 
-| #   | 需求                                                                                                                             | 落地口径                                                                                                                                   |
-| --- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| R1  | 新增工具「录音」，顶部菜单栏出现按钮，页面 URI `/midi-recorder`                                                                  | 工具注册表新增 `{ id: 'midi-recorder', name: '录音' }`；路径由既有路由机制从 `id` 生成（§3.1）                                             |
-| R2  | 录的是 MIDI 信号而非麦克风声音，产出 `.mid` 文件可下载                                                                           | 采集 Web MIDI 的 Note On/Off（`MidiConnection.onNote`），导出 SMF 字节（§3.6）                                                             |
-| R3  | 界面中央是音轨；开始录制后音轨向左移动；录制/播放线在中间                                                                        | 音轨 = 钢琴卷帘画布；线固定在音轨区水平中心，时间轴 `position` 前进 → 内容左移（§3.4）                                                     |
-| R4  | 识别到音符后在录制线上生成条：长 = 时值、颜色深浅 = 力度、高 = 音高，一格半音                                                    | 音符条纵向占一行（半音行）、横向跨度 = `[start, end]`、填充透明度随力度（1~~127 → 0.30~~1.00）                                             |
-| R5  | 音轨最左标注 C4 D4 E4 等音高；每个音高有浅横线分隔                                                                               | 左缘 54px 音名列（白键音名常显、黑键音名行高 ≥12px 时同标）；每行一条浅横线、八度分界（C）更亮（§3.4）                                     |
-| R6  | 音轨下方居中 5 个按钮：播放 ▶、录制 ●、结束 ■、保存（软盘）、下载 ⬇                                                              | 控制行居中，顺序即此；结束/保存/下载在音轨为空时禁用（§3.5）                                                                               |
-| R7  | 播放和录制在开始后变为暂停按钮                                                                                                   | 播放中显示 ⏸（`mode === 'playing'`）、录制中显示 ⏸（`mode === 'recording'`），再点暂停                                                     |
-| R8  | 结束表示清空音轨，有内容才能点，需二次确认「该操作将清空音轨中记录的数据，是否继续」                                             | 确认弹窗文案逐字采用；确认后清空、位置归零（§3.5）                                                                                         |
-| R9  | 下载弹框输入文件名，默认 `yyyyMMdd-hhmmss.mid`                                                                                   | 文件名弹窗（默认值取当前本地时间）；未写 `.mid` 时自动补（§3.5）                                                                           |
-| R10 | 保存到播放器的本地存储，弹框输入文件名，默认 `yyyyMMdd-hhmmss`                                                                   | 编码为 `.mid` 后写入「播放 / 练习」工具同一个 IndexedDB 文件库（`files`），切到播放器「音乐库」即可见（§3.5）                              |
-| R11 | 左右拖动音轨移动播放/录制位置；线在中间；开始播放/录制从线位置起                                                                 | 拖动改变 `position`（内容跟手）；播放指针按 `position` 重定位（§3.3）                                                                      |
-| R12 | 录制/播放期间拖动：拖动后继续，但拖动期间不录制/不播放                                                                           | 拖动开始挂起（止音、停表、录制中的按键就地收尾），松手后从新位置继续（§3.3）                                                               |
-| R13 | 必须连接 MIDI 键盘才可用；未检测到则播放/录制不可点击，Tips 提示「请先连接 MIDI 键盘」                                           | 播放/录制按钮以 `MidiConnection.status === 'connected'` 为禁用条件；悬停/点击禁用按钮弹出 Tips（§3.4）                                     |
-| R14 | 播放通过连接的 MIDI 键盘，本机不播放                                                                                             | 回放只走 `MidiOutputSink` → `MIDIOutput.send`；工具内不创建 AudioContext、不加载采样                                                       |
-| R15 | 音轨上方计时器，`00:00` 格式且**秒带两位小数**（如 `23:34.99`），超过 60 分钟继续累加（99:23.45、102:23.45）                     | 新增 `formatClock`（分补零到 2 位、以百分秒向下取整、不折算成小时），显示 `position`；播放器进度条的 `formatTime` 保持整秒原样             |
-| R16 | 录制用**覆盖录制**：开始录制后录制线扫过的内容变更为新录制的音符、抹除之前的信息；线没到的位置不抹除，音符被扫过一半就只抹掉一半 | 一次录制 = 一次"扫过"（pass）：按 `[passStart, 线位置]` 擦除旧内容（不分音高，跨边界音符裁掉被扫到的部分），新音符写进这一段（§3.2、§3.3） |
+| #   | 需求                                                                                                                             | 落地口径                                                                                                                                                       |
+| --- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R1  | 新增工具「录音」，顶部菜单栏出现按钮，页面 URI `/midi-recorder`                                                                  | 工具注册表新增 `{ id: 'midi-recorder', name: '录音' }`；路径由既有路由机制从 `id` 生成（§3.1）                                                                 |
+| R2  | 录的是 MIDI 信号而非麦克风声音，产出 `.mid` 文件可下载                                                                           | 采集 Web MIDI 的 Note On/Off（`MidiConnection.onNote`），导出 SMF 字节（§3.6）                                                                                 |
+| R3  | 界面中央是音轨；开始录制后音轨向左移动；录制/播放线在中间                                                                        | 音轨 = 钢琴卷帘画布；线固定在音轨区水平中心，时间轴 `position` 前进 → 内容左移（§3.4）                                                                         |
+| R4  | 识别到音符后在录制线上生成条：长 = 时值、颜色深浅 = 力度、高 = 音高，一格半音                                                    | 音符条纵向占一行（半音行）、横向跨度 = `[start, end]`、填充透明度随力度（1~~127 → 0.30~~1.00）                                                                 |
+| R5  | 音轨最左标注 C4 D4 E4 等音高；每个音高有浅横线分隔                                                                               | 左缘 54px 音名列（白键音名常显、黑键音名行高 ≥12px 时同标）；每行一条浅横线、八度分界（C）更亮（§3.4）                                                         |
+| R6  | 音轨下方居中 5 个按钮：播放 ▶、录制 ●、结束 ■、保存（软盘）、下载 ⬇                                                              | 控制行居中，顺序即此；结束/保存/下载在音轨为空时禁用（§3.5）                                                                                                   |
+| R7  | 播放和录制在开始后变为暂停按钮                                                                                                   | 播放中显示 ⏸（`mode === 'playing'`）、录制中显示 ⏸（`mode === 'recording'`），再点暂停                                                                         |
+| R8  | 结束表示清空音轨，有内容才能点，需二次确认「该操作将清空音轨中记录的数据，是否继续」                                             | 确认弹窗文案逐字采用；确认后清空、位置归零（§3.5）                                                                                                             |
+| R9  | 下载弹框输入文件名，默认 `yyyyMMdd-hhmmss.mid`                                                                                   | 文件名弹窗（默认值取当前本地时间）；未写 `.mid` 时自动补（§3.5）                                                                                               |
+| R10 | 保存到播放器的本地存储，弹框输入文件名，默认 `yyyyMMdd-hhmmss`                                                                   | 编码为 `.mid` 后写入「播放 / 练习」工具同一个 IndexedDB 文件库（`files`），切到播放器「音乐库」即可见（§3.5）                                                  |
+| R11 | 左右拖动音轨移动播放/录制位置；线在中间；开始播放/录制从线位置起                                                                 | 拖动改变 `position`（内容跟手）；播放指针按 `position` 重定位（§3.3）                                                                                          |
+| R12 | 录制/播放期间拖动：拖动后继续，但拖动期间不录制/不播放                                                                           | 拖动开始挂起（止音、停表、录制中的按键就地收尾），松手后从新位置继续（§3.3）                                                                                   |
+| R13 | 必须连接 MIDI 键盘才可用；未检测到则播放/录制不可点击，Tips 提示「请先连接 MIDI 键盘」                                           | 播放/录制按钮以 `MidiConnection.status === 'connected'` 为禁用条件；悬停/点击禁用按钮弹出 Tips（§3.4）                                                         |
+| R14 | 播放通过连接的 MIDI 键盘，本机不播放                                                                                             | 回放只走 `MidiOutputSink` → `MIDIOutput.send`；工具内不创建 AudioContext、不加载采样                                                                           |
+| R15 | 音轨上方计时器，`00:00` 格式且**秒带两位小数**（如 `23:34.99`），超过 60 分钟继续累加（99:23.45、102:23.45）                     | 新增 `formatClock`（分补零到 2 位、以百分秒向下取整、不折算成小时），显示 `position`；播放器进度条的 `formatTime` 保持整秒原样                                 |
+| R16 | 录制用**覆盖录制**：开始录制后录制线扫过的内容变更为新录制的音符、抹除之前的信息；线没到的位置不抹除，音符被扫过一半就只抹掉一半 | 一次录制 = 一次"扫过"（pass）：按 `[passStart, 线位置]` 擦除旧内容（不分音高，跨边界音符裁掉被扫到的部分），新音符写进这一段（§3.2、§3.3）                     |
+| R17 | （2026-09-13 追加）踏板也要录、回放/导出要带踏板、音轨底部单独三行表示三个踏板                                                   | **`20260913-recorder-pedals.md`**：CC64/66/67 按"踩下区间"与音符同一套 pass 模型记录与擦除；回放排 CC、导出写 CC；视图底部固定三条踏板轨（弱音/选择延音/延音） |
 
 ## 2. 关键决策（先说答案）
 
@@ -57,7 +59,8 @@
   （避免叠音），因此按键必须**回送**（`echoNote`）才听得见——与播放器练习模式同一做法；
   录音采集的同时回送，弹奏者可听到自己弹的音，电脑端全程静默（R14）。
 - **D7 音轨显示钢琴全键盘 88 键（A0~~C8，MIDI 21~~108）**（2026-09-12 用户口径修订：88 键都要能看见）：
-  88 行等高排布、行高 = 画布高 / 88（900px 窗口下约 8px/行），保证"一格一个半音"的网格稳定，
+  88 行等高排布、行高 = **音域区高度** / 88（音域区 = 画布高 − 底部踏板区 43px；
+  900px 窗口下约 8px/行），保证"一格一个半音"的网格稳定，
   不做纵向滚动/自动移位；只有 88 键之外的 MIDI 音（0~~20、109~~127）不画，但仍会被录制与导出。
   行高变密后音名字号随行高缩放（7~11px），88 键时只标白键音名以免上下行重叠。
 - **D8 导出为 SMF 用既有依赖 `@tonejs/midi` 的编码器**（`Midi#toArray()`），与 `parse.ts` 同一库、天然可往返；
@@ -79,8 +82,9 @@
 src/tools.ts                  ← 注册工具 { id: 'midi-recorder', name: '录音' }（顶栏页签 + 路由 /midi-recorder）
 src/recorder-app.ts           ← 装配：控制器 ↔ 视图、保存/下载/清空三个文件动作、通知胶囊、rAF 循环
 src/core/recorder.ts          ← RecorderController：时间轴走带（时钟/模式/拖动挂起）+ 采集 + 回放调度 + MIDI 连接
-src/core/recorder-model.ts    ← RecordedNote 领域模型 + overlayNote / trackDuration / firstNoteAtOrAfter（纯函数）
-src/core/midi/write.ts        ← writeMidi：RecordedNote[] → SMF 字节（@tonejs/midi 编码）
+src/core/recorder-model.ts    ← RecordedNote / RecordedPedalSegment 领域模型 + overlayNote / eraseRange /
+                                trackDuration / firstNoteAtOrAfter 与踏板版本的纯函数
+src/core/midi/write.ts        ← writeMidi：RecordedNote[] + RecordedPedalSegment[] → SMF 字节（@tonejs/midi 编码）
 src/core/midi/connection.ts   ← （既有）输入接入：自动连接、热插拔、Note/CC 解码
 src/core/midi/output.ts       ← （既有）输出镜像：Local Control 控制、排期 Note On/Off、止音
 src/storage/library.ts        ← （既有）播放器文件库（IndexedDB `files`）：保存目标
@@ -113,6 +117,19 @@ export function eraseRange(notes, from, to): RecordedNote[] // 覆盖擦除 [fro
 export function mergeNotes(a, b): RecordedNote[] // 合并两条有序音轨（保持升序，同 start 按音高）
 export function trackDuration(notes): number // 最后一个音符的结束时刻
 export function firstNoteAtOrAfter(notes, position): number // 回放指针二分定位
+
+// 踏板（2026-09-13 追加，详见 20260913-recorder-pedals.md §3.2）
+export interface RecordedPedalSegment {
+  controller: number // 64 延音 / 66 选择延音 / 67 弱音
+  channel: number // 0~15
+  start: number
+  end: number // 录制中尚未抬起为 Infinity（在 pass/拖动/导出边界收尾）
+  value: number // 踩下值 0~127（半踏板保留）
+}
+export function erasePedalRange(segments, from, to): RecordedPedalSegment[] // 与 eraseRange 同一裁剪内核
+export function mergePedals(a, b): RecordedPedalSegment[]
+export function pedalTrackDuration(segments): number
+export function firstPedalAtOrAfter(segments, position): number // 第一个 end > position（线在区间中途不跳过）
 ```
 
 三者共用同一个 `clipOutside(note, from, to)` 时间裁剪内核：完全在窗口内 → 空；只被切掉头/尾 → 一段；
@@ -129,7 +146,9 @@ export function firstNoteAtOrAfter(notes, position): number // 回放指针二�
 
 状态：`mode`（idle/playing/recording）、`running`（时钟是否推进，拖动挂起时为 false）、
 `position`（线位置）、`_notes`（已提交音轨）、`_passStart`/`_passNotes`（本次覆盖录制的起点与新音符）、
-`held`（录制中按住的键）、`nextIndex`（回放排期指针）。
+`held`（录制中按住的键）、`nextIndex`（回放排期指针）；
+踏板（2026-09-13 追加）：`_pedals`/`_passPedals`/`heldPedals`（已提交 / 本次已收尾 / 未抬起的区间）、
+`pedalDown`（物理踏板状态，始终跟踪）、`nextPedalIndex`（回放指针）。
 时钟注入 `RecorderHost { now(), setInterval, clearInterval }`，生产实现为 `performance.now() / 1000`
 （与 `MIDIOutput.send` 的时间戳同源，见 `core/midi/output.ts` 的换算）。
 
@@ -154,8 +173,13 @@ visibleNotes() = mergeNotes(eraseRange(_notes, _passStart, position), _passNotes
 | `exportNotes()`                       | 保存/下载快照：`visibleNotes()` + 录制中尚未收尾的音符（补到当前线位置；不改走带状态）                   |
 | `pendingNotes()`                      | 录制中尚未收尾的音符（`end` = 当前线位置），供视图把条形画到录制线                                       |
 | `onNote(ev)`                          | 回送到键盘音源（D6）；录制中且未挂起时按 Note On/Off 建/收音符（收尾的音符进 `_passNotes`）              |
+| `onControl(ev)`                       | 踏板 CC：始终 `echoControl` 回送；录制中 ≥64 开区间、<64 收尾（进 `_passPedals`）；非踏板 CC 只回送不录  |
+| `visiblePedals()` / `pendingPedals()` | 踏板版 `visibleNotes()` / `pendingNotes()`（覆盖录制中渐进擦除；未抬起的区间画到录制线）                 |
+| `exportPedals()`                      | 保存/下载快照：`visiblePedals()` + 未抬起区间补到当前线位置                                              |
 
-回放：`tick()` 把 `[pos + 15ms, pos + 100ms]` 窗口内开始的音符经 `MidiOutputSink.scheduleNote` 排入输出
+回放：`tick()` 把 `[pos + 15ms, pos + 100ms]` 窗口内开始的音符经 `MidiOutputSink.scheduleNote` 排入输出；
+踏板区间经 `scheduleControlChange` 排「踩下（录制值）+ 抬起（0）」两条 CC（时间戳各按区间起止，
+线落在区间中途时首个 tick 立即补发踩下）
 （`time = timeAt(note.start)`，通道沿用音符通道；`ScheduledNote` 为此新增可选 `channel` 字段，
 音频引擎忽略该字段）；已结束的音符不补发；`pos >= duration` 时自动暂停。暂停/拖动/清空都调用
 `sink.allNotesOff()`（All Notes Off + All Sound Off，16 通道）避免键盘残留长音。
@@ -167,7 +191,8 @@ visibleNotes() = mergeNotes(eraseRange(_notes, _passStart, position), _passNotes
 - **几何**：音域 MIDI 21（A0）~108（C8）共 88 行；行高 = 画布高 / 88；左侧 54px 音名列；
   横向 64 px/秒（视窗内约 18 秒）；线位于音轨区（画布去掉音名列后）水平中心。
 - **绘制顺序**：背景渐变 → 黑键行底色 → 每行浅横线（C 行更亮）→ 每秒淡竖线（5 秒略亮）→
-  已录音符 → 录制中的音符（亮白描边）→ 录制/播放线 → 音名列与分隔线。
+  已录音符 → 录制中的音符（亮白描边）→ **底部踏板区（三条踏板轨：背景 + 银灰踏板条 +
+  未抬起区间的亮白描边）** → 录制/播放线 → 音名列（含踏板名）与分隔线。
   **音轨内不画任何说明文字**（2026-09-12 用户口径）：提示信息只出现在按钮 Tips 与控件上，
   画面留给音符（此前的"请先连接 MIDI 键盘""按 ● 开始录制…"两处居中提示均已移除）。
   正在发声的音符（线落在时值内）额外描淡白边；录制线红色、播放线琥珀，均带 8px 淡光带。
@@ -208,10 +233,12 @@ visibleNotes() = mergeNotes(eraseRange(_notes, _passStart, position), _passNotes
 
 ### 3.6 SMF 编码（src/core/midi/write.ts）
 
-`writeMidi(notes, { bpm = 120, trackName = 'PianoKits Recording' })`：`new Midi()` → `header.setTempo` →
-按 `channel` 升序分轨（一通道一轨，多通道时轨名 `… Ch{n}`）→ `track.addNote({ midi, time, duration,
-velocity: v/127, noteOffVelocity: 0 })` → `midi.toArray()` → 精确长度的 `ArrayBuffer`。
-音高/力度/通道钳制到合法字节，非正时值丢弃，空数组也写出合法（无音符）文件。
+`writeMidi(notes, pedals = [], { bpm = 120, trackName = 'PianoKits Recording' })`：`new Midi()` →
+`header.setTempo` → 通道集合 = 音符通道 ∪ 踏板通道，按 `channel` 升序分轨（一通道一轨，多通道时
+轨名 `… Ch{n}`）→ `track.addNote({ midi, time, duration, velocity: v/127, noteOffVelocity: 0 })` →
+`track.addCC({ number, value: v/127, time })`（踩下 + 抬起各一条）→ `midi.toArray()` →
+精确长度的 `ArrayBuffer`。音高/力度/通道/控制器钳制到合法字节，非正时值与非有限踏板区间丢弃，
+空数组也写出合法文件。
 
 ## 4. 与既有模块的关系
 
@@ -228,7 +255,9 @@ velocity: v/127, noteOffVelocity: 0 })` → `midi.toArray()` → 精确长度的
 - 不做节拍器、量化（音符时间就是演奏时刻）、速度/拍号编辑（导出固定 120 BPM、4/4）；
 - 不做纵向滚动（88 键一次全显示，D7）、不做多轨/分轨录音（多通道录制合并到同一条音轨显示）；
 - 不做撤销/重做；局部擦除靠**覆盖录制**（把线拖到目标位置重弹，见 D2），整体清空用「结束」；
-- 不在本机播放（R14），也不做键盘音色/音量控制（沿用键盘自身设置）。
+- 不在本机播放（R14），也不做键盘音色/音量控制（沿用键盘自身设置）；
+- （2026-09-13 起 R17 已实现，不再是非目标）三踏板 CC64/66/67 的录制/回放/导出与底部三条踏板轨，
+  见 `20260913-recorder-pedals.md`；半踏板的连续曲线、三踏板之外的 CC 仍不录（该文档 §6）。
 
 ## 6. 验证
 
@@ -240,6 +269,10 @@ velocity: v/127, noteOffVelocity: 0 })` → `midi.toArray()` → 精确长度的
   （`parseMidi` 往返：音高/力度/时间/通道、多通道分轨、力度极值、空输入、钳制）、
   `src/ui/dom.test.ts`（`formatClock` 分补零与超过 60 分钟、`formatFileStamp`）；
 - `pnpm format:check` / `pnpm typecheck` / `pnpm lint` / `pnpm test` / `pnpm build`；
+- 踏板（2026-09-13 追加）：`recorder-model.test.ts`（`erasePedalRange` 的四种裁剪形态 / `mergePedals` /
+  `pedalTrackDuration` / `firstPedalAtOrAfter`）、`recorder.test.ts`（录制建区间、pass 起点带踏板状态、
+  覆盖录制擦除、暂停与拖动就地收尾、回放排期与中途补发、导出快照、`hasContent` 口径、断开清状态）、
+  `write.test.ts`（CC 往返：值/时间/通道、纯踏板轨、非法区间跳过）；
 - 浏览器端（`scripts/probe-recorder.mjs`，Playwright + 注入假 Web MIDI）：页签与 URI、按钮禁用与 Tips
   （悬停/点击禁用按钮）、假键盘发送 Note On/Off 后音符条出现并左移、拖动改变线位置、
   切走再切回音轨与线位置保留、键盘拔出自动暂停、结束二次确认（取消保留 / 确认清空）、

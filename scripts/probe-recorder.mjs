@@ -25,6 +25,23 @@ async function readMidiNotes(path) {
   )
 }
 
+/** 解析 .mid 文件里的三踏板 CC 事件（用项目依赖 @tonejs/midi 复核导出内容） */
+async function readMidiCc(path) {
+  const mod = await import('@tonejs/midi')
+  const Midi = mod.Midi ?? mod.default?.Midi ?? mod.default
+  const midi = new Midi(readFileSync(path))
+  const out = []
+  for (const track of midi.tracks) {
+    for (const [number, changes] of Object.entries(track.controlChanges)) {
+      const cc = Number(number)
+      if (cc !== 64 && cc !== 66 && cc !== 67) continue
+      for (const c of changes)
+        out.push({ controller: cc, value: Math.round(c.value * 127), time: c.time })
+    }
+  }
+  return out.sort((a, b) => a.time - b.time)
+}
+
 /** 注入假 Web MIDI：window.__fakeMidi.emit(bytes) 模拟键盘消息；withInput=false 模拟"已授权但无设备" */
 const FAKE_MIDI = (withInput) => {
   const sent = []
@@ -155,6 +172,11 @@ try {
   }
   await page.screenshot({ path: `${SHOT_DIR}/recorder-1-empty.png` })
 
+  // 踏板：录制前先踩住（pass 起点应补开一段，半踏板值 100 原样保留）；抬起在 E4 之后
+  // （区间够长，才能在画布上与播放线分开采样）；这一段随后会被覆盖录制扫掉
+  await page.evaluate(() => window.__fakeMidi.emit([0xb0, 64, 127]))
+  await page.evaluate(() => window.__fakeMidi.emit([0xb0, 64, 100]))
+
   // 录制一段：C4 长音、E4 短音、G4 和弦、力度差异
   await recordBtn.click()
   await sleep(500)
@@ -164,6 +186,7 @@ try {
   await page.evaluate(() => window.__fakeMidi.emit([0x90, 64, 40])) // E4 弱
   await sleep(250)
   await page.evaluate(() => window.__fakeMidi.emit([0x80, 64, 0]))
+  await page.evaluate(() => window.__fakeMidi.emit([0xb0, 64, 0])) // 踏板抬起
   await page.evaluate(() => window.__fakeMidi.emit([0x90, 67, 127])) // G4 最强
   await page.evaluate(() => window.__fakeMidi.emit([0x90, 72, 90])) // C5 和弦
   await sleep(300)
@@ -199,6 +222,35 @@ try {
   await sleep(120)
   logs.push(`拖动: 拖动前 ${beforeDrag}，拖动中 ${duringDrag}，松手后 ${await timer.textContent()}`)
   if (duringDrag === beforeDrag) problems.push('拖动音轨时线位置应随拖动改变')
+
+  // 底部三条踏板轨（上→下 = 弱音/选择延音/延音）：踩下的延音列应画出银灰条，无数据的弱音列只有背景
+  const laneBrightness = async (index) =>
+    page.evaluate((i) => {
+      const canvas = document.querySelector('.recorder__canvas')
+      const ctx = canvas.getContext('2d')
+      const dpr = window.devicePixelRatio || 1
+      const w = canvas.clientWidth
+      const h = canvas.clientHeight
+      const centerX = 54 + (w - 54) / 2
+      // 踏板区：底部 3×14px + 1px 分隔线（PEDAL_ROW_H / PEDAL_AREA_H）
+      const y = Math.round((h - 43 + 1 + i * 14 + 7) * dpr)
+      let best = { lum: -1, x: 0 }
+      for (let x = 56; x < w - 2; x++) {
+        if (Math.abs(x - centerX) <= 3) continue // 跳过播放线本身（琥珀，每列都亮）
+        const d = ctx.getImageData(Math.round(x * dpr), y, 1, 1).data
+        const lum = 0.2126 * d[0] + 0.7152 * d[1] + 0.0722 * d[2]
+        if (lum > best.lum) best = { lum, x }
+      }
+      return { lum: Math.round(best.lum), x: best.x }
+    }, index)
+  const softLane = await laneBrightness(0)
+  const sustainLane = await laneBrightness(2)
+  logs.push(
+    `踏板轨最亮像素（弱音/延音）: ${JSON.stringify(softLane)} / ${JSON.stringify(sustainLane)}`,
+  )
+  if (sustainLane.lum < softLane.lum + 30 || sustainLane.lum < 70) {
+    problems.push(`延音踏板轨应画出银灰条（弱音轨 ${softLane.lum} / 延音轨 ${sustainLane.lum}）`)
+  }
 
   await recordBtn.click() // 暂停录制
   await sleep(100)
@@ -243,7 +295,10 @@ try {
   }
   await page.screenshot({ path: `${SHOT_DIR}/recorder-3-recorded.png` })
 
-  // 回放：点播放后按钮变暂停、状态行不变、假输出收到 Note On/Off
+  // 回放：点播放后按钮变暂停、状态行不变、假输出收到 Note On/Off 与踏板 CC
+  await page.evaluate(() => {
+    window.__fakeMidi.sent.length = 0
+  })
   await playBtn.click()
   await sleep(500)
   const playing = {
@@ -254,6 +309,13 @@ try {
   logs.push(`回放中: ${JSON.stringify(playing)}，假输出消息数 ${sentDuringPlay}`)
   if (playing.title !== '暂停播放') problems.push('回放中播放按钮应变为暂停')
   if (sentDuringPlay === 0) problems.push('回放应把音符发往 MIDI 输出（键盘音源）')
+  const playbackCc = await page.evaluate(() =>
+    window.__fakeMidi.sent.filter((d) => (d[0] & 0xf0) === 0xb0 && d[1] === 64).map((d) => d[2]),
+  )
+  logs.push(`回放输出 CC64: ${JSON.stringify(playbackCc)}`)
+  if (!playbackCc.some((v) => v >= 64) || !playbackCc.includes(0)) {
+    problems.push('回放应把踏板踩下/抬起（CC64）发往 MIDI 输出')
+  }
   await playBtn.click() // 暂停
   await sleep(100)
 
@@ -285,6 +347,15 @@ try {
   await download.saveAs(downloadPath)
   if (download.suggestedFilename() !== defaultDownloadName) {
     problems.push(`下载文件名应为 ${defaultDownloadName}，实际 ${download.suggestedFilename()}`)
+  }
+  const downloadCc = await readMidiCc(downloadPath)
+  logs.push(
+    `导出踏板事件: ${JSON.stringify(downloadCc.map((e) => [e.controller, e.value, +e.time.toFixed(3)]))}`,
+  )
+  if (downloadCc.length !== 2 || downloadCc[0].value !== 100 || downloadCc[1].value !== 0) {
+    problems.push(
+      `下载的 .mid 应含踏板踩下（值 100）+ 抬起（0），实际 ${JSON.stringify(downloadCc)}`,
+    )
   }
   const downloadNoticeClass = await page
     .locator('.notice')
@@ -421,6 +492,14 @@ try {
   }
   if (afterOverwrite.length > 0 && afterOverwrite.every((n) => n.start > sweep + 0.5)) {
     problems.push('未扫到的旧内容（录制线之后的后半段）应保留，实际全被抹掉了')
+  }
+  // 踏板同样按扫过的范围擦除：被扫掉的那段延音不应再出现在导出里
+  const overwriteCc = await readMidiCc(overwritePath)
+  logs.push(
+    `覆盖录制后导出踏板: ${JSON.stringify(overwriteCc.map((e) => [e.controller, e.value, +e.time.toFixed(3)]))}`,
+  )
+  if (overwriteCc.some((e) => e.time < sweep - 0.15)) {
+    problems.push(`被录制线扫过的位置不该还有踏板事件（扫到 ${sweep.toFixed(2)}s）`)
   }
 
   // 结束：二次确认（文案逐字核对）→ 清空 → 按钮全部禁用、计时器归零
